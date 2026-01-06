@@ -21,6 +21,10 @@ spec:
       labels:
         app: sample-app
         version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "5000"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: sample-app
@@ -28,6 +32,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
+              name: http
               protocol: TCP
           env:
             - name: APP_VERSION

@@ -1,4 +1,6 @@
 import logging
+from typing import Dict, Optional
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -27,3 +29,18 @@ class FailureType(Enum):
     DEPLOYMENT_FAILURE = "deployment_failure"
     HEALTH_CHECK_FAILURE = "health_check_failure"
     TIMEOUT = "timeout"
+
+
+@dataclass
+class DeploymentState:
+    """Deployment state tracking"""
+    deployment_id: str
+    namespace: str
+    app_name: str
+    version: str
+    status: DeploymentStatus
+    previous_version: Optional[str]
+    retry_count: int
+    failure_type: Optional[FailureType]
+    timestamp: float
+    metadata: Dict

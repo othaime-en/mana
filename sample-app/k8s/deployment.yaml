@@ -116,3 +116,14 @@ spec:
                 name: sample-app-service
                 port:
                   number: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sample-app-pdb
+  namespace: production
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: sample-app

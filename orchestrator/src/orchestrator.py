@@ -222,4 +222,87 @@ class SelfHealingOrchestrator:
         except ApiException as e:
             logger.error(f"Error during rollback: {e}")
             return False
+    
+    def handle_deployment_failure(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        failure_type: FailureType
+    ) -> Dict:
+        """
+        Main failure handling logic
+        Decides whether to retry, rollback, or alert
+        """
+        # Get or create deployment state
+        state = self.get_deployment_state(deployment_id)
+        if not state:
+            previous_version = self.get_previous_version(namespace, deployment_name)
+            state = DeploymentState(
+                deployment_id=deployment_id,
+                namespace=namespace,
+                app_name=deployment_name,
+                version=version,
+                status=DeploymentStatus.FAILED,
+                previous_version=previous_version,
+                retry_count=0,
+                failure_type=failure_type,
+                timestamp=time.time(),
+                metadata={}
+            )
         
+        state.retry_count += 1
+        state.failure_type = failure_type
+        
+        # Decision logic
+        if state.retry_count <= self.max_retries:
+            # Retry deployment
+            logger.info(f"Retrying deployment (attempt {state.retry_count}/{self.max_retries})")
+            state.status = DeploymentStatus.IN_PROGRESS
+            self.save_deployment_state(state)
+            
+            return {
+                'action': 'retry',
+                'retry_count': state.retry_count,
+                'message': f'Retrying deployment (attempt {state.retry_count})'
+            }
+        
+        elif state.retry_count > self.rollback_threshold and state.previous_version:
+            # Rollback to previous version
+            logger.warning(f"Max retries exceeded, initiating rollback to {state.previous_version}")
+            state.status = DeploymentStatus.ROLLING_BACK
+            self.save_deployment_state(state)
+            
+            success = self.rollback_deployment(
+                namespace,
+                deployment_name,
+                state.previous_version
+            )
+            
+            if success:
+                state.status = DeploymentStatus.ROLLED_BACK
+                self.save_deployment_state(state)
+                return {
+                    'action': 'rollback',
+                    'previous_version': state.previous_version,
+                    'message': f'Rolled back to version {state.previous_version}'
+                }
+            else:
+                state.status = DeploymentStatus.FAILED
+                self.save_deployment_state(state)
+                return {
+                    'action': 'alert',
+                    'message': 'Rollback failed - manual intervention required'
+                }
+        
+        else:
+            # No previous version or other issues - alert
+            logger.critical(f"Cannot auto-recover deployment {deployment_id}")
+            state.status = DeploymentStatus.FAILED
+            self.save_deployment_state(state)
+            
+            return {
+                'action': 'alert',
+                'message': 'Auto-recovery failed - manual intervention required'
+            }

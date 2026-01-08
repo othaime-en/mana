@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 import uvicorn
 import os
+from orchestrator import (SelfHealingOrchestrator)
 from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
 import logging
 
@@ -40,6 +41,14 @@ active_deployments = Gauge(
 # Mount Prometheus metrics endpoint
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
+
+# Initialize orchestrator
+orchestrator = SelfHealingOrchestrator(
+    redis_host=os.getenv('REDIS_HOST', 'localhost'),
+    redis_port=int(os.getenv('REDIS_PORT', 6379)),
+    max_retries=int(os.getenv('MAX_RETRIES', 3)),
+    rollback_threshold=int(os.getenv('ROLLBACK_THRESHOLD', 2))
+)
 
 # API Endpoints
 @app.get("/")

@@ -1,9 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Dict
 import uvicorn
 import os
-from orchestrator import (SelfHealingOrchestrator)
+from orchestrator import (
+    SelfHealingOrchestrator,
+    FailureType,
+    DeploymentStatus
+)
 from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
 import logging
 
@@ -94,6 +99,76 @@ def root():
 def health():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+
+@app.post("/webhook/deployment")
+async def deployment_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
+    """
+    Webhook endpoint for deployment events from GitHub Actions
+    """
+    logger.info(f"Received deployment webhook: {payload.deployment_id}")
+    
+    try:
+        # Update metrics
+        deployment_counter.labels(
+            namespace=payload.namespace,
+            status=payload.status
+        ).inc()
+        
+        if payload.status == "failed" and payload.failure_type:
+            # Handle failure
+            failure_type = FailureType(payload.failure_type)
+            
+            result = orchestrator.handle_deployment_failure(
+                deployment_id=payload.deployment_id,
+                namespace=payload.namespace,
+                deployment_name=payload.app_name,
+                version=payload.version,
+                failure_type=failure_type
+            )
+            
+            if result['action'] == 'rollback':
+                rollback_counter.labels(
+                    namespace=payload.namespace,
+                    reason=payload.failure_type
+                ).inc()
+            
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "processed",
+                    "deployment_id": payload.deployment_id,
+                    "action_taken": result
+                }
+            )
+        
+        elif payload.status == "success":
+            # Track successful deployment
+            state = orchestrator.get_deployment_state(payload.deployment_id)
+            if state:
+                state.status = DeploymentStatus.SUCCESS
+                orchestrator.save_deployment_state(state)
+            
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "success",
+                    "deployment_id": payload.deployment_id,
+                    "message": "Deployment successful"
+                }
+            )
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "acknowledged",
+                "deployment_id": payload.deployment_id
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

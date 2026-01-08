@@ -1,4 +1,3 @@
-# orchestrator/src/orchestrator.py
 import logging
 import time
 from typing import Dict, List, Optional
@@ -306,3 +305,30 @@ class SelfHealingOrchestrator:
                 'action': 'alert',
                 'message': 'Auto-recovery failed - manual intervention required'
             }
+    
+    def get_deployment_metrics(self, namespace: str, deployment_name: str) -> Dict:
+        """Get deployment metrics for monitoring"""
+        try:
+            deployment = self.k8s_apps.read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace
+            )
+            
+            return {
+                'replicas': deployment.spec.replicas,
+                'ready_replicas': deployment.status.ready_replicas or 0,
+                'available_replicas': deployment.status.available_replicas or 0,
+                'unavailable_replicas': deployment.status.unavailable_replicas or 0,
+                'conditions': [
+                    {
+                        'type': cond.type,
+                        'status': cond.status,
+                        'reason': cond.reason
+                    }
+                    for cond in (deployment.status.conditions or [])
+                ]
+            }
+        except ApiException as e:
+            logger.error(f"Error getting deployment metrics: {e}")
+            return {}
+        

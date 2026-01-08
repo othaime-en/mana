@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import Optional, Dict
 import uvicorn
 import os
 from orchestrator import (SelfHealingOrchestrator)
@@ -49,6 +51,33 @@ orchestrator = SelfHealingOrchestrator(
     max_retries=int(os.getenv('MAX_RETRIES', 3)),
     rollback_threshold=int(os.getenv('ROLLBACK_THRESHOLD', 2))
 )
+
+
+# Request models
+class WebhookPayload(BaseModel):
+    """GitHub Actions webhook payload"""
+    deployment_id: str
+    namespace: str
+    app_name: str
+    version: str
+    status: str
+    failure_type: Optional[str] = None
+    metadata: Optional[Dict] = {}
+
+
+class RollbackRequest(BaseModel):
+    """Manual rollback request"""
+    namespace: str
+    deployment_name: str
+    target_version: str
+
+
+class HealthCheckRequest(BaseModel):
+    """Health check request"""
+    namespace: str
+    deployment_name: str
+    timeout: int = 300
+
 
 # API Endpoints
 @app.get("/")

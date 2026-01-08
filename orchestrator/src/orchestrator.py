@@ -1,3 +1,4 @@
+# orchestrator/src/orchestrator.py
 import logging
 import time
 from typing import Dict, List, Optional
@@ -173,3 +174,52 @@ class SelfHealingOrchestrator:
         
         return None
     
+    def rollback_deployment(
+        self,
+        namespace: str,
+        deployment_name: str,
+        target_version: str
+    ) -> bool:
+        """
+        Rollback deployment to previous version
+        """
+        try:
+            logger.info(f"Rolling back {deployment_name} to version {target_version}")
+            
+            # Read current deployment
+            deployment = self.k8s_apps.read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace
+            )
+            
+            # Update image tag to target version
+            for container in deployment.spec.template.spec.containers:
+                if container.name == deployment_name:
+                    image_parts = container.image.split(':')
+                    container.image = f"{image_parts[0]}:{target_version}"
+            
+            # Update version label
+            deployment.metadata.labels['version'] = target_version
+            deployment.spec.template.metadata.labels['version'] = target_version
+            
+            # Apply changes
+            self.k8s_apps.patch_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace,
+                body=deployment
+            )
+            
+            logger.info(f"Rollback initiated for {deployment_name}")
+            
+            # Wait for rollback to complete
+            if self.check_deployment_health(namespace, deployment_name):
+                logger.info(f"Rollback successful for {deployment_name}")
+                return True
+            else:
+                logger.error(f"Rollback failed for {deployment_name}")
+                return False
+                
+        except ApiException as e:
+            logger.error(f"Error during rollback: {e}")
+            return False
+        

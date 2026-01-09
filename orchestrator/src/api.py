@@ -171,6 +171,64 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/rollback")
+async def manual_rollback(request: RollbackRequest):
+    """
+    Manual rollback endpoint
+    """
+    logger.info(f"Manual rollback requested for {request.deployment_name}")
+    
+    try:
+        success = orchestrator.rollback_deployment(
+            namespace=request.namespace,
+            deployment_name=request.deployment_name,
+            target_version=request.target_version
+        )
+        
+        if success:
+            rollback_counter.labels(
+                namespace=request.namespace,
+                reason='manual'
+            ).inc()
+            
+            return {
+                "status": "success",
+                "message": f"Rolled back to version {request.target_version}"
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Rollback failed"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error during manual rollback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/health-check")
+async def check_health(request: HealthCheckRequest):
+    """
+    Check deployment health endpoint
+    """
+    try:
+        is_healthy = orchestrator.check_deployment_health(
+            namespace=request.namespace,
+            deployment_name=request.deployment_name,
+            timeout=request.timeout
+        )
+        
+        return {
+            "deployment_name": request.deployment_name,
+            "namespace": request.namespace,
+            "healthy": is_healthy
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking health: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(

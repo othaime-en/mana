@@ -1,3 +1,4 @@
+# .github/workflows/ci-cd.yml
 name: Self-Healing CI/CD Pipeline
 
 on:
@@ -175,3 +176,51 @@ jobs:
             \"status\": \"$STATUS\",
             \"failure_type\": \"$FAILURE_TYPE\"
           }"
+
+  deploy-production:
+    name: Deploy to Production
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: http://sample-app.local
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+    
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=./kubeconfig
+    
+    - name: Notify deployment start
+      run: |
+        curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "deployment_id": "${{ needs.build-and-test.outputs.deployment_id }}",
+            "namespace": "production",
+            "app_name": "sample-app",
+            "version": "${{ needs.build-and-test.outputs.version }}",
+            "status": "in_progress"
+          }'
+    
+    - name: Deploy to production
+      id: deploy
+      run: |
+        export KUBECONFIG=./kubeconfig
+        
+        # Update deployment
+        kubectl set image deployment/sample-app \
+          sample-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }} \
+          -n production
+        
+        # Wait for rollout
+        kubectl rollout status deployment/sample-app -n production --timeout=10m

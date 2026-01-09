@@ -54,3 +54,17 @@ jobs:
       run: |
         pytest tests/ -v --cov=src --cov-report=xml
       continue-on-error: false
+    
+    - name: Notify test failure
+      if: failure() && steps.tests.outcome == 'failure'
+      run: |
+        curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "deployment_id": "${{ steps.deployment.outputs.id }}",
+            "namespace": "production",
+            "app_name": "sample-app",
+            "version": "${{ steps.version.outputs.version }}",
+            "status": "failed",
+            "failure_type": "test_failure"
+          }'

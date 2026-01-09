@@ -117,3 +117,61 @@ jobs:
         tags: |
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
           ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+    
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=./kubeconfig
+    
+    - name: Deploy to staging
+      id: deploy
+      run: |
+        export KUBECONFIG=./kubeconfig
+        kubectl set image deployment/sample-app \
+          sample-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }} \
+          -n staging
+        
+        kubectl rollout status deployment/sample-app -n staging --timeout=5m
+    
+    - name: Health check
+      run: |
+        export KUBECONFIG=./kubeconfig
+        sleep 30
+        kubectl get pods -n staging -l app=sample-app
+    
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ steps.deploy.outcome }}" == "success" ]; then
+          STATUS="success"
+          FAILURE_TYPE=""
+        else
+          STATUS="failed"
+          FAILURE_TYPE="deployment_failure"
+        fi
+        
+        curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"deployment_id\": \"${{ needs.build-and-test.outputs.deployment_id }}\",
+            \"namespace\": \"staging\",
+            \"app_name\": \"sample-app\",
+            \"version\": \"${{ needs.build-and-test.outputs.version }}\",
+            \"status\": \"$STATUS\",
+            \"failure_type\": \"$FAILURE_TYPE\"
+          }"

@@ -252,6 +252,19 @@ async def get_deployment(deployment_id: str):
     }
 
 
+@app.get("/metrics/deployment/{namespace}/{deployment_name}")
+async def get_metrics(namespace: str, deployment_name: str):
+    """
+    Get deployment metrics
+    """
+    try:
+        metrics = orchestrator.get_deployment_metrics(namespace, deployment_name)
+        return metrics
+    except Exception as e:
+        logger.error(f"Error getting metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(

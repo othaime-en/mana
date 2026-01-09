@@ -13,3 +13,44 @@ env:
   ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
 
 jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      deployment_id: ${{ steps.deployment.outputs.id }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Generate version
+      id: version
+      run: |
+        VERSION="${GITHUB_SHA::7}-$(date +%s)"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Generated version: $VERSION"
+    
+    - name: Generate deployment ID
+      id: deployment
+      run: |
+        DEPLOYMENT_ID="deploy-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+        echo "id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+        echo "Generated deployment ID: $DEPLOYMENT_ID"
+    
+    - name: Install dependencies
+      working-directory: ./sample-app
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run tests
+      id: tests
+      working-directory: ./sample-app
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml
+      continue-on-error: false

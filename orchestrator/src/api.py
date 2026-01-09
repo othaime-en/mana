@@ -229,6 +229,29 @@ async def check_health(request: HealthCheckRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/deployment/{deployment_id}")
+async def get_deployment(deployment_id: str):
+    """
+    Get deployment state
+    """
+    state = orchestrator.get_deployment_state(deployment_id)
+    
+    if not state:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    
+    return {
+        "deployment_id": state.deployment_id,
+        "namespace": state.namespace,
+        "app_name": state.app_name,
+        "version": state.version,
+        "status": state.status.value,
+        "retry_count": state.retry_count,
+        "failure_type": state.failure_type.value if state.failure_type else None,
+        "timestamp": state.timestamp,
+        "metadata": state.metadata
+    }
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(

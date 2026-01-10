@@ -262,3 +262,44 @@ jobs:
         
         kill $PF_PID
         echo "Smoke tests passed"
+    
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ steps.deploy.outcome }}" == "success" ] && \
+           [ "${{ steps.health.outcome }}" == "success" ] && \
+           [ "${{ steps.smoke.outcome }}" == "success" ]; then
+          STATUS="success"
+          FAILURE_TYPE=""
+        elif [ "${{ steps.health.outcome }}" == "failure" ]; then
+          STATUS="failed"
+          FAILURE_TYPE="health_check_failure"
+        elif [ "${{ steps.deploy.outcome }}" == "failure" ]; then
+          STATUS="failed"
+          FAILURE_TYPE="deployment_failure"
+        else
+          STATUS="failed"
+          FAILURE_TYPE="timeout"
+        fi
+        
+        curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"deployment_id\": \"${{ needs.build-and-test.outputs.deployment_id }}\",
+            \"namespace\": \"production\",
+            \"app_name\": \"sample-app\",
+            \"version\": \"${{ needs.build-and-test.outputs.version }}\",
+            \"status\": \"$STATUS\",
+            \"failure_type\": \"$FAILURE_TYPE\",
+            \"metadata\": {
+              \"commit\": \"${{ github.sha }}\",
+              \"author\": \"${{ github.actor }}\",
+              \"branch\": \"${{ github.ref_name }}\"
+            }
+          }"
+    
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        echo "Deployment failed - orchestrator will handle rollback"
+        # The orchestrator will automatically handle the rollback

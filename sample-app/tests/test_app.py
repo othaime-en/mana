@@ -38,3 +38,22 @@ def test_index_endpoint(client):
     assert 'version' in data
     assert 'features' in data
     assert isinstance(data['features'], list)
+
+
+def test_data_endpoint(client):
+    """Test data API endpoint"""
+    response = client.get('/api/data')
+    assert response.status_code == 200
+    data = json.loads(response.data)
+    assert 'items' in data
+    assert 'total' in data
+    assert len(data['items']) == data['total']
+
+
+def test_stress_endpoint(client):
+    """Test stress endpoint"""
+    response = client.get('/api/stress?duration=1')
+    assert response.status_code == 200
+    data = json.loads(response.data)
+    assert data['status'] == 'completed'
+    assert data['duration'] == 1

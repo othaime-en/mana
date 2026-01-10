@@ -19,3 +19,11 @@ def test_health_endpoint(client):
     assert data['status'] == 'healthy'
     assert 'version' in data
     assert 'timestamp' in data
+
+
+def test_ready_endpoint(client):
+    """Test readiness endpoint"""
+    response = client.get('/ready')
+    assert response.status_code in [200, 503]
+    data = json.loads(response.data)
+    assert 'status' in data

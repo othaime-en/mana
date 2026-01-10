@@ -27,3 +27,14 @@ def test_ready_endpoint(client):
     assert response.status_code in [200, 503]
     data = json.loads(response.data)
     assert 'status' in data
+
+
+def test_index_endpoint(client):
+    """Test main index endpoint"""
+    response = client.get('/')
+    assert response.status_code == 200
+    data = json.loads(response.data)
+    assert 'message' in data
+    assert 'version' in data
+    assert 'features' in data
+    assert isinstance(data['features'], list)

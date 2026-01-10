@@ -1,4 +1,3 @@
-# .github/workflows/ci-cd.yml
 name: Self-Healing CI/CD Pipeline
 
 on:
@@ -224,3 +223,42 @@ jobs:
         
         # Wait for rollout
         kubectl rollout status deployment/sample-app -n production --timeout=10m
+    
+    - name: Health check
+      id: health
+      run: |
+        export KUBECONFIG=./kubeconfig
+        sleep 60
+        
+        # Check pod status
+        READY_PODS=$(kubectl get pods -n production -l app=sample-app -o json | \
+          jq '[.items[] | select(.status.phase=="Running")] | length')
+        TOTAL_PODS=$(kubectl get deployment sample-app -n production -o jsonpath='{.spec.replicas}')
+        
+        echo "Ready pods: $READY_PODS / $TOTAL_PODS"
+        
+        if [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
+          echo "Health check passed"
+          exit 0
+        else
+          echo "Health check failed"
+          exit 1
+        fi
+    
+    - name: Smoke tests
+      id: smoke
+      run: |
+        export KUBECONFIG=./kubeconfig
+        
+        # Port forward for testing
+        kubectl port-forward -n production service/sample-app-service 8080:80 &
+        PF_PID=$!
+        sleep 5
+        
+        # Run smoke tests
+        curl -f http://localhost:8080/health || exit 1
+        curl -f http://localhost:8080/ || exit 1
+        curl -f http://localhost:8080/api/data || exit 1
+        
+        kill $PF_PID
+        echo "Smoke tests passed"

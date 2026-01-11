@@ -57,3 +57,18 @@ def test_stress_endpoint(client):
     data = json.loads(response.data)
     assert data['status'] == 'completed'
     assert data['duration'] == 1
+
+
+def test_not_found(client):
+    """Test 404 handling"""
+    response = client.get('/nonexistent')
+    assert response.status_code == 404
+    data = json.loads(response.data)
+    assert 'error' in data
+
+
+def test_metrics_endpoint(client):
+    """Test Prometheus metrics endpoint"""
+    response = client.get('/metrics')
+    assert response.status_code == 200
+    assert b'flask_http_request_duration_seconds' in response.data

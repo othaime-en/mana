@@ -48,3 +48,27 @@ def test_save_and_get_deployment_state(orchestrator):
     orchestrator.redis_client.setex = Mock()
     orchestrator.save_deployment_state(state)
     orchestrator.redis_client.setex.assert_called_once()
+
+
+def test_check_deployment_health_success(orchestrator):
+    """Test successful health check"""
+    mock_deployment = Mock()
+    mock_deployment.spec.replicas = 3
+    mock_deployment.status.ready_replicas = 3
+    
+    orchestrator.k8s_apps.read_namespaced_deployment.return_value = mock_deployment
+    
+    result = orchestrator.check_deployment_health('production', 'sample-app', timeout=10)
+    assert result is True
+
+
+def test_check_deployment_health_failure(orchestrator):
+    """Test failed health check"""
+    mock_deployment = Mock()
+    mock_deployment.spec.replicas = 3
+    mock_deployment.status.ready_replicas = 1
+    
+    orchestrator.k8s_apps.read_namespaced_deployment.return_value = mock_deployment
+    
+    result = orchestrator.check_deployment_health('production', 'sample-app', timeout=5)
+    assert result is False

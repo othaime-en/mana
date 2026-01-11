@@ -1,3 +1,4 @@
+
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from src.orchestrator import (
@@ -72,3 +73,20 @@ def test_check_deployment_health_failure(orchestrator):
     
     result = orchestrator.check_deployment_health('production', 'sample-app', timeout=5)
     assert result is False
+
+
+def test_rollback_deployment(orchestrator):
+    """Test deployment rollback"""
+    mock_deployment = Mock()
+    mock_deployment.spec.template.spec.containers = [
+        Mock(name='sample-app', image='sample-app:1.0.0')
+    ]
+    mock_deployment.metadata.labels = {'version': '1.0.0'}
+    mock_deployment.spec.template.metadata.labels = {'version': '1.0.0'}
+    
+    orchestrator.k8s_apps.read_namespaced_deployment.return_value = mock_deployment
+    orchestrator.k8s_apps.patch_namespaced_deployment.return_value = mock_deployment
+    
+    with patch.object(orchestrator, 'check_deployment_health', return_value=True):
+        result = orchestrator.rollback_deployment('production', 'sample-app', '0.9.0')
+        assert result is True

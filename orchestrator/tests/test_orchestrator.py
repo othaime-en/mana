@@ -1,4 +1,3 @@
-
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from src.orchestrator import (
@@ -90,3 +89,53 @@ def test_rollback_deployment(orchestrator):
     with patch.object(orchestrator, 'check_deployment_health', return_value=True):
         result = orchestrator.rollback_deployment('production', 'sample-app', '0.9.0')
         assert result is True
+
+
+def test_handle_deployment_failure_retry(orchestrator):
+    """Test failure handling - retry logic"""
+    orchestrator.redis_client.get.return_value = None
+    orchestrator.redis_client.setex = Mock()
+    
+    with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'):
+        result = orchestrator.handle_deployment_failure(
+            deployment_id='test-123',
+            namespace='production',
+            deployment_name='sample-app',
+            version='1.0.0',
+            failure_type=FailureType.DEPLOYMENT_FAILURE
+        )
+        
+        assert result['action'] == 'retry'
+        assert result['retry_count'] == 1
+
+
+def test_handle_deployment_failure_rollback(orchestrator):
+    """Test failure handling - rollback logic"""
+    # Simulate multiple retries
+    state = DeploymentState(
+        deployment_id='test-123',
+        namespace='production',
+        app_name='sample-app',
+        version='1.0.0',
+        status=DeploymentStatus.FAILED,
+        previous_version='0.9.0',
+        retry_count=3,
+        failure_type=FailureType.DEPLOYMENT_FAILURE,
+        timestamp=time.time(),
+        metadata={}
+    )
+    
+    with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
+         patch.object(orchestrator, 'rollback_deployment', return_value=True), \
+         patch.object(orchestrator, 'save_deployment_state'):
+        
+        result = orchestrator.handle_deployment_failure(
+            deployment_id='test-123',
+            namespace='production',
+            deployment_name='sample-app',
+            version='1.0.0',
+            failure_type=FailureType.DEPLOYMENT_FAILURE
+        )
+        
+        assert result['action'] == 'rollback'
+        assert 'previous_version' in result

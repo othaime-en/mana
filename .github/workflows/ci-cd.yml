@@ -182,7 +182,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
-      name: production
+      name: Production
       url: http://sample-app.local
 
     steps:

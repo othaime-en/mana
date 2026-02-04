@@ -1,3 +1,4 @@
+# terraform/modules/monitoring/main.tf
 variable "enabled" {
   description = "Enable monitoring stack"
   type        = bool
@@ -124,3 +125,92 @@ resource "kubernetes_manifest" "orchestrator_service_monitor" {
   }
 }
 
+# PrometheusRule for alerts
+resource "kubernetes_manifest" "deployment_alerts" {
+  count = var.enabled ? 1 : 0
+  
+  manifest = {
+    apiVersion = "monitoring.coreos.com/v1"
+    kind       = "PrometheusRule"
+    metadata = {
+      name      = "deployment-alerts"
+      namespace = "monitoring"
+      labels = {
+        release = "prometheus"
+      }
+    }
+    spec = {
+      groups = [
+        {
+          name = "deployment"
+          rules = [
+            {
+              alert = "DeploymentReplicasMismatch"
+              expr  = "kube_deployment_spec_replicas != kube_deployment_status_replicas_available"
+              for   = "5m"
+              labels = {
+                severity = "warning"
+              }
+              annotations = {
+                summary     = "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has mismatched replicas"
+                description = "Deployment {{ $labels.deployment }} has {{ $value }} replicas available but {{ $labels.spec_replicas }} specified"
+              }
+            },
+            {
+              alert = "HighRollbackRate"
+              expr  = "rate(rollbacks_total[5m]) > 0.1"
+              for   = "2m"
+              labels = {
+                severity = "critical"
+              }
+              annotations = {
+                summary     = "High rollback rate detected"
+                description = "Rollback rate is {{ $value }} per second in namespace {{ $labels.namespace }}"
+              }
+            },
+            {
+              alert = "DeploymentFailureRate"
+              expr  = "rate(deployments_total{status=\"failed\"}[10m]) > 0.2"
+              for   = "5m"
+              labels = {
+                severity = "warning"
+              }
+              annotations = {
+                summary     = "High deployment failure rate"
+                description = "Deployment failure rate is {{ $value }} per second"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+
+# Grafana dashboard ConfigMap
+resource "kubernetes_config_map" "grafana_dashboard" {
+  count = var.enabled ? 1 : 0
+  
+  metadata {
+    name      = "self-healing-dashboard"
+    namespace = "monitoring"
+    labels = {
+      grafana_dashboard = "1"
+    }
+  }
+  
+  data = {
+    "self-healing-dashboard.json" = file("${path.module}/dashboards/self-healing.json")
+  }
+}
+
+# Outputs
+output "grafana_url" {
+  description = "Grafana URL"
+  value       = var.enabled ? "http://localhost:3000" : null
+}
+
+output "prometheus_url" {
+  description = "Prometheus URL"
+  value       = var.enabled ? "http://localhost:9090" : null
+}

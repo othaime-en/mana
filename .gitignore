@@ -13,3 +13,9 @@ venv/
 .idea/
 *.swp
 *.swo
+
+# Internal files
+*.DS_Store
+.DS_Store
+.DS_Store?
+local-dev-files/

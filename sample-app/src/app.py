@@ -24,6 +24,9 @@ APP_VERSION = os.getenv('APP_VERSION', '1.0.0')
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
 FAILURE_RATE = float(os.getenv('FAILURE_RATE', '0.0'))  # Simulate failures
 
+if not hasattr(app, 'start_time'):
+    app.start_time = time.time()
+
 
 def simulate_failure(func):
     """Decorator to simulate random failures for testing"""
@@ -54,7 +57,10 @@ def health():
 def ready():
     """Readiness check endpoint"""
     startup_time = int(os.getenv('STARTUP_TIME', '0'))
-    if time.time() - app.start_time < startup_time:
+    current_time = time.time()
+    app_start = getattr(app, 'start_time', current_time)
+    
+    if current_time - app_start < startup_time:
         return jsonify({'status': 'not ready'}), 503
     return jsonify({'status': 'ready'})
 
@@ -118,7 +124,6 @@ def internal_error(error):
 
 
 if __name__ == '__main__':
-    app.start_time = time.time()
     port = int(os.getenv('PORT', 5000))
     logger.info(f"Starting application on port {port}")
     logger.info(f"Version: {APP_VERSION}, Environment: {ENVIRONMENT}")

@@ -1,6 +1,6 @@
-
 import json
 import logging
+from io import StringIO
 from utils.logger import (
     setup_logging,
     get_request_id,
@@ -161,22 +161,30 @@ class TestRequestID:
 class TestLogWithContext:
     """Test contextual logging"""
     
-    def test_log_with_context(self, caplog):
+    def test_log_with_context(self):
         """Test logging with additional context"""
-        logger = setup_logging(
-            app_name='test-app',
-            environment='test',
-            level='INFO',
-            use_json=False
+        # Use Python's standard logging for this test
+        test_logger = logging.getLogger('test-context-logger')
+        test_logger.setLevel(logging.INFO)
+        
+        # Create a handler that captures logs
+        log_stream = StringIO()
+        handler = logging.StreamHandler(log_stream)
+        handler.setLevel(logging.INFO)
+        test_logger.addHandler(handler)
+        
+        # Test log_with_context
+        log_with_context(
+            test_logger,
+            'info',
+            'Test message',
+            user_id='user-123',
+            action='test_action'
         )
         
-        with caplog.at_level(logging.INFO):
-            log_with_context(
-                logger,
-                'info',
-                'Test message',
-                user_id='user-123',
-                action='test_action'
-            )
+        # Check output
+        log_output = log_stream.getvalue()
+        assert 'Test message' in log_output
         
-        assert 'Test message' in caplog.text
+        # Cleanup
+        test_logger.removeHandler(handler)

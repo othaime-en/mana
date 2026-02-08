@@ -9,14 +9,15 @@ from orchestrator import (
     FailureType,
     DeploymentStatus
 )
+from utils.audit import get_audit_logger
 from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
+audit_logger = get_audit_logger()
+
 app = FastAPI(
     title="Self-Healing Orchestrator API",
     description="API for managing self-healing CI/CD deployments",
@@ -44,6 +45,16 @@ active_deployments = Gauge(
     'Number of active deployments',
     ['namespace']
 )
+health_check_duration = Histogram(
+    'health_check_duration_seconds',
+    'Health check duration in seconds',
+    ['namespace', 'deployment']
+)
+retry_counter = Counter(
+    'retries_total',
+    'Total number of deployment retries',
+    ['namespace', 'retry_attempt']
+)
 
 # Mount Prometheus metrics endpoint
 metrics_app = make_asgi_app()
@@ -54,7 +65,11 @@ orchestrator = SelfHealingOrchestrator(
     redis_host=os.getenv('REDIS_HOST', 'localhost'),
     redis_port=int(os.getenv('REDIS_PORT', 6379)),
     max_retries=int(os.getenv('MAX_RETRIES', 3)),
-    rollback_threshold=int(os.getenv('ROLLBACK_THRESHOLD', 2))
+    rollback_threshold=int(os.getenv('ROLLBACK_THRESHOLD', 2)),
+    initial_backoff=float(os.getenv('INITIAL_BACKOFF', 10.0)),
+    max_backoff=float(os.getenv('MAX_BACKOFF', 300.0)),
+    backoff_multiplier=float(os.getenv('BACKOFF_MULTIPLIER', 2.0)),
+    health_check_timeout=int(os.getenv('HEALTH_CHECK_TIMEOUT', 5))
 )
 
 
@@ -90,8 +105,14 @@ def root():
     """Root endpoint"""
     return {
         "service": "Self-Healing Orchestrator",
-        "version": "1.0.0",
-        "status": "healthy"
+        "version": "2.0.0",
+        "status": "healthy",
+        "features": [
+            "Application health endpoint monitoring",
+            "Exponential backoff for retries",
+            "Comprehensive audit logging",
+            "Automatic rollback on failure"
+        ]
     }
 
 
@@ -107,6 +128,16 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
     Webhook endpoint for deployment events from GitHub Actions
     """
     logger.info(f"Received deployment webhook: {payload.deployment_id}")
+    
+    # Log webhook receipt
+    audit_logger.log_deployment_received(
+        deployment_id=payload.deployment_id,
+        namespace=payload.namespace,
+        deployment_name=payload.app_name,
+        version=payload.version,
+        status=payload.status,
+        failure_type=payload.failure_type
+    )
     
     try:
         # Update metrics
@@ -127,6 +158,14 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
                 failure_type=failure_type
             )
             
+            # Track retry metrics
+            if result['action'] == 'retry':
+                retry_counter.labels(
+                    namespace=payload.namespace,
+                    retry_attempt=result['retry_count']
+                ).inc()
+            
+            # Track rollback metrics
             if result['action'] == 'rollback':
                 rollback_counter.labels(
                     namespace=payload.namespace,
@@ -167,22 +206,27 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
         )
         
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
+        logger.error(f"Error processing webhook: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/rollback")
 async def manual_rollback(request: RollbackRequest):
     """
-    Manual rollback endpoint
+    Manual rollback endpoint with audit logging
     """
     logger.info(f"Manual rollback requested for {request.deployment_name}")
+    
+    # Generate deployment ID for manual rollback
+    import uuid
+    deployment_id = f"manual-rollback-{uuid.uuid4()}"
     
     try:
         success = orchestrator.rollback_deployment(
             namespace=request.namespace,
             deployment_name=request.deployment_name,
-            target_version=request.target_version
+            target_version=request.target_version,
+            deployment_id=deployment_id
         )
         
         if success:
@@ -193,6 +237,7 @@ async def manual_rollback(request: RollbackRequest):
             
             return {
                 "status": "success",
+                "deployment_id": deployment_id,
                 "message": f"Rolled back to version {request.target_version}"
             }
         else:
@@ -211,6 +256,9 @@ async def check_health(request: HealthCheckRequest):
     """
     Check deployment health endpoint
     """
+    import time
+    start_time = time.time()
+    
     try:
         is_healthy = orchestrator.check_deployment_health(
             namespace=request.namespace,
@@ -218,10 +266,19 @@ async def check_health(request: HealthCheckRequest):
             timeout=request.timeout
         )
         
+        duration = time.time() - start_time
+        
+        # Record health check duration
+        health_check_duration.labels(
+            namespace=request.namespace,
+            deployment=request.deployment_name
+        ).observe(duration)
+        
         return {
             "deployment_name": request.deployment_name,
             "namespace": request.namespace,
-            "healthy": is_healthy
+            "healthy": is_healthy,
+            "check_duration_seconds": round(duration, 2)
         }
         
     except Exception as e:
@@ -247,6 +304,7 @@ async def get_deployment(deployment_id: str):
         "status": state.status.value,
         "retry_count": state.retry_count,
         "failure_type": state.failure_type.value if state.failure_type else None,
+        "previous_version": state.previous_version,
         "timestamp": state.timestamp,
         "metadata": state.metadata
     }
@@ -263,6 +321,21 @@ async def get_metrics(namespace: str, deployment_name: str):
     except Exception as e:
         logger.error(f"Error getting metrics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/config")
+async def get_config():
+    """
+    Get orchestrator configuration
+    """
+    return {
+        "max_retries": orchestrator.max_retries,
+        "rollback_threshold": orchestrator.rollback_threshold,
+        "initial_backoff": orchestrator.initial_backoff,
+        "max_backoff": orchestrator.max_backoff,
+        "backoff_multiplier": orchestrator.backoff_multiplier,
+        "health_check_timeout": orchestrator.health_check_timeout
+    }
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 """
-Configuration for orchestrator with enhanced features
+Configuration management for orchestrator
 """
 
 import os
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 @dataclass
 class OrchestratorConfig:
-    """Enhanced orchestrator configuration"""
+    """Orchestrator configuration"""
     
     redis_host: str
     redis_port: int

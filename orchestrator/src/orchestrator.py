@@ -6,10 +6,11 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import redis
 import json
-from kubernetes import client, config
+from kubernetes import client, config as k8s_config
 from kubernetes.client.rest import ApiException
 
 from src.utils import get_audit_logger, AuditAction
+from config import get_config
 
 
 logging.basicConfig(
@@ -61,47 +62,50 @@ class SelfHealingOrchestrator:
     Monitors deployments and automatically handles failures
     """
     
-    def __init__(
-        self,
-        redis_host: str = 'localhost',
-        redis_port: int = 6379,
-        max_retries: int = 3,
-        rollback_threshold: int = 2,
-        initial_backoff: float = 10.0,
-        max_backoff: float = 300.0,
-        backoff_multiplier: float = 2.0,
-        health_check_timeout: int = 5
-    ):
+    def __init__(self, use_config: bool = True):
         """
         Initialize orchestrator
         
         Args:
-            redis_host: Redis host
-            redis_port: Redis port
-            max_retries: Maximum retry attempts
-            rollback_threshold: Failures before rollback
-            initial_backoff: Initial retry delay in seconds
-            max_backoff: Maximum retry delay in seconds
-            backoff_multiplier: Exponential backoff multiplier
-            health_check_timeout: HTTP health check timeout in seconds
+            use_config: If True, loads configuration from config.py (recommended).
+                       If False, uses default values for testing.
         """
-        self.redis_client = redis.Redis(
-            host=redis_host,
-            port=redis_port,
-            decode_responses=True
-        )
-        self.max_retries = max_retries
-        self.rollback_threshold = rollback_threshold
-        self.initial_backoff = initial_backoff
-        self.max_backoff = max_backoff
-        self.backoff_multiplier = backoff_multiplier
-        self.health_check_timeout = health_check_timeout
+        if use_config:
+            cfg = get_config()
+            self.redis_client = redis.Redis(
+                host=cfg.redis_host,
+                port=cfg.redis_port,
+                decode_responses=True
+            )
+            self.max_retries = cfg.max_retries
+            self.rollback_threshold = cfg.rollback_threshold
+            self.initial_backoff = cfg.initial_backoff
+            self.max_backoff = cfg.max_backoff
+            self.backoff_multiplier = cfg.backoff_multiplier
+            self.health_check_timeout = cfg.health_check_timeout
+            self.health_check_port = cfg.health_check_port
+            self.health_check_path = cfg.health_check_path
+        else:
+            # Fallback for testing or manual initialization
+            self.redis_client = redis.Redis(
+                host='localhost',
+                port=6379,
+                decode_responses=True
+            )
+            self.max_retries = 3
+            self.rollback_threshold = 2
+            self.initial_backoff = 10.0
+            self.max_backoff = 300.0
+            self.backoff_multiplier = 2.0
+            self.health_check_timeout = 5
+            self.health_check_port = 5000
+            self.health_check_path = '/health'
         
         # Load Kubernetes config
         try:
-            config.load_incluster_config()
+            k8s_config.load_incluster_config()
         except:
-            config.load_kube_config()
+            k8s_config.load_kube_config()
         
         self.k8s_apps = client.AppsV1Api()
         self.k8s_core = client.CoreV1Api()
@@ -109,10 +113,10 @@ class SelfHealingOrchestrator:
         logger.info(
             "Self-Healing Orchestrator initialized",
             extra={
-                "max_retries": max_retries,
-                "rollback_threshold": rollback_threshold,
-                "initial_backoff": initial_backoff,
-                "max_backoff": max_backoff
+                "max_retries": self.max_retries,
+                "rollback_threshold": self.rollback_threshold,
+                "initial_backoff": self.initial_backoff,
+                "max_backoff": self.max_backoff
             }
         )
     
@@ -133,8 +137,8 @@ class SelfHealingOrchestrator:
         self,
         namespace: str,
         deployment_name: str,
-        port: int = 5000,
-        health_path: str = "/health"
+        port: Optional[int] = None,
+        health_path: Optional[str] = None
     ) -> bool:
         """
         Check application health by calling its health endpoint
@@ -142,12 +146,16 @@ class SelfHealingOrchestrator:
         Args:
             namespace: Kubernetes namespace
             deployment_name: Name of deployment
-            port: Application port
-            health_path: Health check endpoint path
+            port: Application port (uses config if not specified)
+            health_path: Health check endpoint path (uses config if not specified)
             
         Returns:
             True if application is healthy, False otherwise
         """
+        # Use configured values if not provided
+        port = port or self.health_check_port
+        health_path = health_path or self.health_check_path
+        
         try:
             # Get pods for deployment
             pods = self.k8s_core.list_namespaced_pod(
@@ -501,12 +509,7 @@ class SelfHealingOrchestrator:
         failure_type: FailureType
     ) -> Dict:
         """
-        Main failure handling logic with enhanced features:
-        - Exponential backoff for retries
-        - Comprehensive audit logging
-        - Application health verification
-        
-        Decides whether to retry, rollback, or alert
+        Main failure handling logic
         """
         # Log failure detection
         audit_logger.log_failure_detected(

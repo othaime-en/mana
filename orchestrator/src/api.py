@@ -60,17 +60,8 @@ retry_counter = Counter(
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
-# Initialize orchestrator
-orchestrator = SelfHealingOrchestrator(
-    redis_host=os.getenv('REDIS_HOST', 'localhost'),
-    redis_port=int(os.getenv('REDIS_PORT', 6379)),
-    max_retries=int(os.getenv('MAX_RETRIES', 3)),
-    rollback_threshold=int(os.getenv('ROLLBACK_THRESHOLD', 2)),
-    initial_backoff=float(os.getenv('INITIAL_BACKOFF', 10.0)),
-    max_backoff=float(os.getenv('MAX_BACKOFF', 300.0)),
-    backoff_multiplier=float(os.getenv('BACKOFF_MULTIPLIER', 2.0)),
-    health_check_timeout=int(os.getenv('HEALTH_CHECK_TIMEOUT', 5))
-)
+# Initialize orchestrator with configuration from config.py
+orchestrator = SelfHealingOrchestrator(use_config=True)
 
 
 # Request models

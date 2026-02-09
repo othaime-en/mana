@@ -10,7 +10,7 @@ from kubernetes import client, config as k8s_config
 from kubernetes.client.rest import ApiException
 
 from src.utils import get_audit_logger, AuditAction
-from config import get_config
+from src.config import get_config
 
 
 logging.basicConfig(

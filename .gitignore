@@ -19,6 +19,7 @@ venv/
 .DS_Store
 .DS_Store?
 local-dev-files/
+.env
 
 # Logs
 logs/

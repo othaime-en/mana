@@ -9,7 +9,7 @@ import json
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-from utils.audit import get_audit_logger, AuditAction
+from src.utils import get_audit_logger, AuditAction
 
 
 logging.basicConfig(

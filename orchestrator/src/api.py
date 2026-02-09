@@ -9,7 +9,7 @@ from orchestrator import (
     FailureType,
     DeploymentStatus
 )
-from utils.audit import get_audit_logger
+from src.utils import get_audit_logger
 from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
 import logging
 

@@ -13,21 +13,13 @@ import time
 def orchestrator():
     """Create orchestrator instance with mocked dependencies"""
     with patch('src.orchestrator.redis.Redis') as mock_redis, \
-         patch('src.orchestrator.config.load_kube_config'), \
+         patch('src.orchestrator.k8s_config.load_kube_config'), \
          patch('src.orchestrator.client.AppsV1Api') as mock_apps, \
          patch('src.orchestrator.client.CoreV1Api') as mock_core, \
          patch('src.orchestrator.get_audit_logger') as mock_audit:
         
-        orch = SelfHealingOrchestrator(
-            redis_host='localhost',
-            redis_port=6379,
-            max_retries=3,
-            rollback_threshold=2,
-            initial_backoff=10.0,
-            max_backoff=300.0,
-            backoff_multiplier=2.0,
-            health_check_timeout=5
-        )
+        # Use use_config=False to avoid loading from environment in tests
+        orch = SelfHealingOrchestrator(use_config=False)
         orch.redis_client = mock_redis.return_value
         orch.k8s_apps = mock_apps.return_value
         orch.k8s_core = mock_core.return_value

@@ -19,3 +19,15 @@ venv/
 .DS_Store
 .DS_Store?
 local-dev-files/
+.env
+
+# Logs
+logs/
+*.log
+
+# Test files
+.coverage
+.coverage.*
+htmlcov/
+tests/reports/
+tests/test-results/

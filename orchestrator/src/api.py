@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict
 import uvicorn
 import os
-from orchestrator import (
+from src.orchestrator import (
     SelfHealingOrchestrator,
     FailureType,
     DeploymentStatus
@@ -96,7 +96,7 @@ def root():
     """Root endpoint"""
     return {
         "service": "Self-Healing Orchestrator",
-        "version": "2.0.0",
+        "version": "1.0.0",
         "status": "healthy",
         "features": [
             "Application health endpoint monitoring",

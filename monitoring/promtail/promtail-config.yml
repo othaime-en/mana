@@ -1,0 +1,335 @@
+# Promtail Configuration for Mana Self-Healing CI/CD
+# Log collection and forwarding to Loki
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+# Position tracking
+positions:
+  filename: /tmp/positions.yaml
+
+# Loki client configuration
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 1048576  # 1MB
+    
+    # Backoff configuration
+    backoff_config:
+      min_period: 500ms
+      max_period: 5m
+      max_retries: 10
+    
+    # External labels
+    external_labels:
+      cluster: mana-cicd
+      environment: production
+
+# Scrape configurations
+scrape_configs:
+  # Kubernetes pods with automatic log discovery
+  - job_name: kubernetes-pods
+    
+    kubernetes_sd_configs:
+      - role: pod
+    
+    pipeline_stages:
+      # Parse timestamps
+      - docker: {}
+      
+      # Extract metadata
+      - static_labels:
+          job: kubernetes-pods
+      
+      # Parse JSON logs (if present)
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            logger: logger
+            message: message
+            namespace: namespace
+            pod: pod
+            container: container
+      
+      # Extract timestamp
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+      
+      # Label extraction
+      - labels:
+          level:
+          logger:
+          namespace:
+          pod:
+          container:
+    
+    relabel_configs:
+      # Add namespace label
+      - source_labels:
+          - __meta_kubernetes_pod_namespace
+        target_label: namespace
+      
+      # Add pod name label
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: pod
+      
+      # Add container name label
+      - source_labels:
+          - __meta_kubernetes_pod_container_name
+        target_label: container
+      
+      # Add node name label
+      - source_labels:
+          - __meta_kubernetes_pod_node_name
+        target_label: node
+      
+      # Add app label
+      - source_labels:
+          - __meta_kubernetes_pod_label_app
+        target_label: app
+      
+      # Add version label
+      - source_labels:
+          - __meta_kubernetes_pod_label_version
+        target_label: version
+      
+      # Set log path
+      - source_labels:
+          - __meta_kubernetes_pod_uid
+          - __meta_kubernetes_pod_container_name
+        target_label: __path__
+        separator: /
+        replacement: /var/log/pods/*$1/*.log
+      
+      # Drop logs from kube-system (optional)
+      - source_labels:
+          - __meta_kubernetes_pod_namespace
+        action: drop
+        regex: kube-system
+
+  # Sample application logs (explicit configuration)
+  - job_name: sample-app
+    
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - production
+            - staging
+            - canary
+    
+    pipeline_stages:
+      - docker: {}
+      
+      # Parse JSON structured logs
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            logger: logger
+            message: message
+            request_id: request_id
+            method: method
+            path: path
+            status_code: status_code
+            duration_seconds: duration_seconds
+      
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+      
+      - labels:
+          level:
+          request_id:
+          method:
+          path:
+      
+      # Metrics extraction from logs
+      - metrics:
+          # Count log entries by level
+          log_lines_total:
+            type: Counter
+            description: "Total number of log lines"
+            source: level
+            config:
+              action: inc
+          
+          # Track request duration from logs
+          request_duration_seconds:
+            type: Histogram
+            description: "Request duration in seconds"
+            source: duration_seconds
+            config:
+              buckets: [0.1, 0.5, 1.0, 2.0, 5.0]
+    
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_pod_label_app
+        action: keep
+        regex: sample-app
+      
+      - source_labels:
+          - __meta_kubernetes_pod_namespace
+        target_label: namespace
+      
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: pod
+      
+      - source_labels:
+          - __meta_kubernetes_pod_label_version
+        target_label: version
+      
+      - source_labels:
+          - __meta_kubernetes_pod_uid
+          - __meta_kubernetes_pod_container_name
+        target_label: __path__
+        separator: /
+        replacement: /var/log/pods/*$1/*.log
+
+  # Orchestrator logs (explicit configuration)
+  - job_name: orchestrator
+    
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - orchestrator
+    
+    pipeline_stages:
+      - docker: {}
+      
+      # Parse JSON structured logs
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            logger: logger
+            message: message
+            deployment_id: deployment_id
+            namespace: k8s_namespace
+            deployment_name: deployment_name
+            version: version
+            action: action
+            success: success
+      
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+      
+      - labels:
+          level:
+          deployment_id:
+          action:
+          success:
+      
+      # Extract audit events
+      - match:
+          selector: '{action!=""}'
+          stages:
+            - metrics:
+                audit_events_total:
+                  type: Counter
+                  description: "Total number of audit events"
+                  source: action
+                  config:
+                    action: inc
+    
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_pod_label_app
+        action: keep
+        regex: orchestrator
+      
+      - source_labels:
+          - __meta_kubernetes_pod_namespace
+        target_label: namespace
+      
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: pod
+      
+      - source_labels:
+          - __meta_kubernetes_pod_uid
+          - __meta_kubernetes_pod_container_name
+        target_label: __path__
+        separator: /
+        replacement: /var/log/pods/*$1/*.log
+
+  # Kubernetes events (system events)
+  - job_name: kubernetes-events
+    
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - kube-system
+    
+    pipeline_stages:
+      - docker: {}
+      
+      - json:
+          expressions:
+            message: message
+            reason: reason
+            type: type
+      
+      - labels:
+          reason:
+          type:
+    
+    relabel_configs:
+      - source_labels:
+          - __meta_kubernetes_pod_label_component
+        action: keep
+        regex: kube-apiserver
+      
+      - source_labels:
+          - __meta_kubernetes_pod_namespace
+        target_label: namespace
+      
+      - source_labels:
+          - __meta_kubernetes_pod_name
+        target_label: pod
+
+  # System journal logs (optional - for node-level logs)
+  - job_name: systemd-journal
+    journal:
+      json: false
+      max_age: 12h
+      path: /var/log/journal
+      labels:
+        job: systemd-journal
+    
+    pipeline_stages:
+      - match:
+          selector: '{unit="kubelet.service"}'
+          stages:
+            - regex:
+                expression: '(?P<level>\w+): (?P<message>.*)'
+            - labels:
+                level:
+    
+    relabel_configs:
+      - source_labels:
+          - __journal__systemd_unit
+        target_label: unit
+      
+      - source_labels:
+          - __journal__hostname
+        target_label: node
+
+# Target configuration (what to scrape)
+target_config:
+  sync_period: 10s
+
+# Limits
+limits_config:
+  # Rate limiting
+  readline_rate: 10000
+  readline_burst: 20000

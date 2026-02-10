@@ -1,0 +1,133 @@
+{{ define "slack.default.title" }}
+[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .GroupLabels.alertname }}
+{{ end }}
+
+{{ define "slack.default.text" }}
+{{ range .Alerts }}
+*Alert:* {{ .Labels.alertname }}
+*Severity:* {{ .Labels.severity }}
+*Summary:* {{ .Annotations.summary }}
+*Description:* {{ .Annotations.description }}
+{{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+*Details:*
+{{ range .Labels.SortedPairs }}  • {{ .Name }}: `{{ .Value }}`
+{{ end }}
+{{ end }}
+{{ end }}
+
+{{ define "slack.orchestrator.text" }}
+:sos: *URGENT: Self-Healing Orchestrator Issue*
+
+{{ range .Alerts }}
+*Alert:* {{ .Labels.alertname }}
+*Component:* {{ .Labels.component }}
+*Namespace:* {{ .Labels.namespace }}
+
+*What's Happening:*
+{{ .Annotations.description }}
+
+*Impact:*
+Automatic deployment recovery may be affected. Manual intervention may be required.
+
+*Action Required:*
+1. Check orchestrator pod status: `kubectl get pods -n orchestrator`
+2. Review logs: `kubectl logs -n orchestrator -l app=orchestrator`
+3. Verify Redis connectivity
+4. Follow runbook: {{ .Annotations.runbook_url }}
+
+*Labels:*
+{{ range .Labels.SortedPairs }}  • {{ .Name }}: `{{ .Value }}`
+{{ end }}
+{{ end }}
+{{ end }}
+
+{{ define "slack.application.text" }}
+:fire: *CRITICAL: Application Outage*
+
+{{ range .Alerts }}
+*Application:* {{ .Labels.app }}
+*Namespace:* {{ .Labels.namespace }}
+*Status:* {{ .Status }}
+
+*Issue:*
+{{ .Annotations.description }}
+
+*Immediate Actions:*
+1. Check pod status: `kubectl get pods -n {{ .Labels.namespace }} -l app={{ .Labels.app }}`
+2. Check recent deployments: `kubectl rollout history deployment/{{ .Labels.app }} -n {{ .Labels.namespace }}`
+3. Review logs: `kubectl logs -n {{ .Labels.namespace }} -l app={{ .Labels.app }} --tail=100`
+4. Check orchestrator for auto-recovery status
+
+*Runbook:* {{ .Annotations.runbook_url }}
+{{ end }}
+{{ end }}
+
+{{ define "slack.deployment.text" }}
+:rocket: *Deployment Alert*
+
+{{ range .Alerts }}
+*Alert:* {{ .Labels.alertname }}
+*Namespace:* {{ .Labels.namespace }}
+{{ if .Labels.deployment }}*Deployment:* {{ .Labels.deployment }}{{ end }}
+
+*Details:*
+{{ .Annotations.description }}
+
+*Current Status:*
+{{ range .Labels.SortedPairs }}  • {{ .Name }}: `{{ .Value }}`
+{{ end }}
+
+{{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+{{ end }}
+{{ end }}
+
+{{ define "slack.infrastructure.text" }}
+:construction: *Infrastructure Alert*
+
+{{ range .Alerts }}
+*Alert:* {{ .Labels.alertname }}
+{{ if .Labels.node }}*Node:* {{ .Labels.node }}{{ end }}
+{{ if .Labels.instance }}*Instance:* {{ .Labels.instance }}{{ end }}
+
+*Issue:*
+{{ .Annotations.description }}
+
+*Actions:*
+{{ if eq .Labels.alertname "NodeNotReady" }}
+1. Check node status: `kubectl describe node {{ .Labels.node }}`
+2. SSH to node and check kubelet: `systemctl status kubelet`
+3. Review node resources
+{{ else if eq .Labels.alertname "HighNodeCPU" }}
+1. Identify high CPU processes on {{ .Labels.instance }}
+2. Consider scaling or resource adjustments
+{{ else if eq .Labels.alertname "DiskSpaceLow" }}
+1. Check disk usage: `df -h`
+2. Clean up old logs and unused images
+3. Consider volume expansion
+{{ else }}
+1. Review the situation
+2. Follow runbook: {{ .Annotations.runbook_url }}
+{{ end }}
+{{ end }}
+{{ end }}
+
+{{ define "slack.monitoring.text" }}
+:chart_with_upwards_trend: *Monitoring Stack Alert*
+
+{{ range .Alerts }}
+*Alert:* {{ .Labels.alertname }}
+*Component:* {{ .Labels.job }}
+
+*Issue:*
+{{ .Annotations.description }}
+
+*Impact:*
+Observability may be degraded. Some metrics or logs may not be collected.
+
+*Actions:*
+1. Check monitoring pods: `kubectl get pods -n monitoring`
+2. Verify Prometheus targets: Check Prometheus UI
+3. Review component logs
+{{ if .Annotations.runbook_url }}4. Follow runbook: {{ .Annotations.runbook_url }}{{ end }}
+{{ end }}
+{{ end }}

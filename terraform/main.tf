@@ -11,10 +11,6 @@ terraform {
       version = "~> 2.11"
     }
   }
-  
-  backend "local" {
-    path = "terraform.tfstate"
-  }
 }
 
 provider "kubernetes" {

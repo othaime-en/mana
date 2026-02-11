@@ -1,0 +1,179 @@
+{{ define "email.default.subject" }}
+[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .GroupLabels.alertname }}
+{{ end }}
+
+{{ define "email.default.html" }}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            background-color: {{ if eq .Status "firing" }}#d32f2f{{ else }}#4caf50{{ end }};
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .alert-box {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background-color: #f9f9f9;
+        }
+        .alert-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #d32f2f;
+        }
+        .label {
+            display: inline-block;
+            background-color: #e0e0e0;
+            padding: 3px 8px;
+            border-radius: 3px;
+            margin: 2px;
+            font-size: 12px;
+        }
+        .severity-critical {
+            background-color: #d32f2f;
+            color: white;
+        }
+        .severity-warning {
+            background-color: #ff9800;
+            color: white;
+        }
+        .details {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #fff;
+            border-left: 3px solid #2196f3;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            font-size: 12px;
+            color: #666;
+        }
+        a {
+            color: #2196f3;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .button {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #2196f3;
+            color: white !important;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 10px 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{{ if eq .Status "firing" }}🚨{{ else }}✅{{ end }} Alert Notification</h1>
+        <p>Status: <strong>{{ .Status | toUpper }}</strong></p>
+        <p>{{ if eq .Status "firing" }}Firing: {{ .Alerts.Firing | len }}{{ else }}Resolved: {{ .Alerts.Resolved | len }}{{ end }}</p>
+    </div>
+
+    {{ if gt (len .Alerts.Firing) 0 }}
+    <h2>🔥 Firing Alerts</h2>
+    {{ range .Alerts.Firing }}
+    <div class="alert-box">
+        <div class="alert-title">{{ .Labels.alertname }}</div>
+        
+        <div>
+            <span class="label severity-{{ .Labels.severity }}">{{ .Labels.severity | toUpper }}</span>
+            {{ if .Labels.namespace }}<span class="label">{{ .Labels.namespace }}</span>{{ end }}
+            {{ if .Labels.app }}<span class="label">{{ .Labels.app }}</span>{{ end }}
+        </div>
+
+        <div class="details">
+            <p><strong>Summary:</strong> {{ .Annotations.summary }}</p>
+            <p><strong>Description:</strong> {{ .Annotations.description }}</p>
+            
+            {{ if .Annotations.runbook_url }}
+            <p>
+                <a href="{{ .Annotations.runbook_url }}" class="button">View Runbook</a>
+            </p>
+            {{ end }}
+
+            <p><strong>Alert Details:</strong></p>
+            <ul>
+            {{ range .Labels.SortedPairs }}
+                <li><strong>{{ .Name }}:</strong> {{ .Value }}</li>
+            {{ end }}
+            </ul>
+
+            <p><strong>Started:</strong> {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}</p>
+        </div>
+    </div>
+    {{ end }}
+    {{ end }}
+
+    {{ if gt (len .Alerts.Resolved) 0 }}
+    <h2>✅ Resolved Alerts</h2>
+    {{ range .Alerts.Resolved }}
+    <div class="alert-box" style="background-color: #e8f5e9;">
+        <div class="alert-title" style="color: #4caf50;">{{ .Labels.alertname }}</div>
+        
+        <div>
+            <span class="label">{{ .Labels.severity | toUpper }}</span>
+            {{ if .Labels.namespace }}<span class="label">{{ .Labels.namespace }}</span>{{ end }}
+            {{ if .Labels.app }}<span class="label">{{ .Labels.app }}</span>{{ end }}
+        </div>
+
+        <div class="details">
+            <p><strong>Summary:</strong> {{ .Annotations.summary }}</p>
+            
+            <p><strong>Duration:</strong> 
+                {{ .StartsAt.Format "2006-01-02 15:04:05" }} - 
+                {{ .EndsAt.Format "2006-01-02 15:04:05" }}
+            </p>
+        </div>
+    </div>
+    {{ end }}
+    {{ end }}
+
+    <div class="footer">
+        <p>
+            <strong>Mana Self-Healing CI/CD</strong><br>
+            AlertManager notification system
+        </p>
+        <p>
+            <a href="http://prometheus.example.com">Prometheus</a> |
+            <a href="http://grafana.example.com">Grafana</a> |
+            <a href="http://alertmanager.example.com">AlertManager</a>
+        </p>
+        <p>
+            Generated at {{ .ExternalURL }}<br>
+            Group Key: {{ .GroupKey }}
+        </p>
+    </div>
+</body>
+</html>
+{{ end }}
+
+{{ define "pagerduty.default.description" }}
+{{ .GroupLabels.alertname }}: {{ .CommonAnnotations.summary }}
+{{ end }}
+
+{{ define "pagerduty.default.instances" }}
+{{ range . }}
+- {{ .Labels.instance }}: {{ .Annotations.description }}
+{{ end }}
+{{ end }}

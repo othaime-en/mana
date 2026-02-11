@@ -1,0 +1,82 @@
+# Grafana Datasources Provisioning Configuration
+# Automatically provisions Prometheus and Loki data sources on startup
+
+apiVersion: 1
+
+# Delete datasources that are no longer defined
+deleteDatasources:
+  - name: OldPrometheus
+    orgId: 1
+
+datasources:
+  # Prometheus - primary metrics source
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    uid: prometheus-mana
+    url: http://prometheus-kube-prometheus-prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      prometheusVersion: 2.50.0
+      timeInterval: "15s"
+      incrementalQuerying: true
+      incrementalQueryOverlapWindow: "10m"
+      cacheLevel: High
+      disableRecordingRules: false
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: jaeger-mana
+    version: 1
+
+  # Loki - log aggregation source
+  - name: Loki
+    type: loki
+    access: proxy
+    uid: loki-mana
+    url: http://loki:3100
+    isDefault: false
+    editable: false
+    jsonData:
+      timeout: 60
+      maxLines: 5000
+      derivedFields:
+        # Link deployment_id in logs to Prometheus metrics
+        - datasourceUid: prometheus-mana
+          matcherRegex: '"deployment_id":"([^"]+)"'
+          name: DeploymentID
+          url: '/explore?orgId=1&left={"datasource":"prometheus-mana","queries":[{"expr":"deployments_total{deployment_id=\"${__value.raw}\"}"}]}'
+        # Link trace IDs if tracing is enabled
+        - matcherRegex: '"trace_id":"([^"]+)"'
+          name: TraceID
+          url: '${__value.raw}'
+    version: 1
+
+  # AlertManager - for alert state visibility
+  - name: AlertManager
+    type: alertmanager
+    access: proxy
+    uid: alertmanager-mana
+    url: http://prometheus-kube-prometheus-alertmanager:9093
+    isDefault: false
+    editable: false
+    jsonData:
+      implementation: prometheus
+    version: 1
+
+  # Prometheus for local docker-compose development
+  # This entry is skipped when the name already exists from K8s
+  - name: Prometheus-Local
+    type: prometheus
+    access: proxy
+    uid: prometheus-local
+    url: http://prometheus:9090
+    isDefault: false
+    editable: true
+    jsonData:
+      httpMethod: GET
+      timeInterval: "15s"
+    version: 1
+    orgId: 1

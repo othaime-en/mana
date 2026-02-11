@@ -1,0 +1,332 @@
+# Prometheus Recording Rules for Mana Self-Healing CI/CD
+# Pre-computed metrics for performance optimization and complex aggregations
+
+groups:
+  # Deployment metrics aggregations
+  - name: deployment_recording_rules
+    interval: 30s
+    rules:
+      # Deployment success rate over various time windows
+      - record: deployment:success_rate:5m
+        expr: |
+          sum(rate(deployments_total{status="success"}[5m]))
+          /
+          sum(rate(deployments_total[5m]))
+
+      - record: deployment:success_rate:1h
+        expr: |
+          sum(rate(deployments_total{status="success"}[1h]))
+          /
+          sum(rate(deployments_total[1h]))
+
+      - record: deployment:success_rate:24h
+        expr: |
+          sum(rate(deployments_total{status="success"}[24h]))
+          /
+          sum(rate(deployments_total[24h]))
+
+      # Deployment success rate by namespace
+      - record: deployment:success_rate_by_namespace:5m
+        expr: |
+          sum(rate(deployments_total{status="success"}[5m])) by (namespace)
+          /
+          sum(rate(deployments_total[5m])) by (namespace)
+
+      # Rollback rate aggregations
+      - record: deployment:rollback_rate:5m
+        expr: |
+          sum(rate(rollbacks_total[5m]))
+
+      - record: deployment:rollback_rate:1h
+        expr: |
+          sum(rate(rollbacks_total[1h]))
+
+      - record: deployment:rollback_rate_by_namespace:5m
+        expr: |
+          sum(rate(rollbacks_total[5m])) by (namespace)
+
+      - record: deployment:rollback_rate_by_reason:5m
+        expr: |
+          sum(rate(rollbacks_total[5m])) by (reason)
+
+      # Average deployment duration
+      - record: deployment:duration_seconds:avg:5m
+        expr: |
+          histogram_quantile(0.50,
+            sum(rate(deployment_duration_seconds_bucket[5m])) by (namespace, le)
+          )
+
+      - record: deployment:duration_seconds:p95:5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(deployment_duration_seconds_bucket[5m])) by (namespace, le)
+          )
+
+      - record: deployment:duration_seconds:p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(deployment_duration_seconds_bucket[5m])) by (namespace, le)
+          )
+
+      # Retry metrics
+      - record: deployment:retry_rate:5m
+        expr: |
+          sum(rate(retries_total[5m])) by (namespace)
+
+      - record: deployment:retry_rate_by_attempt:5m
+        expr: |
+          sum(rate(retries_total[5m])) by (namespace, retry_attempt)
+
+      # Active deployments by namespace
+      - record: deployment:active_count:namespace
+        expr: |
+          sum(active_deployments) by (namespace)
+
+      # Failed deployments rate
+      - record: deployment:failure_rate:5m
+        expr: |
+          sum(rate(deployments_total{status="failed"}[5m]))
+          /
+          sum(rate(deployments_total[5m]))
+
+      - record: deployment:failure_rate_by_namespace:5m
+        expr: |
+          sum(rate(deployments_total{status="failed"}[5m])) by (namespace)
+          /
+          sum(rate(deployments_total[5m])) by (namespace)
+
+  # Application performance metrics
+  - name: application_recording_rules
+    interval: 30s
+    rules:
+      # HTTP request rate
+      - record: http:request_rate:5m
+        expr: |
+          sum(rate(flask_http_request_total[5m])) by (namespace, app)
+
+      # HTTP error rate (5xx)
+      - record: http:error_rate:5m
+        expr: |
+          sum(rate(flask_http_request_total{status=~"5.."}[5m])) by (namespace, app)
+          /
+          sum(rate(flask_http_request_total[5m])) by (namespace, app)
+
+      # HTTP error rate (4xx)
+      - record: http:client_error_rate:5m
+        expr: |
+          sum(rate(flask_http_request_total{status=~"4.."}[5m])) by (namespace, app)
+          /
+          sum(rate(flask_http_request_total[5m])) by (namespace, app)
+
+      # Response time percentiles
+      - record: http:response_time_seconds:p50:5m
+        expr: |
+          histogram_quantile(0.50,
+            sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (namespace, app, le)
+          )
+
+      - record: http:response_time_seconds:p95:5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (namespace, app, le)
+          )
+
+      - record: http:response_time_seconds:p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (namespace, app, le)
+          )
+
+      # Request rate by endpoint
+      - record: http:request_rate_by_endpoint:5m
+        expr: |
+          sum(rate(flask_http_request_total[5m])) by (namespace, app, path)
+
+      # Apdex score (Application Performance Index)
+      # T = 0.5 seconds (satisfied threshold)
+      - record: http:apdex:5m
+        expr: |
+          (
+            sum(rate(flask_http_request_duration_seconds_bucket{le="0.5"}[5m])) by (namespace, app)
+            +
+            (sum(rate(flask_http_request_duration_seconds_bucket{le="2.0"}[5m])) by (namespace, app)
+            -
+            sum(rate(flask_http_request_duration_seconds_bucket{le="0.5"}[5m])) by (namespace, app)) / 2
+          )
+          /
+          sum(rate(flask_http_request_duration_seconds_count[5m])) by (namespace, app)
+
+  # Orchestrator performance metrics
+  - name: orchestrator_recording_rules
+    interval: 30s
+    rules:
+      # Health check metrics
+      - record: orchestrator:health_check_duration_seconds:p95:5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(health_check_duration_seconds_bucket[5m])) by (namespace, deployment, le)
+          )
+
+      - record: orchestrator:health_check_success_rate:5m
+        expr: |
+          sum(rate(health_checks_total{result="success"}[5m])) by (namespace)
+          /
+          sum(rate(health_checks_total[5m])) by (namespace)
+
+      # Webhook metrics
+      - record: orchestrator:webhook_rate:5m
+        expr: |
+          sum(rate(webhook_requests_total[5m]))
+
+      - record: orchestrator:webhook_error_rate:5m
+        expr: |
+          sum(rate(webhook_errors_total[5m]))
+          /
+          sum(rate(webhook_requests_total[5m]))
+
+      # Decision latency
+      - record: orchestrator:rollback_decision_seconds:p95:5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(rollback_decision_duration_seconds_bucket[5m])) by (le)
+          )
+
+      - record: orchestrator:rollback_decision_seconds:p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(rollback_decision_duration_seconds_bucket[5m])) by (le)
+          )
+
+  # Infrastructure resource utilization
+  - name: infrastructure_recording_rules
+    interval: 60s
+    rules:
+      # Node CPU utilization
+      - record: node:cpu_utilization:percent
+        expr: |
+          100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+
+      # Node memory utilization
+      - record: node:memory_utilization:percent
+        expr: |
+          (
+            (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)
+            /
+            node_memory_MemTotal_bytes
+          ) * 100
+
+      # Node disk utilization
+      - record: node:disk_utilization:percent
+        expr: |
+          (
+            (node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"} - node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"})
+            /
+            node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}
+          ) * 100
+
+      # Pod CPU usage by namespace
+      - record: pod:cpu_usage:namespace
+        expr: |
+          sum(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m])) by (namespace)
+
+      # Pod memory usage by namespace
+      - record: pod:memory_usage:namespace
+        expr: |
+          sum(container_memory_working_set_bytes{container!="",container!="POD"}) by (namespace)
+
+      # Pod count by namespace
+      - record: pod:count:namespace
+        expr: |
+          count(kube_pod_info) by (namespace)
+
+      # Available capacity metrics
+      - record: cluster:cpu_capacity:total
+        expr: |
+          sum(kube_node_status_capacity{resource="cpu"})
+
+      - record: cluster:memory_capacity:total
+        expr: |
+          sum(kube_node_status_capacity{resource="memory"})
+
+      - record: cluster:cpu_allocatable:total
+        expr: |
+          sum(kube_node_status_allocatable{resource="cpu"})
+
+      - record: cluster:memory_allocatable:total
+        expr: |
+          sum(kube_node_status_allocatable{resource="memory"})
+
+  # Kubernetes state metrics
+  - name: kubernetes_recording_rules
+    interval: 30s
+    rules:
+      # Deployment health score
+      - record: deployment:health_score:namespace
+        expr: |
+          (
+            sum(kube_deployment_status_replicas_available) by (namespace, deployment)
+            /
+            sum(kube_deployment_spec_replicas) by (namespace, deployment)
+          ) * 100
+
+      # Pod restart rate
+      - record: pod:restart_rate:5m
+        expr: |
+          sum(rate(kube_pod_container_status_restarts_total[5m])) by (namespace, pod)
+
+      # Unhealthy pods by namespace
+      - record: pod:unhealthy_count:namespace
+        expr: |
+          count(kube_pod_status_phase{phase!="Running",phase!="Succeeded"}) by (namespace)
+
+      # Service availability
+      - record: service:available:namespace
+        expr: |
+          sum(kube_service_info) by (namespace, service)
+
+  # SLI/SLO tracking
+  - name: slo_recording_rules
+    interval: 60s
+    rules:
+      # Deployment SLO: 95% success rate
+      - record: slo:deployment_success:28d
+        expr: |
+          sum(rate(deployments_total{status="success"}[28d]))
+          /
+          sum(rate(deployments_total[28d]))
+
+      # Application SLO: 99.9% availability
+      - record: slo:application_availability:28d
+        expr: |
+          (
+            sum(rate(flask_http_request_total{status!~"5.."}[28d])) by (namespace)
+            /
+            sum(rate(flask_http_request_total[28d])) by (namespace)
+          )
+
+      # Application SLO: 95% requests under 1s
+      - record: slo:application_latency:28d
+        expr: |
+          (
+            sum(rate(flask_http_request_duration_seconds_bucket{le="1.0"}[28d])) by (namespace)
+            /
+            sum(rate(flask_http_request_duration_seconds_count[28d])) by (namespace)
+          )
+
+      # MTTR (Mean Time To Recovery)
+      - record: mttr:rollback_duration:avg:24h
+        expr: |
+          avg(rate(deployment_duration_seconds_sum{status="rolled_back"}[24h]))
+          /
+          avg(rate(deployment_duration_seconds_count{status="rolled_back"}[24h]))
+
+      # Error budget remaining (for 99.9% SLO)
+      - record: slo:error_budget_remaining:percent
+        expr: |
+          (
+            1 - (
+              (sum(rate(flask_http_request_total{status=~"5.."}[28d])))
+              /
+              (sum(rate(flask_http_request_total[28d])))
+            )
+          ) / 0.001 * 100

@@ -1,0 +1,57 @@
+# Grafana Dashboard Provisioning Configuration
+# Automatically loads all dashboards from the /etc/grafana/dashboards directory
+
+apiVersion: 1
+
+providers:
+  # Self-Healing Overview dashboard
+  - name: mana-self-healing
+    orgId: 1
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 60
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards/self-healing
+      foldersFromFilesStructure: false
+    folder: "Mana / Self-Healing"
+    folderUid: mana-self-healing
+
+  # Deployment metrics dashboards
+  - name: mana-deployments
+    orgId: 1
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 60
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards/deployments
+      foldersFromFilesStructure: false
+    folder: "Mana / Deployments"
+    folderUid: mana-deployments
+
+  # Application performance dashboards
+  - name: mana-application
+    orgId: 1
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 60
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards/application
+      foldersFromFilesStructure: false
+    folder: "Mana / Application"
+    folderUid: mana-application
+
+  # Infrastructure & Kubernetes dashboards
+  - name: mana-infrastructure
+    orgId: 1
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 60
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards/infrastructure
+      foldersFromFilesStructure: false
+    folder: "Mana / Infrastructure"
+    folderUid: mana-infrastructure

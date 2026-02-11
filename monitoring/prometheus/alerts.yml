@@ -1,0 +1,401 @@
+# Prometheus Alert Rules for Mana Self-Healing CI/CD
+# Comprehensive alerting for deployment health, system performance, and infrastructure
+
+groups:
+  # Deployment-specific alerts
+  - name: deployment_alerts
+    interval: 30s
+    rules:
+      # Critical: Deployment replicas mismatch
+      - alert: DeploymentReplicasMismatch
+        expr: |
+          kube_deployment_spec_replicas{namespace=~"production|staging|canary"}
+          != 
+          kube_deployment_status_replicas_available{namespace=~"production|staging|canary"}
+        for: 5m
+        labels:
+          severity: warning
+          component: deployment
+        annotations:
+          summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has mismatched replicas"
+          description: "Deployment {{ $labels.deployment }} in namespace {{ $labels.namespace }} has {{ $value }} replicas available but {{ $labels.spec_replicas }} specified. This indicates pods are not becoming ready."
+          runbook_url: "https://docs.example.com/runbooks/deployment-replicas-mismatch"
+
+      # Critical: High rollback rate
+      - alert: HighRollbackRate
+        expr: |
+          rate(rollbacks_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "High rollback rate detected in {{ $labels.namespace }}"
+          description: "Rollback rate is {{ $value | humanize }} per second in namespace {{ $labels.namespace }}. This indicates frequent deployment failures."
+          runbook_url: "https://docs.example.com/runbooks/high-rollback-rate"
+
+      # Warning: Deployment failure rate
+      - alert: DeploymentFailureRate
+        expr: |
+          (
+            rate(deployments_total{status="failed"}[10m]) 
+            / 
+            rate(deployments_total[10m])
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: cicd
+        annotations:
+          summary: "High deployment failure rate detected"
+          description: "Deployment failure rate is {{ $value | humanizePercentage }} in the last 10 minutes. Current rate: {{ $value }} failures/sec."
+          runbook_url: "https://docs.example.com/runbooks/deployment-failure-rate"
+
+      # Critical: Deployment success rate below SLO
+      - alert: DeploymentSuccessRateBelowSLO
+        expr: |
+          (
+            sum(rate(deployments_total{status="success"}[1h]))
+            /
+            sum(rate(deployments_total[1h]))
+          ) < 0.95
+        for: 10m
+        labels:
+          severity: critical
+          component: cicd
+          slo: "true"
+        annotations:
+          summary: "Deployment success rate below 95% SLO"
+          description: "Deployment success rate is {{ $value | humanizePercentage }} over the last hour. SLO target is 95%."
+          runbook_url: "https://docs.example.com/runbooks/deployment-slo-violation"
+
+      # Warning: Pod crash looping
+      - alert: PodCrashLooping
+        expr: |
+          rate(kube_pod_container_status_restarts_total{namespace=~"production|staging|orchestrator"}[15m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: kubernetes
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+          description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted {{ $value }} times in the last 15 minutes."
+          runbook_url: "https://docs.example.com/runbooks/pod-crash-looping"
+
+      # Critical: Deployment taking too long
+      - alert: SlowDeployment
+        expr: |
+          histogram_quantile(0.95, 
+            rate(deployment_duration_seconds_bucket[5m])
+          ) > 600
+        for: 10m
+        labels:
+          severity: warning
+          component: cicd
+        annotations:
+          summary: "Deployments are taking longer than expected"
+          description: "95th percentile deployment duration is {{ $value | humanizeDuration }} in namespace {{ $labels.namespace }}. Expected: <10 minutes."
+          runbook_url: "https://docs.example.com/runbooks/slow-deployment"
+
+  # Orchestrator-specific alerts
+  - name: orchestrator_alerts
+    interval: 30s
+    rules:
+      # Critical: Orchestrator down
+      - alert: OrchestratorDown
+        expr: |
+          up{job="orchestrator"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "Self-healing orchestrator is down"
+          description: "The orchestrator has been down for more than 2 minutes. Automatic recovery will not function until it is restored."
+          runbook_url: "https://docs.example.com/runbooks/orchestrator-down"
+
+      # Warning: Slow rollback decision
+      - alert: SlowRollbackDecision
+        expr: |
+          histogram_quantile(0.95,
+            rate(rollback_decision_duration_seconds_bucket[5m])
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "Rollback decision latency is high"
+          description: "95th percentile rollback decision time is {{ $value | humanizeDuration }}. Target: <1 second. This may delay automatic recovery."
+          runbook_url: "https://docs.example.com/runbooks/slow-rollback-decision"
+
+      # Warning: High webhook failure rate
+      - alert: HighWebhookFailureRate
+        expr: |
+          (
+            rate(webhook_errors_total[5m])
+            /
+            rate(webhook_requests_total[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "High webhook failure rate detected"
+          description: "Webhook failure rate is {{ $value | humanizePercentage }}. Orchestrator may not be receiving deployment events properly."
+          runbook_url: "https://docs.example.com/runbooks/webhook-failures"
+
+      # Critical: Redis connection failures
+      - alert: RedisConnectionFailures
+        expr: |
+          rate(redis_connection_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "Orchestrator cannot connect to Redis"
+          description: "Orchestrator is experiencing Redis connection failures. State persistence is affected."
+          runbook_url: "https://docs.example.com/runbooks/redis-connection-failures"
+
+      # Warning: High health check failure rate
+      - alert: HighHealthCheckFailureRate
+        expr: |
+          (
+            sum(rate(health_checks_total{result="failed"}[5m]))
+            /
+            sum(rate(health_checks_total[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "High health check failure rate"
+          description: "{{ $value | humanizePercentage }} of health checks are failing. This may trigger unnecessary rollbacks."
+          runbook_url: "https://docs.example.com/runbooks/health-check-failures"
+
+  # Application-specific alerts
+  - name: application_alerts
+    interval: 30s
+    rules:
+      # Critical: High error rate
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(flask_http_request_total{status=~"5.."}[5m])) by (namespace)
+            /
+            sum(rate(flask_http_request_total[5m])) by (namespace)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: application
+        annotations:
+          summary: "High HTTP 5xx error rate in {{ $labels.namespace }}"
+          description: "Error rate is {{ $value | humanizePercentage }} in namespace {{ $labels.namespace }}. Threshold: 5%."
+          runbook_url: "https://docs.example.com/runbooks/high-error-rate"
+
+      # Warning: Slow response time
+      - alert: SlowResponseTime
+        expr: |
+          histogram_quantile(0.95,
+            rate(flask_http_request_duration_seconds_bucket[5m])
+          ) > 1.0
+        for: 10m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "Slow response time in {{ $labels.namespace }}"
+          description: "95th percentile response time is {{ $value | humanizeDuration }}. Target: <1 second."
+          runbook_url: "https://docs.example.com/runbooks/slow-response-time"
+
+      # Warning: High memory usage
+      - alert: HighMemoryUsage
+        expr: |
+          (
+            container_memory_working_set_bytes{namespace=~"production|staging",container="sample-app"}
+            /
+            container_spec_memory_limit_bytes{namespace=~"production|staging",container="sample-app"}
+          ) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "High memory usage in {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: "Memory usage is {{ $value | humanizePercentage }} of limit. Pod may be OOMKilled soon."
+          runbook_url: "https://docs.example.com/runbooks/high-memory-usage"
+
+      # Warning: High CPU usage
+      - alert: HighCPUUsage
+        expr: |
+          (
+            rate(container_cpu_usage_seconds_total{namespace=~"production|staging",container="sample-app"}[5m])
+            /
+            container_spec_cpu_quota{namespace=~"production|staging",container="sample-app"}
+            * 
+            container_spec_cpu_period{namespace=~"production|staging",container="sample-app"}
+          ) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          component: application
+        annotations:
+          summary: "High CPU usage in {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: "CPU usage is {{ $value | humanizePercentage }} of limit for pod {{ $labels.pod }}."
+          runbook_url: "https://docs.example.com/runbooks/high-cpu-usage"
+
+      # Critical: Application down
+      - alert: ApplicationDown
+        expr: |
+          up{job="sample-app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: application
+        annotations:
+          summary: "Sample application is down in {{ $labels.namespace }}"
+          description: "All application instances are unreachable in namespace {{ $labels.namespace }}."
+          runbook_url: "https://docs.example.com/runbooks/application-down"
+
+  # Infrastructure alerts
+  - name: infrastructure_alerts
+    interval: 60s
+    rules:
+      # Critical: Node not ready
+      - alert: NodeNotReady
+        expr: |
+          kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: kubernetes
+        annotations:
+          summary: "Kubernetes node {{ $labels.node }} is not ready"
+          description: "Node {{ $labels.node }} has been in NotReady state for more than 5 minutes."
+          runbook_url: "https://docs.example.com/runbooks/node-not-ready"
+
+      # Warning: High node CPU usage
+      - alert: HighNodeCPU
+        expr: |
+          (
+            100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+          ) > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: infrastructure
+        annotations:
+          summary: "High CPU usage on node {{ $labels.instance }}"
+          description: "CPU usage is {{ $value | humanize }}% on node {{ $labels.instance }}."
+          runbook_url: "https://docs.example.com/runbooks/high-node-cpu"
+
+      # Warning: High node memory usage
+      - alert: HighNodeMemory
+        expr: |
+          (
+            (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)
+            /
+            node_memory_MemTotal_bytes
+          ) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          component: infrastructure
+        annotations:
+          summary: "High memory usage on node {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | humanize }}% on node {{ $labels.instance }}."
+          runbook_url: "https://docs.example.com/runbooks/high-node-memory"
+
+      # Critical: Disk space low
+      - alert: DiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"}
+            /
+            node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}
+          ) * 100 < 15
+        for: 10m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Low disk space on node {{ $labels.instance }}"
+          description: "Only {{ $value | humanize }}% disk space remaining on {{ $labels.instance }} at {{ $labels.mountpoint }}."
+          runbook_url: "https://docs.example.com/runbooks/disk-space-low"
+
+      # Warning: Too many pods per node
+      - alert: TooManyPodsPerNode
+        expr: |
+          sum by (node) (kube_pod_info) > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: kubernetes
+        annotations:
+          summary: "Too many pods on node {{ $labels.node }}"
+          description: "Node {{ $labels.node }} is running {{ $value }} pods. This may impact performance."
+          runbook_url: "https://docs.example.com/runbooks/too-many-pods"
+
+  # Monitoring stack health
+  - name: monitoring_alerts
+    interval: 60s
+    rules:
+      # Critical: Prometheus scrape failures
+      - alert: PrometheusScrapeFailing
+        expr: |
+          up == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }}"
+          description: "Prometheus has failed to scrape {{ $labels.job }} for more than 5 minutes."
+          runbook_url: "https://docs.example.com/runbooks/prometheus-scrape-failing"
+
+      # Warning: Prometheus storage full
+      - alert: PrometheusStorageFull
+        expr: |
+          (
+            prometheus_tsdb_storage_blocks_bytes
+            /
+            prometheus_tsdb_retention_limit_bytes
+          ) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Prometheus storage is nearly full"
+          description: "Prometheus storage is {{ $value | humanizePercentage }} full. Data retention may be affected soon."
+          runbook_url: "https://docs.example.com/runbooks/prometheus-storage-full"
+
+      # Warning: Grafana down
+      - alert: GrafanaDown
+        expr: |
+          up{job="grafana"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Grafana is down"
+          description: "Grafana has been unreachable for more than 5 minutes. Dashboards are unavailable."
+          runbook_url: "https://docs.example.com/runbooks/grafana-down"
+
+      # Warning: Loki down
+      - alert: LokiDown
+        expr: |
+          up{job="loki"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "Loki is down"
+          description: "Loki has been unreachable for more than 5 minutes. Log aggregation is affected."
+          runbook_url: "https://docs.example.com/runbooks/loki-down"

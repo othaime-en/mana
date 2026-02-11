@@ -9,7 +9,6 @@ locals {
   }
 }
 
-# Deployment
 resource "kubernetes_deployment" "sample_app" {
   metadata {
     name      = local.app_name
@@ -74,6 +73,11 @@ resource "kubernetes_deployment" "sample_app" {
             value = "5000"
           }
 
+          env {
+            name  = "FAILURE_RATE"
+            value = tostring(var.failure_rate)
+          }
+
           resources {
             requests = {
               cpu    = var.resources.requests.cpu
@@ -124,7 +128,6 @@ resource "kubernetes_deployment" "sample_app" {
   }
 }
 
-# Service
 resource "kubernetes_service" "sample_app" {
   metadata {
     name      = "${local.app_name}-service"
@@ -149,7 +152,6 @@ resource "kubernetes_service" "sample_app" {
   }
 }
 
-# Ingress
 resource "kubernetes_ingress_v1" "sample_app" {
   metadata {
     name      = "${local.app_name}-ingress"
@@ -185,7 +187,6 @@ resource "kubernetes_ingress_v1" "sample_app" {
   }
 }
 
-# Pod Disruption Budget
 resource "kubernetes_pod_disruption_budget_v1" "sample_app" {
   metadata {
     name      = "${local.app_name}-pdb"
@@ -203,7 +204,6 @@ resource "kubernetes_pod_disruption_budget_v1" "sample_app" {
   }
 }
 
-# Horizontal Pod Autoscaler
 resource "kubernetes_horizontal_pod_autoscaler_v2" "sample_app" {
   count = var.enable_hpa ? 1 : 0
 

@@ -1,4 +1,3 @@
-
 variable "namespace" {
   description = "Kubernetes namespace for sample app"
   type        = string
@@ -80,4 +79,15 @@ variable "ingress_host" {
   description = "Ingress host"
   type        = string
   default     = "sample-app.local"
+}
+
+variable "failure_rate" {
+  description = "Failure simulation rate injected as FAILURE_RATE env var (0.0 = disabled, production should always be 0.0)"
+  type        = number
+  default     = 0.0
+
+  validation {
+    condition     = var.failure_rate >= 0.0 && var.failure_rate <= 1.0
+    error_message = "Failure rate must be between 0.0 and 1.0."
+  }
 }

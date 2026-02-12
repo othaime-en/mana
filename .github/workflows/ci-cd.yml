@@ -304,9 +304,8 @@ jobs:
     # Only run if:
     # 1. Explicitly enabled via workflow_dispatch OR
     # 2. Feature flag is enabled AND push to develop branch
-    if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'staging') ||
-      (env.ENABLE_STAGING_DEPLOY == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/develop')
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'staging'
+
     environment:
       name: Staging
       url: http://sample-app.staging.local
@@ -400,9 +399,8 @@ jobs:
     # Only run if:
     # 1. Explicitly enabled via workflow_dispatch OR
     # 2. Feature flag is enabled AND push to main branch
-    if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'production') ||
-      (env.ENABLE_PRODUCTION_DEPLOY == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'production'
+
     environment:
       name: Production
       url: http://sample-app.local

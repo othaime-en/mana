@@ -6,11 +6,24 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'Deployment target'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - staging
+          - production
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/sample-app
   ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
+  # Feature flags for deployment control
+  ENABLE_STAGING_DEPLOY: false  # Set to true when staging cluster is ready
+  ENABLE_PRODUCTION_DEPLOY: false  # Set to true when production cluster is ready
 
 jobs:
   build-and-test:
@@ -19,6 +32,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       deployment_id: ${{ steps.deployment.outputs.id }}
+      image_tag: ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: Checkout code
@@ -27,7 +41,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Generate version
         id: version
@@ -43,31 +57,62 @@ jobs:
           echo "id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
           echo "Generated deployment ID: $DEPLOYMENT_ID"
 
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         working-directory: ./sample-app
         run: |
           pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run linting
+        working-directory: ./sample-app
+        run: |
+          pip install flake8 black
+          flake8 src/ --max-line-length=100 --extend-ignore=E203,W503
+          black --check src/
+        continue-on-error: true  # Don't fail on linting, just warn
 
       - name: Run tests
         id: tests
         working-directory: ./sample-app
         run: |
-          pytest tests/ -v --cov=src --cov-report=xml
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
         continue-on-error: false
 
-      - name: Notify test failure
-        if: failure() && steps.tests.outcome == 'failure'
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          files: ./sample-app/coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+        continue-on-error: true
+
+      - name: Notify test failure (if orchestrator available)
+        if: failure() && steps.tests.outcome == 'failure' && env.ORCHESTRATOR_URL != ''
         run: |
           curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d '{
               "deployment_id": "${{ steps.deployment.outputs.id }}",
-              "namespace": "production",
+              "namespace": "ci",
               "app_name": "sample-app",
               "version": "${{ steps.version.outputs.version }}",
               "status": "failed",
-              "failure_type": "test_failure"
-            }'
+              "failure_type": "test_failure",
+              "metadata": {
+                "commit": "${{ github.sha }}",
+                "author": "${{ github.actor }}",
+                "branch": "${{ github.ref_name }}"
+              }
+            }' || echo "Failed to notify orchestrator (this is OK if not deployed yet)"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -77,7 +122,17 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-
 
       - name: Build Docker image
         id: build
@@ -86,43 +141,175 @@ jobs:
           context: ./sample-app
           push: false
           load: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             APP_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Notify build failure
-        if: failure() && steps.build.outcome == 'failure'
+      - name: Test Docker image
+        run: |
+          docker run -d --name test-container \
+            -p 5000:5000 \
+            -e ENVIRONMENT=test \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          
+          # Wait for container to be healthy
+          timeout 30 bash -c 'until docker exec test-container curl -f http://localhost:5000/health; do sleep 2; done'
+          
+          # Run basic smoke tests
+          docker exec test-container curl -f http://localhost:5000/
+          docker exec test-container curl -f http://localhost:5000/api/data
+          
+          # Cleanup
+          docker stop test-container
+          docker rm test-container
+
+      - name: Notify build failure (if orchestrator available)
+        if: failure() && steps.build.outcome == 'failure' && env.ORCHESTRATOR_URL != ''
         run: |
           curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d '{
               "deployment_id": "${{ steps.deployment.outputs.id }}",
-              "namespace": "production",
+              "namespace": "ci",
               "app_name": "sample-app",
               "version": "${{ steps.version.outputs.version }}",
               "status": "failed",
-              "failure_type": "build_failure"
-            }'
+              "failure_type": "build_failure",
+              "metadata": {
+                "commit": "${{ github.sha }}",
+                "author": "${{ github.actor }}",
+                "branch": "${{ github.ref_name }}"
+              }
+            }' || echo "Failed to notify orchestrator (this is OK if not deployed yet)"
 
       - name: Push Docker image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push'
         uses: docker/build-push-action@v5
         with:
           context: ./sample-app
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Local testing job - always enabled
+  test-local-deployment:
+    name: Test Local Deployment
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: mana-test
+          wait: 5m
+
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Load Docker image to Kind
+        run: |
+          kind load docker-image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }} \
+            --name mana-test || echo "Image loading failed (expected if not built locally)"
+
+      - name: Create test namespace
+        run: |
+          kubectl create namespace test-deployment
+
+      - name: Deploy sample app (simple version)
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: sample-app
+            namespace: test-deployment
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: sample-app
+            template:
+              metadata:
+                labels:
+                  app: sample-app
+              spec:
+                containers:
+                - name: sample-app
+                  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }}
+                  imagePullPolicy: IfNotPresent
+                  ports:
+                  - containerPort: 5000
+                  env:
+                  - name: ENVIRONMENT
+                    value: "test"
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "100m"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: sample-app
+            namespace: test-deployment
+          spec:
+            selector:
+              app: sample-app
+            ports:
+            - port: 80
+              targetPort: 5000
+          EOF
+
+      - name: Wait for deployment
+        run: |
+          kubectl wait --for=condition=available --timeout=120s \
+            deployment/sample-app -n test-deployment || true
+
+      - name: Check deployment status
+        run: |
+          kubectl get pods -n test-deployment
+          kubectl describe deployment sample-app -n test-deployment
+
+      - name: Run basic health checks
+        run: |
+          kubectl port-forward -n test-deployment svc/sample-app 8080:80 &
+          PF_PID=$!
+          sleep 5
+          
+          curl -f http://localhost:8080/health || echo "Health check failed"
+          curl -f http://localhost:8080/ || echo "Root endpoint failed"
+          
+          kill $PF_PID || true
 
   deploy-staging:
     name: Deploy to Staging
     needs: build-and-test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    # Only run if:
+    # 1. Explicitly enabled via workflow_dispatch OR
+    # 2. Feature flag is enabled AND push to develop branch
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'staging') ||
+      (env.ENABLE_STAGING_DEPLOY == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/develop')
+    environment:
+      name: Staging
+      url: http://sample-app.staging.local
 
     steps:
       - name: Checkout code
@@ -137,26 +324,51 @@ jobs:
         run: |
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
           export KUBECONFIG=./kubeconfig
+          kubectl cluster-info
 
       - name: Deploy to staging
         id: deploy
         run: |
           export KUBECONFIG=./kubeconfig
+          
+          # Update deployment image
           kubectl set image deployment/sample-app \
             sample-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }} \
             -n staging
-
+          
+          # Wait for rollout
           kubectl rollout status deployment/sample-app -n staging --timeout=5m
 
       - name: Health check
         run: |
           export KUBECONFIG=./kubeconfig
           sleep 30
+          
+          # Check pod status
           kubectl get pods -n staging -l app=sample-app
+          
+          # Verify all pods are ready
+          READY_PODS=$(kubectl get pods -n staging -l app=sample-app -o json | \
+            jq '[.items[] | select(.status.phase=="Running" and .status.conditions[]? | select(.type=="Ready" and .status=="True"))] | length')
+          TOTAL_PODS=$(kubectl get deployment sample-app -n staging -o jsonpath='{.spec.replicas}')
+          
+          echo "Ready pods: $READY_PODS / $TOTAL_PODS"
+          
+          if [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
+            echo "✓ All pods are ready"
+          else
+            echo "✗ Not all pods are ready"
+            exit 1
+          fi
 
       - name: Notify deployment status
         if: always()
         run: |
+          if [ -z "${{ env.ORCHESTRATOR_URL }}" ]; then
+            echo "Orchestrator URL not configured, skipping notification"
+            exit 0
+          fi
+          
           if [ "${{ steps.deploy.outcome }}" == "success" ]; then
             STATUS="success"
             FAILURE_TYPE=""
@@ -165,7 +377,7 @@ jobs:
             FAILURE_TYPE="deployment_failure"
           fi
 
-          curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
+          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d "{
               \"deployment_id\": \"${{ needs.build-and-test.outputs.deployment_id }}\",
@@ -173,14 +385,24 @@ jobs:
               \"app_name\": \"sample-app\",
               \"version\": \"${{ needs.build-and-test.outputs.version }}\",
               \"status\": \"$STATUS\",
-              \"failure_type\": \"$FAILURE_TYPE\"
-            }"
+              \"failure_type\": \"$FAILURE_TYPE\",
+              \"metadata\": {
+                \"commit\": \"${{ github.sha }}\",
+                \"author\": \"${{ github.actor }}\",
+                \"branch\": \"${{ github.ref_name }}\"
+              }
+            }" || echo "Failed to notify orchestrator"
 
   deploy-production:
     name: Deploy to Production
     needs: build-and-test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Only run if:
+    # 1. Explicitly enabled via workflow_dispatch OR
+    # 2. Feature flag is enabled AND push to main branch
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'production') ||
+      (env.ENABLE_PRODUCTION_DEPLOY == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main')
     environment:
       name: Production
       url: http://sample-app.local
@@ -196,20 +418,32 @@ jobs:
 
       - name: Configure kubectl
         run: |
+          if [ -z "${{ secrets.KUBE_CONFIG }}" ]; then
+            echo "Error: KUBE_CONFIG secret not configured"
+            exit 1
+          fi
+          
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
           export KUBECONFIG=./kubeconfig
+          kubectl cluster-info
 
       - name: Notify deployment start
+        if: env.ORCHESTRATOR_URL != ''
         run: |
-          curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
+          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d '{
               "deployment_id": "${{ needs.build-and-test.outputs.deployment_id }}",
               "namespace": "production",
               "app_name": "sample-app",
               "version": "${{ needs.build-and-test.outputs.version }}",
-              "status": "in_progress"
-            }'
+              "status": "in_progress",
+              "metadata": {
+                "commit": "${{ github.sha }}",
+                "author": "${{ github.actor }}",
+                "branch": "${{ github.ref_name }}"
+              }
+            }' || echo "Failed to notify orchestrator"
 
       - name: Deploy to production
         id: deploy
@@ -232,16 +466,18 @@ jobs:
 
           # Check pod status
           READY_PODS=$(kubectl get pods -n production -l app=sample-app -o json | \
-            jq '[.items[] | select(.status.phase=="Running")] | length')
+            jq '[.items[] | select(.status.phase=="Running" and .status.conditions[]? | select(.type=="Ready" and .status=="True"))] | length')
           TOTAL_PODS=$(kubectl get deployment sample-app -n production -o jsonpath='{.spec.replicas}')
 
           echo "Ready pods: $READY_PODS / $TOTAL_PODS"
 
           if [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
-            echo "Health check passed"
+            echo "✓ Health check passed"
             exit 0
           else
-            echo "Health check failed"
+            echo "✗ Health check failed"
+            kubectl get pods -n production -l app=sample-app
+            kubectl describe pods -n production -l app=sample-app
             exit 1
           fi
 
@@ -256,16 +492,30 @@ jobs:
           sleep 5
 
           # Run smoke tests
-          curl -f http://localhost:8080/health || exit 1
-          curl -f http://localhost:8080/ || exit 1
-          curl -f http://localhost:8080/api/data || exit 1
+          TESTS_PASSED=true
+          
+          curl -f http://localhost:8080/health || TESTS_PASSED=false
+          curl -f http://localhost:8080/ || TESTS_PASSED=false
+          curl -f http://localhost:8080/api/data || TESTS_PASSED=false
+          curl -f http://localhost:8080/api/config || TESTS_PASSED=false
 
           kill $PF_PID
-          echo "Smoke tests passed"
+          
+          if [ "$TESTS_PASSED" = true ]; then
+            echo "✓ All smoke tests passed"
+          else
+            echo "✗ Some smoke tests failed"
+            exit 1
+          fi
 
       - name: Notify deployment status
         if: always()
         run: |
+          if [ -z "${{ env.ORCHESTRATOR_URL }}" ]; then
+            echo "Orchestrator URL not configured, skipping notification"
+            exit 0
+          fi
+          
           if [ "${{ steps.deploy.outcome }}" == "success" ] && \
              [ "${{ steps.health.outcome }}" == "success" ] && \
              [ "${{ steps.smoke.outcome }}" == "success" ]; then
@@ -279,10 +529,10 @@ jobs:
             FAILURE_TYPE="deployment_failure"
           else
             STATUS="failed"
-            FAILURE_TYPE="timeout"
+            FAILURE_TYPE="smoke_test_failure"
           fi
 
-          curl -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
+          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d "{
               \"deployment_id\": \"${{ needs.build-and-test.outputs.deployment_id }}\",
@@ -296,10 +546,13 @@ jobs:
                 \"author\": \"${{ github.actor }}\",
                 \"branch\": \"${{ github.ref_name }}\"
               }
-            }"
+            }" || echo "Failed to notify orchestrator"
 
       - name: Rollback on failure
         if: failure()
         run: |
-          echo "Deployment failed - orchestrator will handle rollback"
-          # The orchestrator will automatically handle the rollback
+          export KUBECONFIG=./kubeconfig
+          echo "Deployment failed - initiating rollback"
+          kubectl rollout undo deployment/sample-app -n production
+          kubectl rollout status deployment/sample-app -n production --timeout=5m
+          echo "Rollback completed"

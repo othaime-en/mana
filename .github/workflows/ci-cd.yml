@@ -156,8 +156,14 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
           
           # Wait for container to be healthy
-          timeout 30 bash -c 'until docker exec test-container curl -f http://localhost:5000/health; do sleep 2; done'
-          
+          if ! timeout 30 bash -c 'until docker exec test-container curl -f http://localhost:5000/health; do sleep 2; done'; then
+            echo "Container failed to start. Showing logs:"
+            docker logs test-container
+            docker stop test-container || true
+            docker rm test-container || true
+            exit 1
+          fi
+                    
           # Run basic smoke tests
           docker exec test-container curl -f http://localhost:5000/
           docker exec test-container curl -f http://localhost:5000/api/data

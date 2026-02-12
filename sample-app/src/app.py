@@ -6,8 +6,8 @@ from functools import wraps
 from typing import Tuple, Any
 import traceback
 
-from config import get_config
-from utils import (
+from src.config import get_config
+from src.utils import (
     setup_logging,
     get_request_id,
     set_request_id,

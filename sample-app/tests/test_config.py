@@ -1,5 +1,5 @@
 import pytest
-from config import Config, get_config, reload_config
+from src.config import Config, get_config, reload_config
 
 
 class TestConfig:

@@ -5,6 +5,11 @@ RUN useradd -m -u 1000 appuser
 
 WORKDIR /app
 
+# Install curl and other dependencies
+RUN apt-get update && apt-get install -y --no-cache \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -13,7 +18,7 @@ COPY src/ ./src/
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s \
-    CMD python -c "import requests; requests.get('http://localhost:5000/health')"
+    CMD curl -f http://localhost:5000/health || exit 1
 
 EXPOSE 5000
 

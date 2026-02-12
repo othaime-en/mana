@@ -17,6 +17,11 @@ on:
           - staging
           - production
 
+permissions: 
+  contents: read
+  packages: write
+
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/sample-app
@@ -163,7 +168,7 @@ jobs:
             docker rm test-container || true
             exit 1
           fi
-                    
+
           # Run basic smoke tests
           docker exec test-container curl -f http://localhost:5000/
           docker exec test-container curl -f http://localhost:5000/api/data

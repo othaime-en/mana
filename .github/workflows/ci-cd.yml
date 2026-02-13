@@ -115,7 +115,8 @@ jobs:
               "metadata": {
                 "commit": "${{ github.sha }}",
                 "author": "${{ github.actor }}",
-                "branch": "${{ github.ref_name }}"
+                "branch": "${{ github.ref_name }}",
+                "workflow_run_id": "${{ github.run_id }}"
               }
             }' || echo "Failed to notify orchestrator (this is OK if not deployed yet)"
 
@@ -192,7 +193,8 @@ jobs:
               "metadata": {
                 "commit": "${{ github.sha }}",
                 "author": "${{ github.actor }}",
-                "branch": "${{ github.ref_name }}"
+                "branch": "${{ github.ref_name }}",
+                "workflow_run_id": "${{ github.run_id }}"
               }
             }' || echo "Failed to notify orchestrator (this is OK if not deployed yet)"
 
@@ -399,7 +401,8 @@ jobs:
               \"metadata\": {
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\"
+                \"branch\": \"${{ github.ref_name }}\",
+                \"workflow_run_id\": \"${{ github.run_id }}\"
               }
             }" || echo "Failed to notify orchestrator"
 
@@ -450,7 +453,8 @@ jobs:
               "metadata": {
                 "commit": "${{ github.sha }}",
                 "author": "${{ github.actor }}",
-                "branch": "${{ github.ref_name }}"
+                "branch": "${{ github.ref_name }}",
+                "workflow_run_id": "${{ github.run_id }}"
               }
             }' || echo "Failed to notify orchestrator"
 
@@ -553,7 +557,8 @@ jobs:
               \"metadata\": {
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\"
+                \"branch\": \"${{ github.ref_name }}\",
+                \"workflow_run_id\": \"${{ github.run_id }}\"
               }
             }" || echo "Failed to notify orchestrator"
 

@@ -51,7 +51,7 @@ jobs:
       - name: Generate version
         id: version
         run: |
-          VERSION="${GITHUB_SHA::7}-$(date +%s)"
+          VERSION="v${GITHUB_SHA::7}-$(date +%s)"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Generated version: $VERSION"
 
@@ -115,7 +115,8 @@ jobs:
               "metadata": {
                 "commit": "${{ github.sha }}",
                 "author": "${{ github.actor }}",
-                "branch": "${{ github.ref_name }}"
+                "branch": "${{ github.ref_name }}",
+                "workflow_run_id": "${{ github.run_id }}"
               }
             }' || echo "Failed to notify orchestrator (this is OK if not deployed yet)"
 
@@ -150,6 +151,19 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             APP_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Orchestrator Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./orchestrator
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator:latest
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -192,7 +206,8 @@ jobs:
               "metadata": {
                 "commit": "${{ github.sha }}",
                 "author": "${{ github.actor }}",
-                "branch": "${{ github.ref_name }}"
+                "branch": "${{ github.ref_name }}",
+                "workflow_run_id": "${{ github.run_id }}"
               }
             }' || echo "Failed to notify orchestrator (this is OK if not deployed yet)"
 
@@ -399,7 +414,8 @@ jobs:
               \"metadata\": {
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\"
+                \"branch\": \"${{ github.ref_name }}\",
+                \"workflow_run_id\": \"${{ github.run_id }}\"
               }
             }" || echo "Failed to notify orchestrator"
 
@@ -450,7 +466,8 @@ jobs:
               "metadata": {
                 "commit": "${{ github.sha }}",
                 "author": "${{ github.actor }}",
-                "branch": "${{ github.ref_name }}"
+                "branch": "${{ github.ref_name }}",
+                "workflow_run_id": "${{ github.run_id }}"
               }
             }' || echo "Failed to notify orchestrator"
 
@@ -553,7 +570,8 @@ jobs:
               \"metadata\": {
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\"
+                \"branch\": \"${{ github.ref_name }}\",
+                \"workflow_run_id\": \"${{ github.run_id }}\"
               }
             }" || echo "Failed to notify orchestrator"
 

@@ -154,6 +154,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build Orchestrator Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./orchestrator
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator:latest
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Test Docker image
         run: |
           docker run -d --name test-container \

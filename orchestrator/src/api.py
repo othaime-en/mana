@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import uvicorn
 import os
 from src.orchestrator import (
@@ -66,14 +66,18 @@ orchestrator = SelfHealingOrchestrator(use_config=True)
 
 # Request models
 class WebhookPayload(BaseModel):
-    """GitHub Actions webhook payload"""
+    """
+    GitHub Actions webhook payload
+    
+    Requires workflow_run_id for retry mechanism
+    """
     deployment_id: str
     namespace: str
     app_name: str
     version: str
     status: str
     failure_type: Optional[str] = None
-    metadata: Optional[Dict] = {}
+    metadata: Optional[Dict] = {}  # Should include workflow_run_id
 
 
 class RollbackRequest(BaseModel):
@@ -101,24 +105,59 @@ def root():
         "features": [
             "Application health endpoint monitoring",
             "Exponential backoff for retries",
+            "GitHub Actions retry integration",
             "Comprehensive audit logging",
-            "Automatic rollback on failure"
-        ]
+            "Automatic rollback on failure",
+            "Previous version tracking"
+        ],
+        "github_integration": bool(
+            orchestrator.github_token and orchestrator.github_repo
+        )
     }
 
 
 @app.get("/health")
 def health():
     """Health check endpoint"""
-    return {"status": "healthy"}
+    try:
+        # Check Redis connectivity
+        orchestrator.redis_client.ping()
+        redis_healthy = True
+    except:
+        redis_healthy = False
+    
+    try:
+        # Check Kubernetes connectivity
+        orchestrator.k8s_core.list_namespace(limit=1)
+        k8s_healthy = True
+    except:
+        k8s_healthy = False
+    
+    overall_healthy = redis_healthy and k8s_healthy
+    
+    return {
+        "status": "healthy" if overall_healthy else "degraded",
+        "redis": "healthy" if redis_healthy else "unhealthy",
+        "kubernetes": "healthy" if k8s_healthy else "unhealthy",
+        "github_integration": bool(
+            orchestrator.github_token and orchestrator.github_repo
+        )
+    }
 
 
 @app.post("/webhook/deployment")
 async def deployment_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
     """
     Webhook endpoint for deployment events from GitHub Actions
+    Stores workflow_run_id in metadata for retry mechanism
     """
     logger.info(f"Received deployment webhook: {payload.deployment_id}")
+    
+    # Validate workflow_run_id is present for failed deployments
+    if payload.status == "failed" and not payload.metadata.get('workflow_run_id'):
+        logger.warning(
+            "Webhook payload missing workflow_run_id - retry functionality will be limited"
+        )
     
     # Log webhook receipt
     audit_logger.log_deployment_received(
@@ -140,6 +179,13 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
         if payload.status == "failed" and payload.failure_type:
             # Handle failure
             failure_type = FailureType(payload.failure_type)
+            
+            # Create or update deployment state with metadata
+            state = orchestrator.get_deployment_state(payload.deployment_id)
+            if state:
+                # Update existing state with new metadata
+                state.metadata.update(payload.metadata)
+                orchestrator.save_deployment_state(state)
             
             result = orchestrator.handle_deployment_failure(
                 deployment_id=payload.deployment_id,
@@ -173,18 +219,25 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             )
         
         elif payload.status == "success":
-            # Track successful deployment
+            # Track successful deployment for rollback reference
             state = orchestrator.get_deployment_state(payload.deployment_id)
             if state:
                 state.status = DeploymentStatus.SUCCESS
                 orchestrator.save_deployment_state(state)
+            
+            # Store as rollback candidate
+            orchestrator.save_successful_deployment_version(
+                namespace=payload.namespace,
+                deployment_name=payload.app_name,
+                version=payload.version
+            )
             
             return JSONResponse(
                 status_code=200,
                 content={
                     "status": "success",
                     "deployment_id": payload.deployment_id,
-                    "message": "Deployment successful"
+                    "message": "Deployment successful - version saved for future rollbacks"
                 }
             )
         
@@ -203,9 +256,7 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
 
 @app.post("/rollback")
 async def manual_rollback(request: RollbackRequest):
-    """
-    Manual rollback endpoint with audit logging
-    """
+    """Manual rollback endpoint with audit logging"""
     logger.info(f"Manual rollback requested for {request.deployment_name}")
     
     # Generate deployment ID for manual rollback
@@ -244,9 +295,7 @@ async def manual_rollback(request: RollbackRequest):
 
 @app.post("/health-check")
 async def check_health(request: HealthCheckRequest):
-    """
-    Check deployment health endpoint
-    """
+    """Check deployment health endpoint"""
     import time
     start_time = time.time()
     
@@ -279,9 +328,7 @@ async def check_health(request: HealthCheckRequest):
 
 @app.get("/deployment/{deployment_id}")
 async def get_deployment(deployment_id: str):
-    """
-    Get deployment state
-    """
+    """Get deployment state"""
     state = orchestrator.get_deployment_state(deployment_id)
     
     if not state:
@@ -301,11 +348,37 @@ async def get_deployment(deployment_id: str):
     }
 
 
+@app.get("/deployments/recent")
+async def get_recent_deployments(namespace: Optional[str] = None, limit: int = 10):
+    """
+    Get recent deployment states
+    """
+    try:
+        states = orchestrator.get_recent_deployments(namespace=namespace, limit=limit)
+        
+        return {
+            "count": len(states),
+            "deployments": [
+                {
+                    "deployment_id": state.deployment_id,
+                    "namespace": state.namespace,
+                    "app_name": state.app_name,
+                    "version": state.version,
+                    "status": state.status.value,
+                    "retry_count": state.retry_count,
+                    "timestamp": state.timestamp
+                }
+                for state in states
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error getting recent deployments: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/metrics/deployment/{namespace}/{deployment_name}")
 async def get_metrics(namespace: str, deployment_name: str):
-    """
-    Get deployment metrics
-    """
+    """Get deployment metrics"""
     try:
         metrics = orchestrator.get_deployment_metrics(namespace, deployment_name)
         return metrics
@@ -316,16 +389,18 @@ async def get_metrics(namespace: str, deployment_name: str):
 
 @app.get("/config")
 async def get_config():
-    """
-    Get orchestrator configuration
-    """
+    """Get orchestrator configuration"""
     return {
         "max_retries": orchestrator.max_retries,
         "rollback_threshold": orchestrator.rollback_threshold,
         "initial_backoff": orchestrator.initial_backoff,
         "max_backoff": orchestrator.max_backoff,
         "backoff_multiplier": orchestrator.backoff_multiplier,
-        "health_check_timeout": orchestrator.health_check_timeout
+        "health_check_timeout": orchestrator.health_check_timeout,
+        "max_app_health_failures": orchestrator.max_app_health_failures,
+        "github_integration_enabled": bool(
+            orchestrator.github_token and orchestrator.github_repo
+        )
     }
 
 

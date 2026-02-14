@@ -37,10 +37,23 @@ jobs:
           kubectl cluster-info
           kubectl get nodes
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build sample-app image locally
+        uses: docker/build-push-action@v5
+        with:
+          context: ./sample-app
+          push: false
+          load: true
+          tags: local-test:${{ inputs.image-tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Load Docker image to Kind
         run: |
-          kind load docker-image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }} \
-            --name mana-test || echo "Image loading skipped (not available locally)"
+          kind load docker-image local-test:${{ inputs.image-tag }} --name mana-test
+          echo "✓ Image loaded successfully to Kind cluster"
 
       - name: Create namespace
         run: |
@@ -66,8 +79,8 @@ jobs:
               spec:
                 containers:
                 - name: sample-app
-                  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }}
-                  imagePullPolicy: IfNotPresent
+                  image: local-test:${{ inputs.image-tag }}
+                  imagePullPolicy: Never
                   ports:
                   - containerPort: 5000
                   env:

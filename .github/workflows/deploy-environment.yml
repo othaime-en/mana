@@ -1,0 +1,181 @@
+name: Deploy to Environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment (staging/production)'
+        required: true
+        type: string
+      version:
+        description: 'Version to deploy'
+        required: true
+        type: string
+      deployment-id:
+        description: 'Deployment ID for tracking'
+        required: true
+        type: string
+      namespace:
+        description: 'Kubernetes namespace'
+        required: true
+        type: string
+      smoke-tests:
+        description: 'Run smoke tests after deployment'
+        required: false
+        type: boolean
+        default: false
+      health-check-timeout:
+        description: 'Health check timeout in seconds'
+        required: false
+        type: number
+        default: 30
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/sample-app
+  ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    
+    environment:
+      name: ${{ inputs.environment }}
+      url: http://sample-app.${{ inputs.environment }}.local
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "v1.28.0"
+
+      - name: Configure kubectl
+        run: |
+          if [ -z "${{ secrets.KUBE_CONFIG }}" ]; then
+            echo "Error: KUBE_CONFIG secret not configured"
+            exit 1
+          fi
+          
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
+          export KUBECONFIG=./kubeconfig
+          kubectl cluster-info
+
+      - name: Notify deployment start
+        if: env.ORCHESTRATOR_URL != ''
+        uses: ./.github/actions/notify-orchestrator
+        with:
+          deployment-id: ${{ inputs.deployment-id }}
+          namespace: ${{ inputs.namespace }}
+          version: ${{ inputs.version }}
+          status: in_progress
+
+      - name: Deploy application
+        id: deploy
+        run: |
+          export KUBECONFIG=./kubeconfig
+          
+          kubectl set image deployment/sample-app \
+            sample-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }} \
+            -n ${{ inputs.namespace }}
+          
+          kubectl rollout status deployment/sample-app \
+            -n ${{ inputs.namespace }} \
+            --timeout=10m
+
+      - name: Health check
+        id: health
+        run: |
+          export KUBECONFIG=./kubeconfig
+          sleep ${{ inputs.health-check-timeout }}
+
+          READY_PODS=$(kubectl get pods -n ${{ inputs.namespace }} -l app=sample-app -o json | \
+            jq '[.items[] | select(.status.phase=="Running" and .status.conditions[]? | select(.type=="Ready" and .status=="True"))] | length')
+          TOTAL_PODS=$(kubectl get deployment sample-app -n ${{ inputs.namespace }} -o jsonpath='{.spec.replicas}')
+
+          echo "Ready pods: $READY_PODS / $TOTAL_PODS"
+
+          if [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
+            echo "✓ Health check passed"
+            exit 0
+          else
+            echo "✗ Health check failed"
+            kubectl get pods -n ${{ inputs.namespace }} -l app=sample-app
+            kubectl describe pods -n ${{ inputs.namespace }} -l app=sample-app
+            exit 1
+          fi
+
+      - name: Run smoke tests
+        id: smoke
+        if: inputs.smoke-tests
+        run: |
+          export KUBECONFIG=./kubeconfig
+
+          kubectl port-forward -n ${{ inputs.namespace }} service/sample-app-service 8080:80 &
+          PF_PID=$!
+          sleep 5
+
+          TESTS_PASSED=true
+          
+          echo "Testing /health..."
+          curl -f http://localhost:8080/health || TESTS_PASSED=false
+          
+          echo "Testing /..."
+          curl -f http://localhost:8080/ || TESTS_PASSED=false
+          
+          echo "Testing /api/data..."
+          curl -f http://localhost:8080/api/data || TESTS_PASSED=false
+          
+          echo "Testing /api/config..."
+          curl -f http://localhost:8080/api/config || TESTS_PASSED=false
+
+          kill $PF_PID || true
+          
+          if [ "$TESTS_PASSED" = true ]; then
+            echo "✓ All smoke tests passed"
+          else
+            echo "✗ Some smoke tests failed"
+            exit 1
+          fi
+
+      - name: Determine deployment status
+        id: status
+        if: always()
+        run: |
+          if [ "${{ steps.deploy.outcome }}" == "success" ] && \
+             [ "${{ steps.health.outcome }}" == "success" ] && \
+             [ "${{ steps.smoke.outcome }}" != "failure" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "failure_type=" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.health.outcome }}" == "failure" ]; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "failure_type=health_check_failure" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.deploy.outcome }}" == "failure" ]; then
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "failure_type=deployment_failure" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "failure_type=smoke_test_failure" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify deployment result
+        if: always()
+        uses: ./.github/actions/notify-orchestrator
+        with:
+          deployment-id: ${{ inputs.deployment-id }}
+          namespace: ${{ inputs.namespace }}
+          version: ${{ inputs.version }}
+          status: ${{ steps.status.outputs.status }}
+          failure-type: ${{ steps.status.outputs.failure_type }}
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          export KUBECONFIG=./kubeconfig
+          echo "⚠️  Deployment failed - initiating rollback"
+          kubectl rollout undo deployment/sample-app -n ${{ inputs.namespace }}
+          kubectl rollout status deployment/sample-app -n ${{ inputs.namespace }} --timeout=5m
+          echo "✓ Rollback completed"

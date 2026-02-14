@@ -1,0 +1,142 @@
+name: Local Deployment Test
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: 'Image tag to deploy'
+        required: true
+        type: string
+      namespace:
+        description: 'Kubernetes namespace'
+        required: false
+        type: string
+        default: 'test-deployment'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/sample-app
+
+jobs:
+  test-local:
+    name: Test with Kind
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: mana-test
+          wait: 5m
+
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Load Docker image to Kind
+        run: |
+          kind load docker-image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }} \
+            --name mana-test || echo "Image loading skipped (not available locally)"
+
+      - name: Create namespace
+        run: |
+          kubectl create namespace ${{ inputs.namespace }}
+
+      - name: Deploy sample app
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: sample-app
+            namespace: ${{ inputs.namespace }}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: sample-app
+            template:
+              metadata:
+                labels:
+                  app: sample-app
+              spec:
+                containers:
+                - name: sample-app
+                  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }}
+                  imagePullPolicy: IfNotPresent
+                  ports:
+                  - containerPort: 5000
+                  env:
+                  - name: ENVIRONMENT
+                    value: "test"
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "100m"
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: 5000
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                  readinessProbe:
+                    httpGet:
+                      path: /health
+                      port: 5000
+                    initialDelaySeconds: 5
+                    periodSeconds: 3
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: sample-app
+            namespace: ${{ inputs.namespace }}
+          spec:
+            selector:
+              app: sample-app
+            ports:
+            - port: 80
+              targetPort: 5000
+          EOF
+
+      - name: Wait for deployment
+        run: |
+          kubectl wait --for=condition=available --timeout=120s \
+            deployment/sample-app -n ${{ inputs.namespace }}
+
+      - name: Check deployment status
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n ${{ inputs.namespace }}
+          echo ""
+          echo "=== Deployment ==="
+          kubectl describe deployment sample-app -n ${{ inputs.namespace }}
+
+      - name: Run health checks
+        run: |
+          kubectl port-forward -n ${{ inputs.namespace }} svc/sample-app 8080:80 &
+          PF_PID=$!
+          sleep 5
+          
+          echo "Testing health endpoint..."
+          curl -f http://localhost:8080/health || (echo "Health check failed" && exit 1)
+          
+          echo "Testing root endpoint..."
+          curl -f http://localhost:8080/ || (echo "Root endpoint failed" && exit 1)
+          
+          echo "All health checks passed!"
+          kill $PF_PID || true
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Pod Logs ==="
+          kubectl logs -n ${{ inputs.namespace }} -l app=sample-app --tail=100

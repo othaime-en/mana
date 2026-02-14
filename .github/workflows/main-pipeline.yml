@@ -1,0 +1,68 @@
+name: Mana Self-Healing Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'Deployment target'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - staging
+          - production
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
+  ENABLE_STAGING_DEPLOY: false
+  ENABLE_PRODUCTION_DEPLOY: false
+
+jobs:
+  # Build, test, and publish Docker images
+  build-test-publish:
+    uses: ./.github/workflows/build-and-test.yml
+    secrets: inherit
+    with:
+      push-images: ${{ github.event_name == 'push' }}
+
+  # Always test locally with Kind
+  local-validation:
+    needs: build-test-publish
+    uses: ./.github/workflows/local-deployment-test.yml
+    with:
+      image-tag: ${{ needs.build-test-publish.outputs.version }}
+
+  # Deploy to staging (conditional)
+  deploy-staging:
+    needs: build-test-publish
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'staging'
+    uses: ./.github/workflows/deploy-environment.yml
+    secrets: inherit
+    with:
+      environment: staging
+      version: ${{ needs.build-test-publish.outputs.version }}
+      deployment-id: ${{ needs.build-test-publish.outputs.deployment_id }}
+      namespace: staging
+
+  # Deploy to production (conditional)
+  deploy-production:
+    needs: build-test-publish
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'production'
+    uses: ./.github/workflows/deploy-environment.yml
+    secrets: inherit
+    with:
+      environment: production
+      version: ${{ needs.build-test-publish.outputs.version }}
+      deployment-id: ${{ needs.build-test-publish.outputs.deployment_id }}
+      namespace: production
+      smoke-tests: true
+      health-check-timeout: 60

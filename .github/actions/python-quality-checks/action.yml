@@ -1,0 +1,42 @@
+name: 'Python Quality Checks'
+description: 'Run tests, linting, and coverage for Python projects'
+
+inputs:
+  working-directory:
+    description: 'Working directory for Python project'
+    required: true
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.12'
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        pip install -r requirements.txt
+        pip install pytest pytest-cov flake8 black
+
+    - name: Run linting
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        flake8 src/ --max-line-length=100 --extend-ignore=E203,W503
+        black --check src/
+      continue-on-error: true
+
+    - name: Run tests with coverage
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        files: ${{ inputs.working-directory }}/coverage.xml
+        flags: unittests
+      continue-on-error: true

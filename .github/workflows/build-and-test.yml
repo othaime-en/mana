@@ -1,0 +1,168 @@
+name: Build and Test
+
+on:
+  workflow_call:
+    inputs:
+      push-images:
+        description: 'Whether to push images to registry'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      version:
+        description: 'Generated version tag'
+        value: ${{ jobs.build.outputs.version }}
+      deployment_id:
+        description: 'Generated deployment ID'
+        value: ${{ jobs.build.outputs.deployment_id }}
+      image_tag:
+        description: 'Full image tag'
+        value: ${{ jobs.build.outputs.image_tag }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/sample-app
+  ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      deployment_id: ${{ steps.deployment.outputs.id }}
+      image_tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate version and deployment ID
+        id: version
+        run: |
+          VERSION="v${GITHUB_SHA::7}-$(date +%s)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Generated version: $VERSION"
+
+      - name: Generate deployment ID
+        id: deployment
+        run: |
+          DEPLOYMENT_ID="deploy-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          echo "id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "Generated deployment ID: $DEPLOYMENT_ID"
+
+      # Python testing and linting
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Run Python tests and linting
+        uses: ./.github/workflows/python-quality-checks.yml
+        with:
+          working-directory: ./sample-app
+
+      # Docker build and test
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-
+
+      # Build sample-app
+      - name: Build sample-app image
+        id: build-app
+        uses: docker/build-push-action@v5
+        with:
+          context: ./sample-app
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Test sample-app container
+      - name: Test sample-app container
+        run: |
+          docker run -d --name test-container \
+            -p 5000:5000 \
+            -e ENVIRONMENT=test \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          
+          if ! timeout 30 bash -c 'until docker exec test-container curl -f http://localhost:5000/health; do sleep 2; done'; then
+            echo "Container failed health check"
+            docker logs test-container
+            docker stop test-container || true
+            docker rm test-container || true
+            exit 1
+          fi
+
+          docker exec test-container curl -f http://localhost:5000/
+          docker exec test-container curl -f http://localhost:5000/api/data
+          
+          docker stop test-container
+          docker rm test-container
+
+      # Build orchestrator
+      - name: Build orchestrator image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./orchestrator
+          push: ${{ inputs.push-images }}
+          load: ${{ !inputs.push-images }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ github.repository }}/orchestrator:latest
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Push sample-app (if enabled)
+      - name: Push sample-app image
+        if: inputs.push-images
+        uses: docker/build-push-action@v5
+        with:
+          context: ./sample-app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Notify on failures
+      - name: Notify orchestrator on failure
+        if: failure() && env.ORCHESTRATOR_URL != ''
+        uses: ./.github/workflows/notify-orchestrator.yml
+        with:
+          deployment-id: ${{ steps.deployment.outputs.id }}
+          status: failed
+          failure-type: ${{ steps.build-app.outcome == 'failure' && 'build_failure' || 'test_failure' }}
+          version: ${{ steps.version.outputs.version }}

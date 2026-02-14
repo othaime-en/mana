@@ -109,7 +109,6 @@ jobs:
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-
 
       # Build sample-app
       - name: Build sample-app image

@@ -65,10 +65,30 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Run Python tests and linting
-        uses: ./.github/workflows/python-quality-checks.yml
+      - name: Install dependencies
+        working-directory: ./sample-app
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov flake8 black
+
+      - name: Run linting
+        working-directory: ./sample-app
+        run: |
+          flake8 src/ --max-line-length=100 --extend-ignore=E203,W503
+          black --check src/
+        continue-on-error: true
+
+      - name: Run tests with coverage
+        working-directory: ./sample-app
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
         with:
-          working-directory: ./sample-app
+          files: ./sample-app/coverage.xml
+          flags: unittests
+        continue-on-error: true
 
       # Docker build and test
       - name: Set up Docker Buildx
@@ -160,9 +180,24 @@ jobs:
       # Notify on failures
       - name: Notify orchestrator on failure
         if: failure() && env.ORCHESTRATOR_URL != ''
-        uses: ./.github/workflows/notify-orchestrator.yml
-        with:
-          deployment-id: ${{ steps.deployment.outputs.id }}
-          status: failed
-          failure-type: ${{ steps.build-app.outcome == 'failure' && 'build_failure' || 'test_failure' }}
-          version: ${{ steps.version.outputs.version }}
+        run: |
+          FAILURE_TYPE="build_failure"
+          if [ "${{ steps.build-app.outcome }}" != "failure" ]; then
+            FAILURE_TYPE="test_failure"
+          fi
+          
+          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"deployment_id\": \"${{ steps.deployment.outputs.id }}\",
+              \"namespace\": \"ci\",
+              \"app_name\": \"sample-app\",
+              \"version\": \"${{ steps.version.outputs.version }}\",
+              \"status\": \"failed\",
+              \"failure_type\": \"$FAILURE_TYPE\",
+              \"metadata\": {
+                \"commit\": \"${{ github.sha }}\",
+                \"author\": \"${{ github.actor }}\",
+                \"branch\": \"${{ github.ref_name }}\"
+              }
+            }" || echo "Failed to notify orchestrator"

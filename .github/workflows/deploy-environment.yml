@@ -66,12 +66,22 @@ jobs:
 
       - name: Notify deployment start
         if: env.ORCHESTRATOR_URL != ''
-        uses: ./.github/actions/notify-orchestrator
-        with:
-          deployment-id: ${{ inputs.deployment-id }}
-          namespace: ${{ inputs.namespace }}
-          version: ${{ inputs.version }}
-          status: in_progress
+        run: |
+          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"deployment_id\": \"${{ inputs.deployment-id }}\",
+              \"namespace\": \"${{ inputs.namespace }}\",
+              \"app_name\": \"sample-app\",
+              \"version\": \"${{ inputs.version }}\",
+              \"status\": \"in_progress\",
+              \"metadata\": {
+                \"commit\": \"${{ github.sha }}\",
+                \"author\": \"${{ github.actor }}\",
+                \"branch\": \"${{ github.ref_name }}\",
+                \"workflow_run_id\": \"${{ github.run_id }}\"
+              }
+            }" || echo "⚠️  Failed to notify orchestrator"
 
       - name: Deploy application
         id: deploy
@@ -163,13 +173,28 @@ jobs:
 
       - name: Notify deployment result
         if: always()
-        uses: ./.github/actions/notify-orchestrator
-        with:
-          deployment-id: ${{ inputs.deployment-id }}
-          namespace: ${{ inputs.namespace }}
-          version: ${{ inputs.version }}
-          status: ${{ steps.status.outputs.status }}
-          failure-type: ${{ steps.status.outputs.failure_type }}
+        run: |
+          if [ -z "${{ env.ORCHESTRATOR_URL }}" ]; then
+            echo "⚠️  Orchestrator URL not configured, skipping notification"
+            exit 0
+          fi
+          
+          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"deployment_id\": \"${{ inputs.deployment-id }}\",
+              \"namespace\": \"${{ inputs.namespace }}\",
+              \"app_name\": \"sample-app\",
+              \"version\": \"${{ inputs.version }}\",
+              \"status\": \"${{ steps.status.outputs.status }}\",
+              \"failure_type\": \"${{ steps.status.outputs.failure_type }}\",
+              \"metadata\": {
+                \"commit\": \"${{ github.sha }}\",
+                \"author\": \"${{ github.actor }}\",
+                \"branch\": \"${{ github.ref_name }}\",
+                \"workflow_run_id\": \"${{ github.run_id }}\"
+              }
+            }" || echo "⚠️  Failed to notify orchestrator"
 
       - name: Rollback on failure
         if: failure()

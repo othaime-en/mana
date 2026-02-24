@@ -19,6 +19,8 @@ services:
     build:
       context: ./sample-app
       dockerfile: Dockerfile
+    image: sample-app:1.0.0
+    pull_policy: if_not_present
     container_name: sample-app
     ports:
       - "5000:5000"
@@ -43,6 +45,8 @@ services:
     build:
       context: ./orchestrator
       dockerfile: Dockerfile
+    image: orchestrator:latest
+    pull_policy: if_not_present
     container_name: orchestrator
     ports:
       - "8000:8000"

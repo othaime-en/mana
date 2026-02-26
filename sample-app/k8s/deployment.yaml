@@ -30,7 +30,7 @@ spec:
     spec:
       containers:
         - name: sample-app
-          image: sample-app:1.0.0
+          image: sample-app:1.0.0 
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
@@ -72,7 +72,7 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: false
             capabilities:
               drop:
                 - ALL

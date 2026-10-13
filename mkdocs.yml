@@ -1,0 +1,90 @@
+site_name: MANA - Self-Healing CI/CD Pipeline
+site_description: A Kubernetes-native orchestration system for automated deployment failure recovery
+site_author: othaime-en
+site_url: https://othaime-en.github.io/mana/
+
+repo_url: https://github.com/othaime-en/mana
+repo_name: othaime-en/mana
+
+copyright: Copyright &copy; 2024 - 2026 othaime-en
+
+theme:
+  name: shadcn
+
+plugins:
+  - search
+  # - git-revision-date-localized:
+  #     enable_creation_date: true
+  #     fallback_to_build_date: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - footnotes
+  - toc:
+      permalink: true
+      title: Table of Contents
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.magiclink:
+      repo_url_shorthand: true
+      user: othaime-en
+      repo: mana
+  - pymdownx.snippets:
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+# Only keep these if the files exist under docs/
+# extra_css:
+#   - stylesheets/extra.css
+# extra_javascript:
+#   - javascripts/extra.js
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Getting Started: getting-started/index.md
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quick-start.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Components: architecture/components.md
+      - Data Flow: architecture/data-flow.md
+  - Configuration:
+      - Overview: configuration/overview.md
+      - Orchestrator: configuration/orchestrator.md
+      - Sample Application: configuration/sample-app.md
+      - Environment Variables: configuration/environment-variables.md
+  - Usage:
+      - Basic Usage: usage/basic-usage.md
+      - CI/CD Integration: usage/cicd-integration.md
+      - Monitoring: usage/monitoring.md
+      - Troubleshooting: usage/troubleshooting.md
+  - Reference:
+      - API Reference: reference/api.md
+      - Configuration Reference: reference/configuration.md
+      - CLI Reference: reference/cli.md
+  - Contributing:
+      - Contributing Guide: contributing/contributing.md
+      - Development Setup: contributing/development-setup.md
+      - Code of Conduct: contributing/code-of-conduct.md
+  - About:
+      - Release Notes: about/release-notes.md
+      - License: about/license.md
+      - Security: about/security.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/othaime-en/mana

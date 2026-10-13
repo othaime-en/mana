@@ -31,3 +31,6 @@ logs/
 htmlcov/
 tests/reports/
 tests/test-results/
+
+# Doc site
+site/

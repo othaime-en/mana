@@ -6,22 +6,7 @@ For the endpoint contract see the [API Reference](../reference/api.md#post-webho
 
 ## How the Pieces Fit
 
-```
-push / manual dispatch
-        │
-        ▼
- main-pipeline.yml
-   ├─ build-and-test.yml        build images, run tests ──(failure)──▶ webhook: build/test failure
-   ├─ local-deployment-test.yml deploy to a throwaway Kind cluster
-   └─ deploy-environment.yml    (manual dispatch: staging or production)
-        ├─ webhook: in_progress  (carries workflow_run_id)
-        ├─ kubectl set image + rollout + health check + smoke tests
-        └─ webhook: success | failed (+ failure_type, workflow_run_id)
-                              │
-   Orchestrator ◀─────────────┘
-        ├─ success  → remember this version as the rollback target
-        └─ failed   → retry (re-run this workflow) → … → rollback
-```
+![CI/CD integration: a push or manual dispatch starts main-pipeline.yml, which runs build-and-test, local-deployment-test and (manual dispatch only) deploy-environment; the workflows send webhooks to the Orchestrator, which records successful versions and, on failure, re-runs the workflow via the GitHub API before rolling back](../assets/diagrams/cicd-integration-overview.svg)
 
 Two directions of integration:
 

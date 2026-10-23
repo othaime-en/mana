@@ -1,750 +1,241 @@
 # Monitoring and Observability
 
-MANA provides comprehensive monitoring and observability features to help you understand system behavior, detect issues, and maintain operational health.
+MANA ships a complete observability setup (Prometheus, Grafana, Loki, Alertmanager) and instruments both the orchestrator and the sample app. This guide explains what is measured, how to install and access the stack, which dashboards and alerts exist, and where the current gaps are.
 
-## Overview of Observability Features
+## What Is Observable
 
-MANA includes three pillars of observability:
+| Signal                            | Source                                        | Where it goes                      |
+| --------------------------------- | --------------------------------------------- | ---------------------------------- |
+| Orchestrator metrics              | `GET /metrics/` on port 8000                  | Prometheus                         |
+| Sample app metrics                | `GET /metrics` on port 5000                   | Prometheus                         |
+| Kubernetes metrics                | kube-state-metrics, cAdvisor, node exporter   | Prometheus                         |
+| Audit events and application logs | stdout of each pod                            | Promtail to Loki                   |
+| Health                            | `GET /health` on the orchestrator and the app | Kubernetes probes, Prometheus `up` |
 
-1. **Metrics**: Quantitative data collected via Prometheus
-2. **Logs**: Qualitative data via structured logging
-3. **Traces**: Contextual data for debugging (planned for future releases)
-
-Additionally, MANA provides health checks for both self-monitoring and dependency verification.
+Configuration files are in `monitoring/` (see [Components](../architecture/components.md#monitoring-stack)).
 
 ## Prometheus Metrics
 
-MANA exposes a comprehensive set of Prometheus metrics at the `/metrics` endpoint (default port 8000).
+### Orchestrator
 
-### Deployment Metrics
+| Metric                          | Type      | Labels                       | Meaning                                                           | Populated                |
+| ------------------------------- | --------- | ---------------------------- | ----------------------------------------------------------------- | ------------------------ |
+| `deployments_total`             | counter   | `namespace`, `status`        | Webhooks received, by status (`in_progress`, `success`, `failed`) | yes                      |
+| `retries_total`                 | counter   | `namespace`, `retry_attempt` | Retries scheduled                                                 | yes                      |
+| `rollbacks_total`               | counter   | `namespace`, `reason`        | Successful rollbacks (`reason` is the failure type, or `manual`)  | yes                      |
+| `health_check_duration_seconds` | histogram | `namespace`, `deployment`    | Duration of `POST /health-check` calls                            | yes                      |
+| `deployment_duration_seconds`   | histogram | `namespace`                  | Intended deployment duration                                      | declared, never observed |
+| `active_deployments`            | gauge     | `namespace`                  | Intended count of in-flight deployments                           | declared, never set      |
 
-| Metric | Type | Description | Labels |
-|--------|------|-------------|--------|
-| `mana_deployments_total` | Counter | Total number of deployments processed | `namespace`, `status` |
-| `mana_deployment_duration_seconds` | Histogram | Time taken for deployment processes | `namespace` |
-| `mana_active_deployments` | Gauge | Current number of deployments being tracked | `namespace` |
-| `mana_deployment_retry_count` | Gauge | Current retry count for a deployment | `namespace`, `deployment_name`, `app_name` |
+Standard `python_*` and `process_*` metrics are also exported. Use `curl -s $MANA/metrics/` to see the live output.
 
-### Retry and Rollback Metrics
+### Sample app
 
-| Metric | Type | Description | Labels |
-|--------|------|-------------|--------|
-| `mana_retries_total` | Counter | Total number of retry attempts | `namespace`, `retry_attempt` |
-| `mana_rollbacks_total` | Counter | Total number of rollback operations | `namespace`, `reason` |
-| `mana_rollback_duration_seconds` | Histogram | Time taken for rollback operations | `namespace` |
-| `mana_rollback_success` | Counter | Number of successful vs failed rollbacks | `namespace`, `success` |
+Provided by `prometheus-flask-exporter` at `GET /metrics`:
 
-### Health Check Metrics
+| Metric                                    | Meaning              |
+| ----------------------------------------- | -------------------- |
+| `flask_http_request_total{method,status}` | Request count        |
+| `flask_http_request_duration_seconds`     | Latency histogram    |
+| `flask_http_request_exceptions_total`     | Unhandled exceptions |
+| `app_info{version}`                       | Application version  |
 
-| Metric | Type | Description | Labels |
-|--------|------|-------------|--------|
-| `mana_health_check_duration_seconds` | Histogram | Time taken for health check operations | `namespace`, `deployment` |
-| `mana_health_checks_total` | Counter | Total number of health checks performed | `namespace`, `result` |
-| `mana_application_health_failures` | Gauge | Consecutive application health check failures | `namespace`, `deployment_name` |
+### Useful queries
 
-### System Metrics
-
-| Metric | Type | Description | Labels |
-|--------|------|-------------|--------|
-| `mana_uptime_seconds` | Gauge | How long the orchestrator has been running | None |
-| `mana_orchestrator_up` | Gauge | Whether the orchestrator is considered healthy | None |
-| `mana_redis_connected` | Gauge | Whether Redis connection is healthy | None |
-| `mana_kubernetes_connected` | Gauge | Whether Kubernetes API connection is healthy | None |
-| `mana_github_api_available` | Gauge | Whether GitHub API is accessible (when configured) | None |
-| `mana_webhook_requests_total` | Counter | Total number of webhook requests received | `endpoint`, `status_code` |
-| `mana_webhook_request_duration_seconds` | Histogram | Time taken to process webhook requests | `endpoint` |
-| `mana_audit_log_entries_total` | Counter | Total number of audit log entries generated | `action`, `success` |
-
-### Resource Metrics
-
-| Metric | Type | Description | Labels |
-|--------|------|-------------|--------|
-| `mana_orchestrator_memory_usage_bytes` | Gauge | Current memory usage | `state` (usage, cache, etc.) |
-| `mana_orchestrator_cpu_usage_seconds_total` | Counter | Total CPU time used | `state` (user, system) |
-| `mana_orchestrator_gc_count_total` | Counter | Number of garbage collection cycles | `generation` (0, 1, 2) |
-| `mana_orchestrator_thread_count` | Gauge | Number of threads | `state` (active, daemon) |
-
-### Example Prometheus Queries
-
-#### Deployment Health
 ```promql
-# Percentage of successful deployments
-sum by (namespace) (mana_deployments_total{status="SUCCESS"})
-  / sum by (namespace) (mana_deployments_total)
-  * 100
+# Deployment events by status over the last hour
+sum(increase(deployments_total[1h])) by (status)
 
-# Deployments currently in failed state
-sum by (namespace) (mana_deployments_total{status="FAILED"})
+# Failure ratio per namespace (5 min)
+sum(rate(deployments_total{status="failed"}[5m])) by (namespace)
+  / sum(rate(deployments_total[5m])) by (namespace)
+
+# Rollbacks in the last 24 h, by reason
+sum(increase(rollbacks_total[24h])) by (reason)
+
+# Retries by attempt number
+sum(increase(retries_total[1h])) by (retry_attempt)
+
+# Sample app 5xx error ratio
+sum(rate(flask_http_request_total{status=~"5.."}[5m]))
+  / sum(rate(flask_http_request_total[5m]))
+
+# Sample app p95 latency
+histogram_quantile(0.95, sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (le))
+
+# Pod restarts
+sum(rate(kube_pod_container_status_restarts_total{namespace="production"}[15m])) by (pod)
 ```
 
-#### Retry and Rollback Effectiveness
-```promql
-# Retry success rate (deployments that succeeded after retry)
-sum by (namespace) (mana_deployments_total{status="SUCCESS", retry_count!="0"})
-  / sum by (namespace) (mana_deployments_total{retry_count!="0"})
-  * 100
+### Recording rules
 
-# Rollback success rate
-sum by (namespace) (mana_rollbacks_total{success="true"})
-  / sum by (namespace) (mana_rollbacks_total)
-  * 100
-```
+`monitoring/prometheus/recording-rules.yml` pre-computes success, failure, rollback and retry rates (`deployment:success_rate:5m`, `deployment:rollback_rate:1h`, and so on), HTTP rates and latency percentiles (`http:*`), node and pod resource usage, SLO and error-budget series (`slo:*`, `mttr:rollback_duration:avg:24h`), and some orchestrator series (`orchestrator:webhook_error_rate:5m`, `orchestrator:rollback_decision_seconds:p95:5m`). Rules that depend on metrics the orchestrator does not emit (webhook, rollback decision and deployment duration series) produce no data yet.
 
-#### System Health
-```promql
-# Orchestrator availability
-mana_orchestrator_up
+### How Prometheus finds the targets
 
-# Dependency health
-mana_redis_connected * mana_kubernetes_connected
+| Deployment                            | Mechanism                                                                                                                                             |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Terraform (`kube-prometheus-stack`)   | ServiceMonitors created by the `monitoring` module, plus pod annotations on the orchestrator (`prometheus.io/scrape`, `port: 8000`, `path: /metrics`) |
+| Sample app manifests                  | Pod annotations `prometheus.io/scrape: "true"`, `port: "5000"`, `path: "/metrics"`                                                                    |
+| Standalone `prometheus.yml` (Compose) | Dedicated `sample-app` and `orchestrator` jobs plus annotation-based pod discovery                                                                    |
 
-# Resource utilization (percentage)
-(mana_orchestrator_memory_usage_bytes /
-  (mana_orchestrator_memory_usage_bytes + mana_orchestrator_memory_available_bytes))
-  * 100
-
-(mana_orchestrator_cpu_usage_seconds_total /
-  (mana_orchestrator_cpu_usage_seconds_total + mana_orchestrator_cpu_available_seconds_total))
-  * 100
-```
-
-#### Performance Metrics
-```promql
-# Average deployment duration
-avg_over_time(mana_deployment_duration_seconds[5m])
-
-# 95th percentile deployment duration
-histogram_quantile(0.95,
-  sum by (le, namespace) (rate(mana_deployment_duration_seconds_bucket[5m]))
-)
-
-# Average health check duration
-avg_over_time(mana_health_check_duration_seconds[5m])
-
-# Health check success rate
-sum by (namespace) (mana_health_checks_total{result="healthy"})
-  / sum by (namespace) (mana_health_checks_total)
-  * 100
-```
-
-#### System Load
-```promql
-# Request rate to orchestrator
-rate(mana_webhook_requests_total[5m])
-
-# Audit log generation rate
-rate(mana_audit_log_entries_total[5m])
-
-# Error rate in webhook processing
-sum by (endpoint) (rate(mana_webhook_requests_total{status_code=~"5.."}[5m]))
-  / sum by (endpoint) (rate(mana_webhook_requests_total[5m]))
-  * 100
-```
+!!! warning "Target configuration to double-check" - The manual orchestrator manifest (`orchestrator/k8s/deployment.yaml`) has no `prometheus.io/*` annotations, so annotation-based discovery will not find it; add them to the pod template or use the Terraform module. - In `prometheus.yml` the `sample-app` and `orchestrator` jobs set `__address__` to the literal text `__meta_kubernetes_pod_ip:<port>` instead of building it from the label with `source_labels` and a `${1}` replacement, so those two jobs likely will not resolve a valid address. Verify on the Prometheus **Targets** page and fix the relabeling if they show errors. - The Compose Prometheus loads `alerts.yml` but does not mount `recording-rules.yml`, and expects an Alertmanager at `alertmanager:9093` that Compose does not run.
 
 ## Structured Logging
 
-MANA uses structured JSON logging for all audit events and operational logs. This makes logs easy to parse, search, and analyze with tools like Elasticsearch, Splunk, Loki, or even simple grep/jq combinations.
+### Audit events
 
-### Log Format
-Each log entry follows this format:
-```json
-{
-  "timestamp": "2023-11-01T14:30:00.123Z",
-  "level": "info",
-  "service": "self-healing-orchestrator",
-  "message": "Human readable message",
-  "logger": "module.name",
-  "trace_id": "optional-trace-id",
-  "span_id": "optional-span-id",
-  "fields": {
-    // Structured data specific to the log entry
-  }
-}
-```
-
-### Audit Log Entries
-Audit logs are a special category of structured logs with the `logger` field set to `self-healing-orchestrator.audit` and containing detailed action information:
-
-```json
-{
-  "timestamp": "2023-11-01T14:30:00.123Z",
-  "level": "info",
-  "service": "self-healing-orchestrator",
-  "message": "AUDIT: failure_detected",
-  "logger": "self-healing-orchestrator.audit",
-  "trace_id": "abc123",
-  "span_id": "def456",
-  "fields": {
-    "audit_event": "{\"timestamp\":\"2023-11-01T14:30:00Z\",\"service\":\"self-healing-orchestrator\",\"action\":\"failure_detected\",\"success\":true,\"deployment_id\":\"abc123-def456-ghi789\",\"namespace\":\"production\",\"deployment_name\":\"web-app\",\"version\":\"1.2.3\",\"details\":{\"failure_type\":\"health_check_failure\",\"retry_count\":2}}"
-  }
-}
-```
-
-The `audit_event` field contains a JSON string with the complete audit event data.
-
-### Log Levels
-MANA uses standard Python logging levels:
-- **DEBUG**: Detailed information, typically of interest only when diagnosing problems
-- **INFO**: Confirmation that things are working as expected
-- **WARNING**: An indication that something unexpected happened, or indicative of some problem in the near future
-- **ERROR**: Due to a more serious problem, the software has not been able to perform some function
-- **CRITICAL**: A serious error, indicating that the program itself may be unable to continue running
-
-### Log Collection Strategies
-MANA is designed to work well with common log collection approaches:
-
-#### Sidecar Pattern
-Deploy a logging agent (like Fluent Bit or Filebeat) as a sidecar container to collect logs from the orchestrator container.
-
-#### DaemonSet Pattern
-Deploy a logging agent as a DaemonSet on each node to collect logs from all containers.
-
-#### Application-Level Logging
-Configure your logging framework to send logs directly to a central logging service.
-
-### Example Log Queries (using Loki/Promtail or similar)
-
-#### Find all failures for a specific deployment
-```
-{logger="self-healing-orchestrator.audit"} | json | audit_event.action="failure_detected" | audit_event.deployment_name="web-app"
-```
-
-#### Show rollback operations
-```
-{logger="self-healing-orchestrator.audit"} | json | audit_event.action=~"rollback_.*"
-```
-
-#### Show health check failures
-```
-{logger="self-healing-orchestrator.audit"} | json | audit_event.action="health_check_failed"
-```
-
-#### Show manual intervention requirements
-```
-{logger="self-healing-orchestrator.audit"} | json | audit_event.action="manual_intervention_required"
-```
-
-#### Show all successful operations
-```
-{logger="self-healing-orchestrator.audit"} | json | audit_event.success=true
-```
-
-#### Show all failed operations
-```
-{logger="self-healing-orchestrator.audit"} | json | audit_event.success=false
-```
-
-#### Find logs for a specific time range
-```
-{logger="self-healing-orchestrator.audit"} | json | timestamp >= "2023-11-01T00:00:00Z" and timestamp <= "2023-11-01T23:59:59Z"
-```
-
-## Health Checks
-
-MANA provides several health check endpoints for monitoring both the orchestrator itself and the applications it manages.
-
-### Orchestrator Health Check
-The `/health` endpoint reports the health of the MANA orchestrator service and its critical dependencies:
+Every significant orchestrator action produces an audit event (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `health_check_*`, `state_saved`, `manual_intervention_required`). Each carries a UTC timestamp, deployment ID, namespace, version and a `success` flag, plus action-specific details.
 
 ```bash
-curl http://mana-orchestrator.<namespace>.svc.cluster.local:8000/health
+kubectl -n orchestrator logs -l app=orchestrator | grep "AUDIT:"
 ```
 
-Sample response:
-```json
-{
-  "status": "healthy",
-  "redis": "healthy",
-  "kubernetes": "healthy",
-  "github_integration": true,
-  "timestamp": "2023-11-01T14:30:00Z"
-}
+The orchestrator's default log format prints `AUDIT: <action>` and attaches the structured payload to the record as `audit_event`, which the plain text formatter does not print. To ship the complete JSON to Loki, configure a JSON formatter (for example `python-json-logger`, already used by the sample app) that includes extra fields. Until then, correlate by `deployment_id` in the surrounding log lines.
+
+### Sample app logs
+
+With `ENVIRONMENT=production` the sample app logs JSON with a per-request correlation ID (`X-Request-ID`); otherwise plain text.
+
+### Querying logs in Loki
+
+Promtail labels logs with `namespace`, `pod`, `container`, `app` and `version` (and `level`/`logger` when the line is JSON). In Grafana, **Explore**, choose the Loki data source:
+
+```logql
+{namespace="orchestrator", app="orchestrator"}
+{namespace="orchestrator"} |= "AUDIT:"
+{namespace="orchestrator"} |= "manual_intervention_required"
+{namespace="production", app="sample-app"} | json | level="ERROR"
+sum(rate({namespace="production", app="sample-app"} | json | level="ERROR" [5m]))
 ```
 
-#### Health Status Values
-- `healthy`: All dependencies are healthy
-- `degraded`: One or more dependencies are unhealthy but service can still operate in limited capacity
-- `unhealthy`: Critical failure preventing normal operation
+Loki retains logs for 30 days (`720h`) in the shipped config.
 
-#### Dependency Health
-- `redis`: Health of Redis connection (critical for state persistence)
-- `kubernetes`: Health of Kubernetes API connection (critical for all operations)
-- `github_integration`: Whether GitHub API is accessible (only relevant if retry functionality is configured)
+## Health Endpoints
 
-### Deployment Health Check
-The `/health-check` endpoint allows you to check the health of a specific deployment as MANA sees it:
+| Service      | Endpoint      | Meaning                                                                   |
+| ------------ | ------------- | ------------------------------------------------------------------------- |
+| Orchestrator | `GET /health` | `healthy` or `degraded`; reports Redis, Kubernetes and GitHub integration |
+| Sample app   | `GET /health` | Liveness                                                                  |
+| Sample app   | `GET /ready`  | Readiness (503 until `STARTUP_TIME` passes)                               |
+
+The orchestrator also exposes `GET /config` to confirm its live settings.
+
+## Dashboards
+
+Four Grafana dashboards live in `monitoring/grafana/dashboards/`:
+
+| Dashboard                 | Shows                                                                                                                                |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **Self-Healing Overview** | Success rate, rollback and retry activity, failed deployments, MTTR and error budget, orchestrator health, pod restarts, recent logs |
+| **Deployment Metrics**    | Per-namespace deployment and rollback statistics, durations, SLO and error budget                                                    |
+| **Application Metrics**   | Request rate, error rate, latency percentiles, resource usage of the sample app                                                      |
+| **Infrastructure**        | Node CPU and memory, cluster capacity, quotas                                                                                        |
+
+Several panels use the recording rules above. Panels built on `active_deployments`, deployment duration and orchestrator rollback-decision series are empty until those metrics are emitted.
+
+### Access
 
 ```bash
-curl -X POST http://mana-orchestrator.<namespace>.svc.cluster.local:8000/health-check \
-  -H "Content-Type: application/json" \
-  -d '{
-    "namespace": "production",
-    "deployment_name": "web-app",
-    "timeout": 300
-  }'
+make port-forward-grafana          # http://localhost:3000
+make port-forward-prometheus       # http://localhost:9090
 ```
 
-Sample response:
-```json
-{
-  "deployment_name": "web-app",
-  "namespace": "production",
-  "healthy": true,
-  "check_duration_seconds": 1.23
-}
+Default Grafana login is `admin` / `admin123`. **Change it** before exposing Grafana anywhere ([Security](../about/security.md)).
+
+!!! warning "Dashboard provisioning"
+Terraform loads the dashboard from `terraform/modules/monitoring/dashboards/self-healing.json` into a ConfigMap. The Compose setup mounts `monitoring/grafana/dashboards` at `/var/lib/grafana/dashboards`, but `dashboards.yml` expects the files under `/etc/grafana/dashboards/{self-healing,deployments,application,infrastructure}`. If Grafana in Compose shows no dashboards, align those paths or import the JSON files manually (**Dashboards, New, Import**).
+
+## Alerts
+
+Alert rules are in `monitoring/prometheus/alerts.yml` and are routed by Alertmanager (`monitoring/alertmanager/alertmanager.yml`):
+
+| Severity       | Receivers                                                                                             |
+| -------------- | ----------------------------------------------------------------------------------------------------- |
+| `critical`     | PagerDuty and Slack (orchestrator, application and infrastructure criticals have dedicated receivers) |
+| `warning`      | Slack                                                                                                 |
+| SLO violations | Slack and email                                                                                       |
+
+Highlights (full table with thresholds in the [Configuration Reference](../reference/configuration.md#alert-thresholds)):
+
+- **Deployments:** `HighRollbackRate`, `DeploymentFailureRate`, `DeploymentSuccessRateBelowSLO`, `DeploymentReplicasMismatch`, `PodCrashLooping`
+- **Orchestrator:** `OrchestratorDown`, `SlowRollbackDecision`, `HighWebhookFailureRate`, `RedisConnectionFailures`
+- **Application:** `HighErrorRate`, `SlowResponseTime`, `ApplicationDown`, memory and CPU
+- **Infrastructure and monitoring:** node readiness, disk, scrape failures, Grafana/Loki down
+
+Five rules (`SlowRollbackDecision`, `HighWebhookFailureRate`, `RedisConnectionFailures`, `HighHealthCheckFailureRate`, `SlowDeployment`) query metrics the orchestrator does not emit yet and will stay silent.
+
+Before enabling notifications, replace the placeholders in `alertmanager.yml` (sender address, SMTP host) and mount the Slack webhook URL, SMTP password and PagerDuty keys from Kubernetes Secrets (`/etc/alertmanager/slack_webhook_url`, `smtp_password`).
+
+**Test an alert** safely:
+
+```bash
+kubectl -n production scale deployment sample-app --replicas=0
+# wait for ApplicationDown (2 min) / DeploymentReplicasMismatch (5 min)
+make port-forward-prometheus        # http://localhost:9090/alerts
+kubectl -n production scale deployment sample-app --replicas=3
 ```
 
-This endpoint performs the same health check logic that MANA uses internally, making it useful for verifying that MANA's view of deployment health matches your expectations.
+## Setting Up the Stack
 
-### Readiness and Liveness Probes
-MANA includes standard Kubernetes liveness and readiness probes in its deployment manifest:
+=== "Terraform (Kubernetes)"
 
-#### Liveness Probe
-- **Purpose**: Determine if the container is running and should be restarted
-- **Check**: `/health` endpoint
-- **Failure Threshold**: 3 consecutive failures
-- **Restart Policy**: Kubernetes will restart the container
+    ```bash
+    cd terraform
+    terraform apply -var="enable_monitoring=true"
+    kubectl get pods -n monitoring
+    ```
 
-#### Readiness Probe
-- **Purpose**: Determine if the container is ready to serve traffic
-- **Check**: `/health` endpoint
-- **Failure Threshold**: 3 consecutive failures
-- **Behavior**: Kubernetes will remove the pod from service endpoints
+    Installs `kube-prometheus-stack` (Prometheus, Grafana, Alertmanager, kube-state-metrics, node exporter) and `loki-stack`, with 7-day, 10 GB Prometheus retention.
 
-## Distributed Tracing (Planned)
+=== "Docker Compose (local)"
 
-While not implemented in the current version, MANA is designed to support distributed tracing in future releases through:
+    ```bash
+    make dev-start
+    # Grafana  http://localhost:3000   Prometheus http://localhost:9090   Loki http://localhost:3100
+    ```
 
-- **Trace ID Propagation**: Passing trace IDs through HTTP headers
-- **Span Creation**: Creating spans for significant operations
-- **Integration with Tracing Systems**: Compatibility with Jaeger, Zipkin, or AWS X-Ray
-- **Context Propagation**: Ensuring trace context is maintained across asynchronous operations
+    See the caveats above and in [Development Setup](../contributing/development-setup.md#4-docker-compose-stack).
 
-### Planned Trace Context
-When implemented, MANA would propagate:
-- `trace_id`: Unique identifier for the entire trace
-- `span_id`: Identifier for the current span
-- `parent_span_id`: Identifier for the parent span (if any)
-- `trace_state`: Additional trace state information
-- `trace_flags`: Flags indicating sampling decisions and other traits
+=== "Manual Helm"
 
-## Dashboards and Visualization
+    ```bash
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+    helm install prometheus prometheus-community/kube-prometheus-stack \
+      -n monitoring --create-namespace --set prometheus.prometheusSpec.retention=7d
+    ```
 
-While MANA doesn't provide pre-built dashboards, its metrics and logs are designed to work well with common observability stacks.
+    Then apply the rules and dashboards from `monitoring/`.
 
-### Prometheus + Grafana
-MANA's metrics work natively with Prometheus and Grafana. Here are some suggested dashboard panels:
+### Verify
 
-#### Deployment Overview Panel
-- Stat: Total deployments processed (success/failed/in_progress)
-- Graph: Deployment success rate over time
-- Table: Recent deployments with status and version
-- Heatmap: Deployment duration distribution
-
-#### Retry and Rollback Panel
-- Stat: Total retries and rollbacks
-- Graph: Retry success rate over time
-- Pie chart: Rollback reasons
-- Table: Recent rollback operations
-
-#### System Health Panel
-- Stat: Orchestrator uptime
-- Gauge: Resource utilization (CPU, memory)
-- Stat: Dependency health (Redis, Kubernetes, GitHub)
-- Graph: Request rate over time
-- Table: Recent error occurrences
-
-#### Health Check Panel
-- Graph: Health check success rate over time
-- Histogram: Health check duration distribution
-- Table: Recent health check failures
-- Stat: Current application failure counts
-
-### Loki + Grafana
-MANA's structured logs work well with Loki for log aggregation and Grafana for visualization:
-
-#### Log Panels
-- Table: Recent audit log entries (with expandable details)
-- Bar chart: Audit log entries by action type
-- Time series: Audit log generation rate
-- Table: Failed audit log entries (success=false)
-- Table: Manual intervention required entries
-
-#### Search Panels
-- Free text search across all log fields
-- Filter by deployment ID, namespace, or version
-- Filter by action type and success/failure status
-- Date/time range selection
-
-## Setting Up Monitoring
-
-### Basic Prometheus Setup
-If you're using the Prometheus Operator or similar:
-
-```yaml
-# ServiceMonitor for MANA (if using Prometheus Operator)
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: mana
-  labels:
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: mana-orchestrator
-  namespace: mana
-  endpoints:
-  - port: http
-    interval: 30s
-    path: /metrics
+```bash
+# Targets
+curl -s localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
+# Orchestrator metric present?
+curl -s 'localhost:9090/api/v1/query?query=deployments_total' | jq '.data.result | length'
+# Generate data
+curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' \
+  -d '{"deployment_id":"mon-1","namespace":"staging","app_name":"sample-app","version":"1","status":"success"}'
 ```
 
-### Basic Loki Setup
-For log collection with Loki:
+## Best Practices
 
-```yaml
-# Promtail configuration snippet for MANA logs
-scrape_configs:
-- job_name: kubernetes-pods-name
-  pipeline_stages:
-  - json:
-      expressions:
-        level: level
-        service: service
-        message: message
-        logger: logger
-        trace_id: trace_id
-        span_id: span_id
-        fields: fields
-  - json:
-      expressions:
-        timestamp: timestamp
-        service: service
-        action: action
-        success: success
-        deployment_id: deployment_id
-        namespace: namespace
-        deployment_name: deployment_name
-        version: version
-        details: details
-    source: fields.audit_event
-  - output:
-      source: fields.timestamp
-  - timestamp:
-      source: source
-  relabel_configs:
-  - source_labels: [__meta_kubernetes_pod_label_app]
-    action: keep
-    regex: mana-orchestrator
-```
+- **Alert on outcomes, not only components.** Success rate, rollback rate, and `manual_intervention_required` tell you if healing works.
+- **Watch MANA itself:** `up{job="orchestrator"}`, pod restarts, and `/health` degradation.
+- **Fix the empty-metric gaps** (webhook counters, rollback decision latency, deployment duration) so the shipped alerts and panels become live.
+- **Keep cardinality in check.** `retries_total` has a `retry_attempt` label bounded by `MAX_RETRIES`; avoid adding deployment IDs as labels.
+- **Retention:** 7 days of metrics and 30 days of logs by default; raise them if you need longer incident history.
+- **Secure access** to Grafana and Prometheus, and keep dashboards in Git rather than editing them only in the UI.
 
-### Basic Grafana Dashboard JSON
-Here's a simple example of what a Grafana dashboard JSON might look like for MANA:
+## Troubleshooting Monitoring
 
-```json
-{
-  "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": "-- Grafana --",
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 0.9)",
-        "label": "Alerts",
-        "type": "dashboard"
-      }
-    ]
-  },
-  "editable": true,
-  "gnetId": null,
-  "graphTooltip": 0,
-  "id": null,
-  "links": [],
-  "panels": [
-    {
-      "datasource": "Prometheus",
-      "description": "Deployment Success Rate",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {}
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 0,
-        "y": 0
-      },
-      "id": 1,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "pluginVersion": "8.5.2",
-      "targets": [
-        {
-          "expr": "sum by (namespace) (mana_deployments_total{status=\"SUCCESS\"}) / sum by (namespace) (mana_deployments_total) * 100",
-          "interval": "",
-          "legendFormat": "{{namespace}} Success Rate",
-          "refId": "A"
-        }
-      ],
-      "title": "Deployment Success Rate",
-      "type": "stat"
-    },
-    {
-      "datasource": "Prometheus",
-      "description": "System Health",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {}
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 2,
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
-          },
-          "query": {
-            "params": [
-              "B"
-            ]
-          }
-        },
-        "options": {
-          "legend": {
-            "displayMode": "list",
-            "placement": "bottom"
-          },
-          "tooltip": {
-            "mode": "single"
-          }
-        }
-      },
-      "pluginVersion": "8.5.2",
-      "targets": [
-        {
-          "expr": "mana_redis_connected * mana_kubernetes_connected",
-          "interval": "",
-          "legendFormat": "Dependencies Healthy",
-          "refId": "A"
-        }
-      ],
-      "title": "System Health",
-      "type": "stat"
-    }
-  ],
-  "refresh": "30s",
-  "schemaVersion": 38,
-  "style": "dark",
-  "tags": [
-    "mana",
-    "monitoring"
-  ],
-  "templating": {
-    "list": [
-      {
-        "current": {
-          "text": "All",
-          "value": "$__all",
-          "query": "mana",
-          "type": "query"
-        },
-        "datasource": {
-          "type": "prometheus",
-          "name": "PS1",
-          "url": ""
-        },
-        "hide": 0,
-        "label": "Namespace",
-        "name": "namespace",
-        "options": [
-          {
-            "selected": true,
-            "text": "All",
-            "value": "$__all"
-          }
-        ],
-        "refresh": 1,
-        "sort": 1,
-        "type": "query"
-      }
-    ]
-  },
-  "time": {
-    "from": "now-1h",
-    "to": "now"
-  },
-  "timepicker": {
-    "refresh_intervals": [
-      "10s",
-      "30s",
-      "1m",
-      "5m",
-      "15m",
-      "30m",
-      "1h",
-      "2h",
-      "1 day"
-    ],
-    "time_options": [
-      "5m",
-      "15m",
-      "30m",
-      "1h",
-      "2h",
-      "1h",
-      "6h",
-      "12h",
-      "24h",
-      "2d",
-      "7d",
-      "30d"
-    ]
-  },
-  "timezone": "",
-  "title": "MANA Overview",
-  "uid": "mana-overview",
-  "version": 1,
-  "weekStart": ""
-}
-```
-
-## Best Practices for Monitoring
-
-### 1. Monitor the Four Golden Signals
-Focus on these key metrics for system health:
-- **Latency**: `mana_deployment_duration_seconds`, `mana_health_check_duration_seconds`, `mana_webhook_request_duration_seconds`
-- **Traffic**: `mana_webhook_requests_total`, `mana_audit_log_entries_total`
-- **Errors**: `mana_deployments_total{status!="SUCCESS"}`, `mana_rollbacks_total`, `mana_webhook_requests_total{status_code=~"[45].."}`
-- **Saturation**: `mana_orchestrator_memory_usage_bytes`, `mana_orchestrator_cpu_usage_seconds_total`, `mana_active_deployments`
-
-### 2. Set Up Alerting
-Consider alerts for:
-- **High error rates**: Sudden increase in failed deployments or rollbacks
-- **Performance degradation**: Increasing latencies over time
-- **Resource exhaustion**: Approaching CPU or memory limits
-- **Dependency failures**: Redis or Kubernetes API unavailability
-- **Manual intervention requirements**: When automatic recovery is exhausted
-- **Orchestrator unavailability**: Multiple pods crashing or not responding
-
-### 3. Use Appropriate Time Windows
-Different metrics benefit from different observation windows:
-- **Real-time (seconds-minutes)**: Alerting, troubleshooting active issues
-- **Short-term (minutes-hours)**: Trend analysis, capacity planning
-- **Medium-term (hours-days)**: Weekly reports, pattern identification
-- **Long-term (weeks-months)**: Monthly reports, seasonal adjustments, capacity forecasting
-
-### 4. Correlate Across Observability Pillars
-When investigating an issue:
-1. Start with metrics to identify what's wrong
-2. Use logs to understand why it's happening
-3. Use traces (when available) to see exactly how it happened
-4. Verify with health checks to confirm current state
-
-### 5. Monitor Business-Level Metrics
-Don't just monitor technical metrics:
-- Track deployment frequency over time
-- Measure MTTR (Mean Time To Recovery) for failures
-- Monitor rollback frequency as an indicator of release quality
-- Track the percentage of failures resolved by retry vs. requiring rollback
-- Measure the effectiveness of different failure types handling
-
-### 6. Create Service-Level Objectives (SLOs)
-Define and track SLOs for your deployment system:
-- **Availability**: Percentage of time the orchestrator is healthy
-- **Latency**: 95th percentile deployment health check time
-- **Error Rate**: Percentage of deployments requiring manual intervention
-- **Recovery Time**: Average time from failure detection to recovery
-- **Release Quality**: Percentage of deployments that succeed on first attempt
-
-### 7. Regularly Review and Tune
-Monitoring is not a set-and-forget activity:
-- Review dashboards weekly for anomalies
-- Tune alert thresholds based on observed baselines
-- Add new metrics as you identify new failure modes
-- Remove noisy or unactionable alerts
-- Update monitoring as your system evolves
-
-## Troubleshooting Monitoring Issues
-
-### No Metrics Appearing in Prometheus
-**Checks**:
-- Verify the `/metrics` endpoint is accessible: `curl http://<mana-ip>:<port>/metrics`
-- Check if ServiceMonitor or PodMonitor is configured correctly
-- Ensure Prometheus can reach the mana service (network policies, services)
-- Verify the mana service is exposing the correct port
-- Check if metrics are being filtered or transformed incorrectly
-
-### Missing or Incorrect Labels
-**Checks**:
-- Verify the mana service is exposing metrics with correct labels
-- Check if Prometheus is scraping from the correct endpoint
-- Ensure relabeling configs aren't removing or altering labels unexpectedly
-- Look for typos in label names in your queries or dashboard
-
-### Delayed or Stale Metrics
-**Checks**:
-- Check the scrape interval in your Prometheus configuration
-- Verify the mana service is actually updating metrics
-- Look for blocking operations that might prevent metric updates
-- Check if the orchestrator is stuck or in a degraded state
-
-### High Cardinality Issues
-**Checks**:
-- Monitor the number of unique time series being generated
-- Look for high-cardinality labels like `deployment_id` or `timestamp` used as labels
-- Consider using histograms and summaries instead of gauges for high-cardinality data
-- Evaluate whether you really need to monitor every single deployment individually
-
-### Log Collection Problems
-**Checks**:
-- Verify log collection agents are running and healthy
-- Check if logs are being formatted correctly as JSON
-- Ensure timestamp parsing is working correctly
-- Look for resource limits on log collection agents causing data loss
-- Check network connectivity between log sources and collection agents
-
-### Dashboard Issues
-**Checks**:
-- Verify the data source is correctly configured and accessible
-- Check if queries are returning expected results when run directly in Explore
-- Look for timeout settings that might be cutting off long-running queries
-- Check if panel-specific transforms are altering data unexpectedly
-- Ensure time ranges are set appropriately for the data being displayed
-
-## Next Steps
-
-After setting up monitoring for MANA:
-
-1. [Review the API Reference](reference/api.md) for programmatic access to metrics and status
-2. [Explore Advanced Configuration](configuration/overview.md) to tune monitoring-related settings
-3. [Read the Troubleshooting Guide](usage/troubleshooting.md) for help with common issues
-4. [Explore Contributing Guidelines](contributing/contributing.md) if you wish to improve MANA's monitoring capabilities
-5. [Study the Architecture](architecture/overview.md) to understand how monitoring is integrated into the system
-
-Effective monitoring turns MANA from a black box into a transparent system where you can understand what's happening, why it's happening, and what you can do to improve it.
+| Symptom                               | Check                                                                                                                                                           |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Orchestrator target missing or `DOWN` | Pod annotations (manual install) or ServiceMonitor (Terraform); relabeling of `__address__`; port 8000 reachable; use `/metrics/` (a bare `/metrics` redirects) |
+| Metrics exist but panels are empty    | The panel uses a recording rule or metric that is not emitted yet; run the underlying query in Prometheus                                                       |
+| No dashboards in Grafana              | Provisioning paths (see warning above) or import manually                                                                                                       |
+| No logs in Loki                       | Promtail running? Check `kubectl logs -n monitoring -l app=promtail`; query `{namespace="orchestrator"}` first                                                  |
+| Alerts never fire                     | Rule loaded (`/rules` page)? Metric present? `for:` duration elapsed?                                                                                           |
+| Alerts fire but nothing arrives       | Alertmanager receivers and secrets; check `/#/status` on port 9093                                                                                              |
+| Prometheus out of disk                | Reduce retention or raise the volume size (`10Gi` by default)                                                                                                   |

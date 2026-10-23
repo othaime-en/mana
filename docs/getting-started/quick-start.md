@@ -1,343 +1,238 @@
 # Quick Start Guide
 
-This guide provides a fast way to get MANA running in a local or test environment using kind (Kubernetes in Docker) or minikube.
+This walkthrough runs MANA on a local Kind (or Minikube) cluster, deploys the bundled sample app, and then simulates a failing deployment so you can watch the orchestrator **alert, retry, and finally roll back**. It takes about 10 minutes and needs no GitHub account.
 
-## Option 1: Using kind (Kubernetes in Docker)
-
-### Prerequisites
+## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/)
-- [kind](https://kind.sigs.k8s.io/docs/user/quick-start/)
+- [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) (or [minikube](https://minikube.sigs.k8s.io/docs/start/))
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [helm](https://helm.sh/docs/intro/install/)
+- `curl` and [`jq`](https://jqlang.github.io/jq/)
 
-### Steps
-
-1. **Create a kind cluster**:
+## 1. Create a Cluster and Build the Images
 
 ```bash
+git clone https://github.com/othaime-en/mana.git
+cd mana
+
 kind create cluster --name mana-demo
+kubectl cluster-info --context kind-mana-demo
+
+docker build -t orchestrator:latest orchestrator/
+docker build -t sample-app:1.0.0 sample-app/
+
+kind load docker-image orchestrator:latest sample-app:1.0.0 --name mana-demo
 ```
 
-2. **Verify the cluster is ready**:
+??? note "Using Minikube instead"
+`bash
+    minikube start
+    docker build -t orchestrator:latest orchestrator/
+    docker build -t sample-app:1.0.0 sample-app/
+    minikube image load orchestrator:latest
+    minikube image load sample-app:1.0.0
+    `
+Everything else in this guide is the same.
+
+## 2. Install MANA and the Sample App
 
 ```bash
-kubectl cluster-info
-kubectl get nodes
+kubectl create namespace orchestrator
+kubectl create namespace production
+
+# MANA needs this secret to start. The value only matters for real GitHub retries.
+kubectl create secret generic github-token \
+  --from-literal=token=placeholder -n orchestrator
+
+kubectl apply -f orchestrator/k8s/redis.yaml
+kubectl apply -f orchestrator/k8s/deployment.yaml
+kubectl apply -f sample-app/k8s/ -n production
+
+kubectl rollout status deployment/orchestrator -n orchestrator --timeout=180s
+kubectl rollout status deployment/sample-app   -n production   --timeout=180s
 ```
 
-3. **Install MANA using Helm**:
+The orchestrator waits 60 seconds before its first probe, so allow a minute or two. If the sample app's Ingress or HPA warn about a missing controller or metrics server, you can ignore them for this demo.
+
+## 3. Check That It Works
 
 ```bash
-# Clone the repository (if you haven't already)
-git clone https://github.com/othaime-en/mana.git
-cd mana
+kubectl -n orchestrator port-forward svc/orchestrator-service 8000:8000 &
+export MANA=http://localhost:8000
 
-# Install MANA with default settings
-helm install mana ./orchestrator/charts/mana \
-  --namespace mana --create-namespace
+curl -s $MANA/health | jq
 ```
 
-4. **Verify installation**:
-
-```bash
-# Check pods
-kubectl -n mana get pods
-
-# Check services
-kubectl -n mana get svc
-
-# Port forward to access the API
-kubectl -n mana port-forward svc/mana-orchestrator 8000:8000 &
-```
-
-5. **Test the API**:
-
-```bash
-# In another terminal
-curl http://localhost:8000/
-# Should return service information
-
-curl http://localhost:8000/health
-# Should return health status
-```
-
-### Deploy a Sample Application
-
-Let's deploy a simple application to test MANA's self-healing capabilities:
-
-1. **Create a namespace for our sample app**:
-
-```bash
-kubectl create namespace demo
-```
-
-2. **Deploy a simple HTTP server** (we'll use a basic nginx deployment for demonstration):
-
-```bash
-kubectl create deployment nginx-demo --image=nginx -n demo
-kubectl expose deployment nginx-demo --port=80 --target-port=80 -n demo
-```
-
-3. **Add version label** (required for MANA's rollback functionality):
-
-```bash
-kubectl label deployment nginx-demo app.kubernetes.io/version=1.0.0 -n demo
-```
-
-4. **Add a simple health endpoint** (for demonstration, we'll create a ConfigMap with a health endpoint):
-
-```bash
-# Create a simple health-checking nginx config
-cat > health-nginx.conf <<'EOF'
-events { worker_connections 1024; }
-
-http {
-    server {
-        listen 80;
-        location /health {
-            return 200 '{"status":"healthy"}';
-            add_header Content-Type application/json;
-        }
-        location / {
-            return 200 'Welcome to nginx!';
-            add_header Content-Type text/plain;
-        }
-    }
+```json
+{
+  "status": "healthy",
+  "redis": "healthy",
+  "kubernetes": "healthy",
+  "github_integration": true
 }
-EOF
-
-# Create ConfigMap
-kubectl create configmap nginx-health-conf --from-file=health-nginx.conf -n demo
-
-# Update deployment to use our custom config
-kubectl set volume deployment/nginx-demo \
-  --add --name=config-volume \
-  --type=configmap \
-  --configmap-name=nginx-health-conf \
-  -n demo
-
-kubectl set volume deployment/nginx-demo \
-  --add --name=health-volume \
-  --type=configMap \
-  --configmap-name=nginx-health-conf \
-  --mount-path=/etc/nginx/conf.d \
-  -n demo
-
-# Update the container command to use our config
-kubectl set image deployment/nginx-demo nginx=nginx:latest -n demo
 ```
 
-5. **Verify the deployment**:
+(`github_integration` is `true` because the manifest sets both `GITHUB_TOKEN` and `GITHUB_REPO`. The token is a placeholder, so any real re-run request to GitHub will be rejected; that is expected in this demo. See [Orchestrator Configuration](../configuration/orchestrator.md#github-integration).)
+
+Open <http://localhost:8000/docs> for interactive API docs, and check the sample app:
 
 ```bash
-kubectl -n demo get pods
-kubectl -n demo get svc
+kubectl -n production get pods -l app=sample-app
+kubectl -n production port-forward svc/sample-app-service 8080:80 &
+curl -s localhost:8080/health | jq
 ```
 
-6. **Test MANA's monitoring**:
+## 4. Teach MANA a Known-Good Version
+
+MANA rolls back to the **last version that reported success**. In a real pipeline the deploy workflow sends this webhook for you; here you send it by hand:
 
 ```bash
-# Check if MANA can see our deployment
-curl http://localhost:8000/deployments/demo/nginx-demo
+curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' -d '{
+  "deployment_id": "demo-good",
+  "namespace": "production",
+  "app_name": "sample-app",
+  "version": "1.0.0",
+  "status": "success"
+}' | jq
 ```
 
-## Option 2: Using minikube
+```json
+{
+  "status": "success",
+  "deployment_id": "demo-good",
+  "message": "Deployment successful - version saved for future rollbacks"
+}
+```
 
-### Prerequisites
-
-- [minikube](https://minikube.sigs.k8s.io/docs/start/)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [helm](https://helm.sh/docs/intro/install/)
-
-### Steps
-
-1. **Start minikube**:
+Confirm it was stored:
 
 ```bash
-minikube start
+kubectl -n orchestrator exec deploy/redis -- redis-cli get last_successful:production:sample-app
+# 1.0.0
 ```
 
-2. **Enable the ingress addon** (optional but recommended for testing):
+## 5. Break the Deployment
+
+Roll out an image that does not exist, as a bad release would:
 
 ```bash
-minikube addons enable ingress
+kubectl -n production set image deployment/sample-app sample-app=sample-app:1.1.0-broken
+kubectl -n production get pods -l app=sample-app
 ```
 
-3. **Install MANA**:
+Some pods will show `ErrImagePull` or `ImagePullBackOff`. The rollout is stuck on the new version.
+
+## 6. Report the Failure and Watch MANA Decide
+
+A pipeline would send a `failed` webhook when its rollout times out. Send it for the same `deployment_id` four times, waiting a moment between calls, and watch the decision change. (Run the log command in another terminal.)
 
 ```bash
-git clone https://github.com/othaime-en/mana.git
-cd mana
-
-helm install mana ./orchestrator/charts/mana \
-  --namespace mana --create-namespace
+kubectl -n orchestrator logs -l app=orchestrator -f --tail=5
 ```
-
-4. **Verify and test** (same as kind steps above).
-
-## Option 3: Using Docker Compose (for development only)
-
-For development and testing purposes, you can use Docker Compose to run MANA and its dependencies locally.
-
-### Prerequisites
-
-- [Docker Compose](https://docs.docker.com/compose/install/)
-- [git](https://git-scm.com/downloads)
-
-### Steps
-
-1. **Clone the repository**:
 
 ```bash
-git clone https://github.com/othaime-en/mana.git
-cd mana
+for i in 1 2 3 4; do
+  echo "--- failure #$i"
+  curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' -d '{
+    "deployment_id": "demo-bad",
+    "namespace": "production",
+    "app_name": "sample-app",
+    "version": "1.1.0-broken",
+    "status": "failed",
+    "failure_type": "deployment_failure",
+    "metadata": {"workflow_run_id": "1"}
+  }' | jq -c .action_taken
+  sleep 3
+done
 ```
 
-2. **Create a docker-compose.yml file**:
+Expected output:
 
-```yaml
-version: '3.8'
-
-services:
-  redis:
-    image: redis:8-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-
-  orchestrator:
-    build: ./orchestrator
-    ports:
-      - "8000:8000"
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MAX_RETRIES=3
-      - ROLLBACK_THRESHOLD=2
-      - INITIAL_BACKOFF=10.0
-      - MAX_BACKOFF=300.0
-      - BACKOFF_MULTIPLIER=2.0
-      - HEALTH_CHECK_TIMEOUT=5
-      - HEALTH_CHECK_PORT=5000
-      - HEALTH_CHECK_PATH=/health
-      - LOG_LEVEL=INFO
-      - ENABLE_AUDIT_LOGGING=true
-    depends_on:
-      - redis
-
-volumes:
-  redis_data:
+```text
+--- failure #1
+{"action":"alert","message":"Cannot retry - missing workflow_run_id. Manual intervention required."}
+--- failure #2
+{"action":"retry","retry_count":2,"backoff_seconds":20.0,"workflow_run_id":"1","message":"Retry 2/3 scheduled in 20.0s"}
+--- failure #3
+{"action":"retry","retry_count":3,"backoff_seconds":40.0,"workflow_run_id":"1","message":"Retry 3/3 scheduled in 40.0s"}
+--- failure #4
+{"action":"rollback","previous_version":"1.0.0","message":"Rolled back to version 1.0.0"}
 ```
 
-3. **Start the services**:
+What happened:
+
+| Failure | Decision   | Why                                                                                                                                                                                                                                                                                    |
+| ------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1       | `alert`    | The first failure for a new deployment ID has no stored `workflow_run_id` yet (a known limitation; see [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations))                                                                                                     |
+| 2, 3    | `retry`    | Within `MAX_RETRIES=3`; a workflow re-run is scheduled after 20 s and 40 s of backoff. Because the token is a placeholder, GitHub rejects the re-run request (an error such as `Failed to trigger re-run: 401` appears in the logs after the backoff), which is harmless for this demo |
+| 4       | `rollback` | `retry_count` (4) now exceeds both `MAX_RETRIES` and `ROLLBACK_THRESHOLD`, and a previous version (`1.0.0`) is known                                                                                                                                                                   |
+
+The fourth call takes a few seconds: the orchestrator patches the Deployment back to `sample-app:1.0.0`, waits for all replicas to be ready, and calls each pod's `/health` endpoint before answering.
+
+## 7. Verify the Recovery
 
 ```bash
-docker-compose up -d
+kubectl -n production get deployment sample-app \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+# sample-app:1.0.0
+
+kubectl -n production get pods -l app=sample-app
+
+curl -s $MANA/deployment/demo-bad | jq
 ```
 
-4. **Verify the services are running**:
-
-```bash
-docker-compose ps
+```json
+{
+  "deployment_id": "demo-bad",
+  "namespace": "production",
+  "app_name": "sample-app",
+  "version": "1.1.0-broken",
+  "status": "rolled_back",
+  "retry_count": 4,
+  "failure_type": "deployment_failure",
+  "previous_version": "1.0.0",
+  "timestamp": 1760000123.45,
+  "metadata": { "workflow_run_id": "1" }
+}
 ```
 
-5. **Test the API**:
+See the audit trail for the whole story:
 
 ```bash
-curl http://localhost:8000/
-curl http://localhost:8000/health
+kubectl -n orchestrator logs -l app=orchestrator | grep "AUDIT:"
 ```
 
-## Testing Self-Healing Capabilities
+You should see `deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `health_check_passed` and `rollback_completed` entries.
 
-Once you have MANA running with a sample application, you can test its self-healing capabilities:
-
-### Simulating a Failure
-
-1. **Deploy an application that will fail health checks**:
+You can also trigger the same rollback yourself at any time:
 
 ```bash
-# Create a deployment that fails health checks
-cat > failing-app.yaml <<'EOF'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: failing-app
-  labels:
-    app: failing-app
-    version: "1.0.0"
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: failing-app
-  template:
-    metadata:
-      labels:
-        app: failing-app
-        version: "1.0.0"
-    spec:
-      containers:
-      - name: failing-app
-        image: nginx:latest
-        ports:
-        - containerPort: 80
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 80
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        # This container will fail health checks because it doesn't have a /health endpoint
-EOF
-
-kubectl apply -f failing-app.yaml -n demo
+curl -s -X POST $MANA/rollback -H 'Content-Type: application/json' \
+  -d '{"namespace":"production","deployment_name":"sample-app","target_version":"1.0.0"}' | jq
 ```
 
-2. **Watch MANA respond**:
+## Other Ways to Run Locally
+
+### Docker Compose
+
+`docker-compose.yml` in the repository starts Redis, the sample app, the orchestrator and the monitoring stack (`make dev-start`). The orchestrator still needs a Kubernetes API, so this works only if the mounted kubeconfig is readable by the container's non-root user and points at an address reachable from Docker. See the notes in [Development Setup](../contributing/development-setup.md#4-docker-compose-stack). For a first try, the Kind route above is simpler.
+
+### Running the orchestrator on your machine
+
+Run Redis in Docker and the orchestrator with `uvicorn` against your local kubeconfig, as described in [Development Setup](../contributing/development-setup.md#3-run-services-locally-without-containers).
+
+## Clean Up
 
 ```bash
-# Monitor MANA logs
-kubectl -n mana logs -f -l app=mana-orchestrator
-
-# In another terminal, watch the deployment
-kubectl -n demo get pods -w
-```
-
-You should see:
-1. MANA detecting the unhealthy deployment
-2. MANA scheduling a retry (if GitHub integration is configured)
-3. If retries are exhausted, MANA initiating a rollback
-
-## Cleaning Up
-
-When you're done with your demo:
-
-### For kind:
-```bash
+kill %1 %2 2>/dev/null          # stop port-forwards started in this shell
 kind delete cluster --name mana-demo
+# or: minikube delete
 ```
 
-### For minikube:
-```bash
-minikube stop
-# or
-minikube delete
-```
+## Where to Go Next
 
-### For Docker Compose:
-```bash
-docker-compose down
-```
-
-## Next Steps
-
-After completing this quick start guide:
-
-1. [Read the Architecture Overview](architecture/overview.md) to understand how MANA works internally
-2. [Learn about Configuration Options](configuration/overview.md) to tailor MANA to your needs
-3. [Explore CI/CD Integration](usage/cicd-integration.md) to connect MANA with your pipeline
-4. [Review the API Reference](reference/api.md) for programmatic interaction
+- [Installation](installation.md): installing on a real cluster
+- [CI/CD Integration](../usage/cicd-integration.md): have your pipeline send these webhooks automatically
+- [Configuration](../configuration/overview.md): tune retries, backoff and health checks
+- [Basic Usage](../usage/basic-usage.md): day-to-day operation
+- [Architecture Overview](../architecture/overview.md): how it all fits together

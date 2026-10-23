@@ -1,403 +1,134 @@
 # Architecture Overview
 
-MANA (Self-Healing CI/CD Pipeline) is designed as a Kubernetes-native orchestration system that automatically detects and recovers from deployment failures. This document provides an overview of MANA's architecture, components, and data flow.
+MANA (Self-Healing CI/CD Pipeline) is a Kubernetes-native orchestration service that reacts to deployment events from a CI/CD pipeline and automatically recovers from failures by retrying the pipeline and, when that does not help, rolling the Deployment back to its last known-good version.
+
+This page explains the design at a high level. Details are in [Components](components.md) and [Data Flow](data-flow.md).
+
+## Design Principles
+
+- **Event-driven.** The pipeline reports deployment events by webhook. The orchestrator reacts to them; it does not poll the cluster for new Deployments.
+- **Stateful decisions.** Whether to retry or roll back depends on history (how many times this deployment has failed and what the last good version was), so state lives in Redis.
+- **Verify, do not assume.** A rollback is only reported as successful after Kubernetes shows all replicas ready **and** the application's own `/health` endpoint answers.
+- **Auditable.** Every decision and action produces a structured audit event.
+- **Simple, replaceable pieces.** One small FastAPI service, Redis, and the Kubernetes and GitHub APIs. No custom resource definitions or operators.
 
 ## High-Level Architecture
 
-MANA consists of several loosely coupled components that work together to provide self-healing capabilities:
-
-```
-┌─────────────────┐    ┌──────────────────────┐    ┌────────────────────┐
-│  CI/CD System   │───▶│   MANA Orchestrator   │───▶│ Kubernetes Cluster │
-│ (GitHub Actions)│    │                      │    │                    │
-└─────────────────┘    │  • API Server         │    │  • Deployments     │
-                       │  • Decision Engine    │    │  • ReplicaSets     │
-                       │  • State Manager      │    │  • Pods            │
-                       │  • Audit Logger       │    │                    │
-                       │  • Health Checker     │    └────────────────────┘
-                       └──────────────────────┘
-                                │
-                                ▼
-                      ┌────────────────────┐
-                      │  Monitoring Stack  │
-                      │ (Prometheus, Grafana)│
-                      └────────────────────┘
-                                │
-                                ▼
-                      ┌────────────────────┐
-                      │  External Systems  │
-                      │ (Slack, Email, etc.)│
-                      └────────────────────┘
-```
+![MANA high-level architecture: GitHub Actions sends webhooks to the orchestrator, which calls the Kubernetes API, stores state in Redis, asks GitHub to re-run workflows and sends metrics and logs to the monitoring stack, which alerts Slack, PagerDuty or email](../assets/diagrams/high-level-architecture.svg)
 
 ## Core Components
 
-### 1. Orchestrator Service
+| Component                  | Responsibility                                                                                  | Details                                                            |
+| -------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| **Orchestrator**           | Receives webhooks, decides retry, rollback or alert, executes recovery, exposes API and metrics | [Components: Orchestrator](components.md#orchestrator)             |
+| **State store (Redis)**    | Deployment state (24 h TTL) and the last successful version per app                             | [Components: State Store](components.md#state-store-redis)         |
+| **Kubernetes integration** | Reads Deployments, ReplicaSets and Pods; patches the Deployment image on rollback               | uses the official Python `kubernetes` client                       |
+| **Health checker**         | Replica readiness plus an HTTP call to each pod's health endpoint                               | [Data Flow: Health verification](data-flow.md#health-verification) |
+| **Decision engine**        | Retry counting, exponential backoff, rollback rule                                              | [Data Flow: The decision rule](data-flow.md#the-decision-rule)     |
+| **GitHub integration**     | Asks GitHub to re-run a failed workflow run                                                     | [CI/CD Integration](../usage/cicd-integration.md)                  |
+| **Audit logger**           | One JSON audit event per action                                                                 | [Monitoring](../usage/monitoring.md#structured-logging)            |
+| **Sample app**             | Flask service used as a deployment target, with failure simulation                              | [Components: Sample Application](components.md#sample-application) |
+| **Monitoring stack**       | Prometheus, Grafana, Loki/Promtail, Alertmanager configuration                                  | [Monitoring](../usage/monitoring.md)                               |
 
-The central decision-making component built with FastAPI that exposes a REST API for:
-- Receiving deployment webhooks from CI/CD systems
-- Managing deployment states
-- Making retry/rollback decisions
-- Providing health checks and metrics
-- Exposing audit logs
+## How a Deployment Is Handled
 
-**Key Responsibilities:**
-- Process incoming deployment events
-- Determine appropriate response (retry, rollback, alert)
-- Maintain deployment state in Redis
-- Execute rollback operations via Kubernetes API
-- Integrate with GitHub Actions for workflow re-runs
-- Expose Prometheus metrics for monitoring
-- Generate structured audit logs
+1. The pipeline deploys a new version and posts `POST /webhook/deployment` with `status` of `in_progress`, `success` or `failed`.
+2. On **success**, the orchestrator records the version as the new rollback target.
+3. On **failure**, it increments the retry count for that deployment ID and applies the rule:
+   - up to `MAX_RETRIES` failures: schedule a GitHub Actions re-run after an exponential backoff;
+   - after that, and once `ROLLBACK_THRESHOLD` is exceeded: patch the Deployment back to the last good version and verify health;
+   - if neither is possible (no previous version, rollback unhealthy): raise an alert (`manual_intervention_required`).
+4. Every step is written to the audit log, and Prometheus counters are updated.
 
-### 2. State Management (Redis)
+The step-by-step version, with the decision table, is in [Data Flow](data-flow.md).
 
-Redis is used as the primary state store for:
-- Tracking deployment states and history
-- Storing successful deployment versions for rollback
-- Maintaining retry counts and backoff timers
-- Persisting audit trail information
+### Retry path
 
-**Why Redis?**
-- High performance for frequent read/write operations
-- Built-in expiration (TTL) for automatic cleanup
-- Atomic operations for state consistency
-- Rich data structures (hashes, lists, sets)
-- Wide adoption and operational maturity
+![Retry path: a failure webhook loads or creates state, increments retry_count, computes the backoff and saves retry_scheduled; a background task waits and posts the GitHub re-run request; the re-run sends its own webhook, and success records the rollback target while failure repeats or rolls back](../assets/diagrams/flow-retry-path.svg)
 
-### 3. Kubernetes Integration
+### Rollback path
 
-MANA interacts with Kubernetes through the official client-go library to:
-- Monitor deployment and pod status
-- Execute rollback operations by updating image tags
-- Read ReplicaSet information for version tracking
-- Create events for better observability
-- Monitor namespaces for new deployments (optional)
+![Rollback path: when retry_count exceeds the limits, find the previous version, save rolling_back, patch the Deployment image and version labels, wait for replicas ready and app /health, then save rolled_back with a rollback_completed audit event or failed with rollback_failed](../assets/diagrams/flow-rollback-path.svg)
 
-**Key Kubernetes Resources Managed:**
-- Deployments (primary target for monitoring and rollback)
-- ReplicaSets (for version history and rollback targets)
-- Pods (for health checking and readiness determination)
-- Events (for operational visibility)
+## Design Decisions
 
-### 4. Health Checker
+**Why webhooks instead of watching the cluster?** The pipeline already knows precisely when a deployment starts and how it failed, and it holds the context needed to retry (the workflow run). Watching would duplicate that and still could not re-run the pipeline.
 
-Responsible for determining the health of deployments through:
-- Pod readiness checks (via Kubernetes API)
-- Application-level health checks (via HTTP endpoints)
-- Configurable failure thresholds
-- Distinction between pod-level and application-level health
+**Why re-run the pipeline for retries?** A retry should repeat exactly what the pipeline did (build, push, deploy). Asking GitHub to re-run the workflow reuses all of that logic and keeps CI history accurate.
 
-### 5. Decision Engine
+**Why roll back by patching the image tag?** It is explicit and auditable: the orchestrator sets the container image to the last version that reported success, rather than relying on Kubernetes revision history (`kubectl rollout undo`), which can point at a version that was never verified.
 
-Implements the core logic for determining when to retry vs. rollback:
-- Failure detection and classification
-- Retry count tracking
-- Exponential backoff calculation
-- Rollback threshold evaluation
-- GitHub Actions integration for workflow re-runs
-
-### 6. Audit Logger
-
-Provides a comprehensive, immutable record of all actions:
-- Structured JSON logging for easy parsing
-- Context preservation (deployment ID, namespace, version, etc.)
-- Success/failure tracking for all operations
-- Detailed error information when applicable
-- Configurable retention policies
-
-### 7. Monitoring & Observability
-
-Built-in instrumentation for operational visibility:
-- Prometheus metrics for key operational metrics
-- Structured logging for debugging and auditing
-- Health checks for both service and dependency verification
-- Distributed tracing readiness (through request IDs)
-- Custom dashboards for operational visibility
-
-## Data Flow
-
-### Normal Deployment Flow
-
-1. **Deployment Trigger**: CI/CD system deploys new version to Kubernetes
-2. **Completion Notification**: CI/CD sends webhook to MANA with `status: success`
-3. **State Update**: MANA records the version as successful in Redis
-4. **Monitoring**: MANA continues to monitor deployment health
-5. **Completion**: No further action needed if deployment remains healthy
-
-### Failure Detection and Recovery Flow
-
-1. **Failure Occurrence**: Deployment fails (health check fails, pods crash, etc.)
-2. **Notification**: CI/CD sends webhook to MANA with `status: failed` and `failure_type`
-3. **Failure Logging**: MANA logs the failure detection in audit log
-4. **State Retrieval**: MANA retrieves current deployment state from Redis
-5. **Decision Making**:
-   - If first failure: Schedule retry with exponential backoff
-   - If within retry limit: Trigger GitHub Actions workflow re-run
-   - If retry threshold exceeded: Initiate rollback to previous stable version
-6. **Recovery Execution**:
-   - For retry: Wait for backoff period, then trigger CI/CD re-run
-   - For rollback: Update deployment image tag to previous version
-7. **Verification**: MANA monitors the recovery action to confirm success
-8. **Completion**: Log recovery action in audit trail and return to monitoring
-
-### Detailed Failure Handling Process
-
-#### Retry Path
-```
-Failure Detected
-       ↓
-Get Deployment State
-       ↓
-Increment Retry Count
-       ↓
-Calculate Backoff Delay
-       ↓
-Save Updated State
-       ↓
-Schedule Retry (async)
-       ↓
-Trigger GitHub Workflow Re-run (after backoff)
-       ↓
-Monitor for Success/Failure
-       ↓
-If Success: Record as Successful Version
-       ↓
-If Failure: Repeat or Rollback (if threshold exceeded)
-```
-
-#### Rollback Path
-```
-Failure Detected
-       ↓
-Get Deployment State
-       ↓
-Check Retry Count vs Threshold
-       ↓
-If Threshold Exceeded:
-       ↓
-Get Previous Successful Version
-       ↓
-Save State as ROLLING_BACK
-       ↓
-Update Deployment Image Tag
-       ↓
-Monitor Rollout Progress
-       ↓
-Verify Health Post-Rollback
-       ↓
-If Success:
-       ↓
-Save State as ROLLED_BACK
-       ↓
-Record Successful Version
-       ↓
-If Failure:
-       ↓
-Save State as FAILED
-       ↓
-Request Manual Intervention
-```
+**Why Redis?** Retry counts and rollback targets need a small, fast, shared store with built-in expiry. Deployment records expire after 24 hours; rollback targets (`last_successful:*`) do not.
 
 ## Security Architecture
 
-MANA follows security best practices:
+The orchestrator can modify Deployments, so its permissions and exposure matter. This section summarises what the code and manifests implement today; the full model, known gaps and a hardening checklist are on the [Security](../about/security.md) page.
 
-### Authentication & Authorization
-- **Kubernetes RBAC**: Least-privilege access to only necessary resources
-  - Deployments: get, list, watch, update, patch
-  - ReplicaSets: get, list, watch
-  - Pods: get, list, watch
-  - Events: create, patch
-- **No External Access Required**: All communication happens within cluster
-- **Secret Management**: Sensitive data (GitHub tokens) stored as Kubernetes secrets
+**Implemented**
 
-### Container Security
-- **Non-Root Execution**: Containers run as non-root users
-- **Minimal Capabilities**: Linux capabilities dropped to minimum required
-- **Resource Limits**: CPU and memory limits to prevent resource exhaustion
-- **Read-Only Root Filesystem**: Where applicable
-- **Security Contexts**: Properly configured for all containers
+- **RBAC**: a ClusterRole limited to `get/list/watch/update/patch` on Deployments and ReplicaSets, `get/list/watch` on Pods, and `create/patch` on Events. It cannot read Secrets.
+- **Container hardening**: non-root user (UID 1000), `allowPrivilegeEscalation: false`, all Linux capabilities dropped, CPU and memory limits.
+- **Secrets**: the GitHub token comes from a Kubernetes Secret, never from an image or ConfigMap.
+- **Network exposure**: Services are `ClusterIP`; nothing is exposed outside the cluster by default.
+- **Input validation**: request bodies are validated by Pydantic models; configuration is range-checked at startup.
+- **Audit trail**: structured events for every recovery action.
 
-### Network Security
-- **Service Exposure**: Services default to ClusterIP (internal only)
-- **Ingress Control**: Ingress resources optional and configurable
-- **Network Policies**: Recommended for production deployments
-- **API Authentication**: Webhook endpoint can be secured with network policies
+**Not implemented (be aware)**
 
-### Data Protection
-- **Encryption at Rest**: Depends on underlying storage (ETCD, PVCs)
-- **Secrets Encryption**: Kubernetes secrets can be encrypted at rest
-- **Audit Log Integrity**: Append-only logging prevents tampering
-- **Input Validation**: All external inputs validated and sanitized
+- The API and webhook endpoint have **no authentication**; restrict access at the network layer.
+- Redis has no password or TLS support in the client.
+- The RBAC role is cluster-wide.
 
 ## Scalability and Performance
 
-### Horizontal Scaling
-- **Stateless Design**: Orchestrator instances can be scaled horizontally
-- **Shared State**: Redis provides shared state between instances
-- **Leader Election**: Optional leader election to prevent duplicate processing
-- **Partitioning**: Deployments can be partitioned by namespace or label
-
-### Performance Characteristics
-- **Low Latency**: Sub-second response times for API requests
-- **Efficient Health Checks**: Concurrent health checking with timeouts
-- **Batch Operations**: Where possible, operations are batched
-- **Caching**: Strategic caching of frequently accessed data
-- **Asynchronous Processing**: Non-blocking operations for external calls
-
-### Resource Efficiency
-- **Minimal Footprint**: Base installation requires minimal resources
-- **Configurable Resource Requests**: Tunable for different scales
-- **Efficient Data Structures**: Optimized use of Redis data types
-- **Garbage Collection**: Automatic cleanup of old states via TTL
-
-## Extensibility Points
-
-MANA is designed to be extensible for different environments and requirements:
-
-### Plugin Architecture
-- **Failure Handlers**: Custom logic for different failure types
-- **Notification Channels**: Extend beyond Slack/email to PagerDuty, Webhooks, etc.
-- **Health Check Strategies**: Custom health check implementations
-- **Storage Backends**: Alternative to Redis (though Redis is recommended)
-- **CI/CD Integrations**: Beyond GitHub Actions to GitLab CI, Jenkins, etc.
-
-### Configuration Options
-- **Feature Flags**: Enable/disable specific functionality
-- **Policy Engines**: Plug in custom decision-making logic
-- **Metrics Exporters**: Additional monitoring backends
-- **Logging Adapters**: Different log formats or destinations
-
-### API Extensibility
-- **Webhook Formats**: Support for different CI/CD webhook formats
-- **Custom Endpoints**: Add organization-specific endpoints
-- **GraphQL Interface**: Optional GraphQL API alongside REST
-- **gRPC Support**: For high-performance internal communication
-
-## Deployment Patterns
-
-MANA supports various deployment patterns:
-
-### Single Instance (Development/Testing)
-- Simple deployment with one orchestrator pod
-- Suitable for testing and low-traffic environments
-- Uses embedded Redis or external instance
-
-### High Availability (Production)
-- Multiple orchestrator replicas (3+ recommended)
-- External Redis cluster for HA
-- Load balancing via Kubernetes Service
-- Optional leader election to prevent conflicts
-
-### Multi-Tenant
-- Namespace isolation for different teams/environments
-- Resource quotas to prevent noisy neighbors
-- Separate configuration per tenant/namespace
-- Shared monitoring and alerting
-
-### Edge/Distributed
-- Lightweight version for edge computing scenarios
-- Reduced feature set for resource-constrained environments
-- Local state persistence with periodic sync
-- Optimized for intermittent connectivity
-
-## Technology Stack
-
-### Core Technologies
-- **Language**: Python 3.9+
-- **Framework**: FastAPI for API server
-- **State Management**: Redis 6+
-- **Orchestration**: Kubernetes client-go (via official Python client)
-- **Webhook Processing**: Standard HTTP with signature validation
-- **Audit Logging**: Structured JSON logging
-- **Monitoring**: Prometheus client library
-- **Containerization**: Docker with multi-stage builds
-
-### Infrastructure
-- **Container Orchestration**: Kubernetes 1.22+
-- **Service Mesh**: Compatible with Istio, Linkerd, etc. (optional)
-- **Service Discovery**: Kubernetes DNS
-- **Load Balancing**: Kubernetes Services (ClusterIP, LoadBalancer, Ingress)
-- **Storage**: Persistent Volumes for Redis (if using external persistence)
-- **Networking**: Standard Kubernetes networking (CNI agnostic)
-
-### Development & Testing
-- **Testing Framework**: Pytest with asyncio support
-- **Mocking**: unittest.mock for isolation
-- **CI**: GitHub Actions for continuous integration
-- **Code Quality**: Ruff, MyPy for linting and type checking
-- **Documentation**: MkDocs with material theme
-- **Version Control**: Git with conventional commits
-- **Release Process**: Semantic versioning with automated changelogs
+- **Replicas.** The manifests run 2 orchestrator replicas that share state through Redis. There is **no leader election**, so if the same webhook reaches both replicas, both can act on it. Use one replica if you need strict single-actor behaviour.
+- **Synchronous rollback.** A rollback runs inside the webhook request and waits for health verification (up to 300 s by default). Size your pipeline's HTTP timeout accordingly.
+- **Background retries.** Retry waits run as in-memory background tasks in the replica that received the webhook.
+- **Listing deployments.** `GET /deployments/recent` scans all `deployment:*` keys; it is meant for dashboards and debugging.
+- **Footprint.** The orchestrator requests 100m CPU and 256Mi memory per replica.
 
 ## Failure Modes and Recovery
 
-MANA is designed to handle various failure scenarios gracefully:
+| Failure                                     | Behaviour                                                                                                                                                                                                           | Recovery                                                                                                                                 |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Orchestrator pod crash**                  | Kubernetes restarts it; the other replica keeps serving. Persistent state is in Redis. Retry waits that were pending in the crashed pod's memory are lost: the state shows `retry_scheduled`, but no re-run is sent | Re-run the failed workflow manually or let the pipeline send the next failure webhook                                                    |
+| **Redis unavailable**                       | At startup the orchestrator exits (`Cannot connect to Redis`). At runtime `/health` reports `degraded`; failure webhooks fail with HTTP 500 because state cannot be saved, so no recovery action is taken           | Restore Redis. Restarting the bundled Redis loses state (it uses an `emptyDir`), including the `last_successful:*` rollback targets      |
+| **Kubernetes API unavailable**              | At startup the orchestrator exits. At runtime health checks fail and rollbacks fail (the response is an `alert` or an HTTP 500, depending on the error)                                                             | Restore the API server; send the failure again or call `POST /rollback`                                                                  |
+| **GitHub API unavailable or token invalid** | Retries are scheduled, but the re-run request fails and is logged (`permission denied`, timeout, or a non-201 status). Rollbacks are unaffected                                                                     | Fix the token or wait; the next failure webhook continues the process                                                                    |
+| **Application unhealthy after rollback**    | State becomes `failed` and a `manual_intervention_required` audit event is written; the API returns `alert`                                                                                                         | Investigate manually; check pod logs and events                                                                                          |
+| **No previous version known**               | Decision is `alert`                                                                                                                                                                                                 | Ensure at least one successful deployment has been reported, or that pods carry a `version` label so the ReplicaSet fallback works       |
+| **Duplicate webhook delivery**              | Processed twice (retry count increments twice)                                                                                                                                                                      | Make the pipeline send each event once                                                                                                   |
+| **Network partition**                       | Webhooks cannot arrive, or health checks to pod IPs time out and count as failures                                                                                                                                  | Heals automatically; a NetworkPolicy that blocks the orchestrator from pods or from `api.github.com` looks identical, so verify policies |
 
-### Orchestrator Failure
-- **Detection**: Kubernetes liveness/readiness probes
-- **Recovery**: Automatic restart by Kubernetes
-- **State Safety**: All state persisted in Redis
-- **Failover**: Multiple replicas ensure continued operation
-- **Data Loss**: Minimal to none (state saved before external calls)
+## Technology Stack
 
-### Redis Failure
-- **Detection**: Health checks in orchestrator
-- **Degraded Mode**: Limited functionality (no state persistence)
-- **Recovery**: Automatic restart or failover (if using Redis cluster)
-- **Data Safety**: Persistence depends on Redis configuration
-- **Manual Intervention**: May be required for data recovery
-
-### Kubernetes API Failure
-- **Detection**: Health checks and API call timeouts
-- **Degraded Mode**: Limited to local state operations
-- **Recovery**: Automatic when API server recovers
-- **Operations Affected**: Rollback, health checking, state updates
-- **Mitigation**: Caching of frequently accessed data
-
-### Network Partition
-- **Detection**: Health check failures and timeouts
-- **Degraded Mode**: Local operations only
-- **Recovery**: Automatic when network heals
-- **Consistency**: Eventual consistency model
-- **Conflict Resolution**: Last-write-wins with timestamps
-
-### GitHub API Failure
-- **Detection**: API call failures and timeouts
-- **Degraded Mode**: Retry functionality disabled
-- **Recovery**: Automatic when GitHub API recovers
-- **Operations Affected**: Workflow re-runs for retry functionality
-- **Mitigation**: Exponential backoff and circuit breaker patterns
+| Layer                  | Technology (as pinned in the repository)                                               |
+| ---------------------- | -------------------------------------------------------------------------------------- |
+| Orchestrator           | Python 3.12, FastAPI 0.126, Uvicorn 0.32, Pydantic 2.9                                 |
+| Integrations           | `kubernetes` Python client 31, `redis` 5.2, `requests` 2.32, `prometheus-client` 0.24  |
+| Sample app             | Python 3.12, Flask 3.0, Gunicorn 21.2, `prometheus-flask-exporter` 0.23                |
+| State                  | Redis 8 (`redis:8-alpine`)                                                             |
+| Containers             | Docker, non-root images based on `python:3.12-slim`                                    |
+| Orchestration          | Kubernetes 1.23+                                                                       |
+| Infrastructure as code | Terraform 1.5+, `hashicorp/kubernetes` ~> 2.23, `hashicorp/helm` ~> 2.11               |
+| Monitoring             | kube-prometheus-stack (chart 54.0.0), Loki stack (chart 2.9.11), Grafana, Alertmanager |
+| CI/CD                  | GitHub Actions, GHCR, Kind for pipeline smoke tests, Snyk, Trivy, Bandit               |
+| Testing                | pytest, pytest-cov, pytest-asyncio                                                     |
+| Documentation          | MkDocs with the `shadcn` theme                                                         |
 
 ## Extending MANA
 
-### Adding Custom Failure Handlers
-1. Create a new failure handler class inheriting from `BaseFailureHandler`
-2. Implement the `handle_failure` method
-3. Register the handler in the failure type mapping
-4. Configure the orchestrator to use your custom handler
+MANA has no plugin framework; extension means changing the code. The natural extension points are:
 
-### Adding Notification Channels
-1. Create a new notifier class inheriting from `BaseNotifier`
-2. Implement the `send_notification` method
-3. Register the notifier in the notification factory
-4. Configure the orchestrator to use your notifier
+- **New failure types**: add a value to `FailureType` in `orchestrator/src/orchestrator.py` and send it from your pipeline.
+- **New decision rules**: edit `handle_deployment_failure()`; add a test for each branch.
+- **Other CI systems**: the webhook half is CI-agnostic; implement an equivalent of `trigger_github_workflow_rerun()` for your system's re-run API.
+- **Notifications**: alerts are routed by Alertmanager; add receivers in `monitoring/alertmanager/alertmanager.yml`. The orchestrator itself only logs `manual_intervention_required`.
+- **Health strategies**: adjust `check_application_health()` for different response formats.
+- **Other storage backends**: Redis is used directly through `redis_client`; replacing it means abstracting those calls.
 
-### Adding Health Check Strategies
-1. Create a new health check class inheriting from `BaseHealthChecker`
-2. Implement the `check_health` method
-3. Register the checker in the health check factory
-4. Configure deployments to use your custom strategy
+See [Contributing](../contributing/contributing.md) for conventions.
 
-### Adding Storage Backends
-1. Create a new storage class inheriting from `BaseStorage`
-2. Implement the required interface methods
-3. Register the storage in the storage factory
-4. Configure the orchestrator to use your storage backend
+## Known Limitations
 
-## Conclusion
-
-MANA's architecture balances simplicity with extensibility, providing a robust foundation for self-healing CI/CD pipelines while remaining adaptable to various environments and requirements. Its use of proven technologies (Redis, Kubernetes, FastAPI) ensures reliability and operational familiarity, while its modular design allows for customization and extension as needs evolve.
-
-The system is designed to be observable, secure, and production-ready from the ground up, with careful attention to failure modes, scalability, and operational best practices.
+Behaviours that differ from the intended design (retry state carry-over, deployment ID stability, one unsupported failure type, a shadowed metrics route, and some alerts without matching metrics) are listed with explanations on the [Data Flow](data-flow.md#known-behaviours-and-limitations) page.

@@ -1,237 +1,196 @@
-# Installation Methods
+# Installation
 
-MANA can be installed using several methods depending on your preferences and environment.
+MANA is installed from the Kubernetes manifests in `orchestrator/k8s/` or with the Terraform modules in `terraform/`. There is no Helm chart for MANA itself (Helm is used only to install the monitoring stack and, in `scripts/deploy.sh`, an optional Redis).
 
-## Helm Chart Installation (Recommended)
+For a guided local walkthrough see the [Quick Start](quick-start.md).
 
-The Helm chart is the recommended installation method as it provides easy configuration and upgrades.
+## What Gets Installed
 
-### Prerequisites
+| Resource                                                                                                     | Namespace      | Source                             |
+| ------------------------------------------------------------------------------------------------------------ | -------------- | ---------------------------------- |
+| Namespace `orchestrator`                                                                                     |                | `orchestrator/k8s/deployment.yaml` |
+| Deployment `orchestrator` (2 replicas) and Service `orchestrator-service` (8000)                             | `orchestrator` | `orchestrator/k8s/deployment.yaml` |
+| ServiceAccount `orchestrator-sa`, ClusterRole `orchestrator-role`, ClusterRoleBinding `orchestrator-binding` | cluster-wide   | `orchestrator/k8s/deployment.yaml` |
+| Deployment `redis` (1 replica) and Service `redis-service` (6379)                                            | `orchestrator` | `orchestrator/k8s/redis.yaml`      |
+| Secret `github-token`                                                                                        | `orchestrator` | **you create it**                  |
 
-- Helm 3.x installed
-- Access to a Kubernetes cluster
-- `kubectl` configured to access your cluster
+## Prerequisites
 
-### Adding the Repository
+- A Kubernetes cluster, v1.23+, and `kubectl` access with rights to create namespaces and cluster-scoped RBAC
+- Docker, to build the orchestrator image (or a registry that already hosts it)
+- A GitHub token, if you want automatic retries (see [Orchestrator Configuration](../configuration/orchestrator.md#github-integration))
 
-If you're using the official chart repository:
+## Method 1: Manual Manifests
+
+### 1. Get the orchestrator image into the cluster
+
+The manifest uses `image: orchestrator:latest` with `imagePullPolicy: IfNotPresent`, so the image must exist on the nodes or be pullable under that name.
+
+=== "Kind"
+
+    ```bash
+    docker build -t orchestrator:latest orchestrator/
+    kind load docker-image orchestrator:latest --name <cluster-name>
+    ```
+
+=== "Minikube"
+
+    ```bash
+    docker build -t orchestrator:latest orchestrator/
+    minikube image load orchestrator:latest
+    ```
+
+=== "Registry (EKS, GKE, AKS, shared clusters)"
+
+    ```bash
+    docker build -t <registry>/orchestrator:<tag> orchestrator/
+    docker push <registry>/orchestrator:<tag>
+    # then edit orchestrator/k8s/deployment.yaml: image: <registry>/orchestrator:<tag>
+    ```
+
+    The CI workflow also publishes `ghcr.io/<owner>/<repo>/orchestrator:<version>` and `:latest` on pushes. GHCR packages are private by default, so either make the package public or add an `imagePullSecret` to the ServiceAccount or pod spec.
+
+### 2. Create namespaces and the GitHub secret
 
 ```bash
-helm repo add mana https://othaime-en.github.io/mana/charts
-helm repo update
+kubectl create namespace orchestrator
+
+kubectl create secret generic github-token \
+  --from-literal=token="$GITHUB_TOKEN" \
+  -n orchestrator
 ```
 
-### Installation Command
+The orchestrator Deployment reads `GITHUB_TOKEN` from this secret, so the pods will not start (`CreateContainerConfigError`) if it is missing. If you do not want retries, create the secret with any placeholder value; rollbacks do not need GitHub.
 
-```bash
-helm install mana mana/mana \
-  --namespace mana --create-namespace \
-  --set github.token=$GITHUB_TOKEN \
-  --set github.repo="your-org/your-repo" \
-  --set redis.enabled=true \
-  --set autoscaling.enabled=true
-```
+### 3. Set your repository
 
-### Common Configuration Options
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `github.token` | GitHub token for API access (required for retry functionality) | `""` |
-| `github.repo` | GitHub repository in format "owner/repo" (required for retry functionality) | `""` |
-| `redis.enabled` | Whether to deploy Redis as part of the chart | `true` |
-| `redis.external.host` | Host for external Redis (if not using deployed Redis) | `""` |
-| `autoscaling.enabled` | Enable HPA for the orchestrator | `false` |
-| `replicaCount` | Number of orchestrator replicas | `1` |
-| `image.tag` | Docker image tag | `"latest"` |
-| `resources.requests.memory` | Memory request | `"256Mi"` |
-| `resources.requests.cpu` | CPU request | `"100m"` |
-| `resources.limits.memory` | Memory limit | `"512Mi"` |
-| `resources.limits.cpu` | CPU limit | `"500m"` |
-
-### Custom Values File
-
-Create a `values.yaml` file with your configuration:
+Edit `orchestrator/k8s/deployment.yaml`:
 
 ```yaml
-replicaCount: 3
-
-github:
-  token: ""  # Set via Kubernetes secret in production
-  repo: "your-org/your-repo"
-
-redis:
-  enabled: true
-  architecture: standalone
-  auth:
-    enabled: false
-
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-
-resources:
-  requests:
-    memory: "512Mi"
-    cpu: "250m"
-  limits:
-    memory: "1Gi"
-    cpu: "500m"
+- name: GITHUB_REPO
+  value: "your-org/your-repo" # ships as othaime-en/mana
 ```
 
-Then install with:
+Review the other values in the same `env:` block (see [Configuration](../configuration/orchestrator.md)).
 
-```bash
-helm install mana ./orchestrator/charts/mana \
-  --namespace mana --create-namespace \
-  -f values.yaml
-```
-
-## Manual Manifest Installation
-
-If you prefer not to use Helm, you can apply the Kubernetes manifests directly.
-
-### Prerequisites
-
-- `kubectl` access to your cluster
-- A running Redis instance (MANA requires Redis for state persistence)
-
-### Steps
-
-1. **Deploy Redis** (if not using an external instance):
+### 4. Apply
 
 ```bash
 kubectl apply -f orchestrator/k8s/redis.yaml
-```
-
-2. **Deploy the MANA orchestrator**:
-
-```bash
 kubectl apply -f orchestrator/k8s/deployment.yaml
+kubectl rollout status deployment/orchestrator -n orchestrator --timeout=180s
 ```
 
-3. **Verify deployment**:
+(`kubectl apply -f orchestrator/k8s/ -n orchestrator` applies both files in one go.) The readiness and liveness probes wait 60 seconds before the first check, so allow a minute or two.
+
+### 5. Deploy your target application
+
+For a first test deploy the bundled sample app:
 
 ```bash
-kubectl -n orchestrator get pods
-kubectl -n orchestrator get svc
+docker build -t sample-app:1.0.0 sample-app/       # and load it as in step 1
+kubectl create namespace production
+kubectl apply -f sample-app/k8s/ -n production
 ```
 
-### Customizing Manifests
-
-When applying manifests directly, you'll need to edit the YAML files to set:
-- Image tags
-- Resource requests/limits
-- Environment variables (GitHub token, Redis connection info, etc.)
-- Replica counts
-
-## Post-Installation Steps
-
-After installation, regardless of method:
-
-1. **Verify the installation**:
+## Method 2: Terraform
 
 ```bash
-# Check that pods are running
-kubectl -n mana get pods
-
-# Check services
-kubectl -n mana get svc
-
-# Test the API
-kubectl -n mana port-forward svc/mana-orchestrator 8000:8000 &
-curl http://localhost:8000/health
+cd terraform
+terraform init
+terraform plan  -var="environment=local" -var="enable_staging=false"
+terraform apply -var="environment=local" -var="enable_staging=false"
 ```
 
-2. **Configure your applications** to work with MANA:
-   - Ensure they have proper version labels
-   - Ensure they expose health endpoints
-   - Ensure they're in namespaces MANA is configured to monitor
+This creates all namespaces (`production`, `staging`, `canary`, `orchestrator`, `monitoring`), the sample app, the orchestrator with Redis, NetworkPolicies and quotas, and (unless `enable_monitoring=false`) Prometheus, Grafana and Loki. Terraform expects the images to be available to the cluster as well; set `image_registry` if they live in a registry.
 
-3. **Set up CI/CD integration**:
-   - Configure your GitHub Actions workflows to send webhooks to MANA
-   - Ensure the webhook includes the `workflow_run_id` for retry functionality
+Differences from the manual manifests:
 
-## Upgrading MANA
+- Terraform sets only `PORT`, `REDIS_HOST`, `REDIS_PORT`, `MAX_RETRIES`, `ROLLBACK_THRESHOLD` and `LOG_LEVEL` on the orchestrator. Add `GITHUB_TOKEN` and `GITHUB_REPO` yourself to enable retries.
+- Do not mix `kubectl apply` and Terraform on the same resources; pick one to avoid drift.
+- State is local by default. For teams, switch `backend.tf` to the S3 and DynamoDB example it contains.
 
-### Using Helm
+See the [Configuration Reference](../reference/configuration.md#terraform-variables) for all variables.
+
+## Method 3: `scripts/deploy.sh`
+
+Runs Terraform, builds and loads images, deploys Redis (via Helm), the orchestrator and the sample app, installs monitoring and runs smoke tests:
 
 ```bash
-# Update repository
-helm repo update
-
-# Upgrade release
-helm upgrade mana mana/mana \
-  --namespace mana \
-  -f your-values.yaml
+./scripts/deploy.sh --skip-monitoring
 ```
 
-### Using Manual Manifests
+Read the notes in the [CLI Reference](../reference/cli.md#scriptsdeploysh) first; the script assumes Terraform, Helm and a local cluster, and it creates a Redis the orchestrator does not use by default.
 
-1. Download the latest manifests from the repository
-2. Apply the updated manifests:
-   ```bash
-   kubectl apply -f orchestrator/k8s/
-   ```
-3. Verify the upgrade worked correctly
+## Using an External Redis
 
-## Uninstallation
+Point the orchestrator at your own Redis by changing `REDIS_HOST` and `REDIS_PORT`, and skip `redis.yaml`. The client has no password or TLS support yet, so use a network-isolated instance. The bundled Redis uses an `emptyDir`, so state is lost if its pod is rescheduled; that is acceptable for testing because deployment records expire after 24 hours anyway, but it also loses the `last_successful:*` rollback targets.
 
-### Using Helm
+## Post-Installation Checks
 
 ```bash
-helm uninstall mana --namespace mana
+# Pods and services
+kubectl -n orchestrator get pods,svc
+
+# API health (Redis + Kubernetes + GitHub integration flag)
+kubectl -n orchestrator port-forward svc/orchestrator-service 8000:8000 &
+curl -s localhost:8000/health | jq
+
+# Effective configuration
+curl -s localhost:8000/config | jq
+
+# RBAC: can the orchestrator patch Deployments in your app namespace?
+kubectl auth can-i patch deployments -n production \
+  --as=system:serviceaccount:orchestrator:orchestrator-sa
 ```
 
-### Using Manual Manifests
+Then:
+
+1. Make sure your applications follow the [conventions](index.md#conventions-for-target-applications).
+2. Set up [CI/CD integration](../usage/cicd-integration.md) so the pipeline sends webhooks.
+3. Restrict who can reach the orchestrator (it has no authentication); see [Security](../about/security.md).
+
+## Upgrading
 
 ```bash
-# Delete in reverse order of creation to avoid dependencies
-kubectl delete -f orchestrator/k8s/deployment.yaml
+git pull
+docker build -t orchestrator:latest orchestrator/          # load or push as above
+kubectl apply -f orchestrator/k8s/
+kubectl rollout restart deployment/orchestrator -n orchestrator
+kubectl rollout status deployment/orchestrator -n orchestrator
+```
+
+Restart the pods after any configuration change; settings are read only at startup. Deployment records in Redis expire after 24 hours and are not affected by an upgrade, and `last_successful:*` keys persist as long as Redis does.
+
+## Uninstalling
+
+```bash
 kubectl delete -f orchestrator/k8s/redis.yaml
+kubectl delete -f orchestrator/k8s/deployment.yaml
+kubectl delete clusterrole orchestrator-role --ignore-not-found
+kubectl delete clusterrolebinding orchestrator-binding --ignore-not-found
 ```
+
+Delete `redis.yaml` first: `deployment.yaml` also defines the `orchestrator` namespace, so removing it deletes everything inside, including the `github-token` secret. It also removes the ServiceAccount, ClusterRole and ClusterRoleBinding it defines; the explicit `clusterrole` commands are a safety net. With Terraform, run `terraform destroy` (this removes **all** modules, including your sample apps and monitoring).
 
 ## Troubleshooting Installation
 
-### Common Issues
+| Symptom                                                                                      | Cause                                     | Fix                                                                                         |
+| -------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `ImagePullBackOff` / `ErrImagePull`                                                          | `orchestrator:latest` is not on the nodes | Load the image (Kind/Minikube) or push to a registry and edit the image name                |
+| `CreateContainerConfigError`                                                                 | Secret `github-token` missing             | `kubectl create secret generic github-token ... -n orchestrator`                            |
+| `CrashLoopBackOff`, logs show `Cannot connect to Redis`                                      | Redis not running or wrong `REDIS_HOST`   | `kubectl get pods -n orchestrator -l app=redis`; host must be `redis-service` in-cluster    |
+| `CrashLoopBackOff`, logs show a `ValueError` such as `max_backoff must be > initial_backoff` | Invalid configuration                     | Fix the value (see [validation errors](../configuration/orchestrator.md#validation-errors)) |
+| Pods `Running` but not Ready for about a minute                                              | Probes have a 60 s initial delay          | Wait                                                                                        |
+| `/health` returns `degraded`                                                                 | Redis or the Kubernetes API unreachable   | Check Redis pod, ServiceAccount and NetworkPolicies                                         |
+| `kubectl auth can-i` returns `no`                                                            | ClusterRole or binding not applied        | Re-apply `deployment.yaml`                                                                  |
 
-#### ImagePullBackOff or ErrImagePull
-
-- Verify the image name and tag are correct
-- Check if your cluster can access the container registry
-- Ensure any required image pull secrets are configured
-
-#### CrashLoopBackOff
-
-- Check the pod logs: `kubectl -n mana logs <pod-name>`
-- Common causes:
-  - Missing or incorrect GitHub token
-  - Redis connection issues
-  - Kubernetes RBAC permissions
-  - Invalid configuration values
-
-#### Service Unavailable
-
-- Check if the service is exposed correctly
-- Verify port forwarding is working
-- Check if the application is listening on the correct port
-
-### Getting Logs
+Useful commands:
 
 ```bash
-# Get logs for a specific pod
-kubectl -n mana logs <pod-name>
-
-# Follow logs in real-time
-kubectl -n mana logs -f <pod-name>
-
-# Get logs for all orchestrator pods
-kubectl -n mana logs -l app=mana-orchestrator
+kubectl -n orchestrator logs -l app=orchestrator --tail=100
+kubectl -n orchestrator describe pod -l app=orchestrator
+kubectl -n orchestrator get events --sort-by=.metadata.creationTimestamp
 ```
 
-### Debugging Tips
-
-1. **Check Events**: `kubectl -n mana get events --sort-by='.metadata.creationTimestamp'`
-2. **Describe Resources**: `kubectl -n mana describe pod <pod-name>`
-3. **Check ConfigMaps and Secrets**: Ensure they're correctly mounted
-4. **Verify Network Policies**: Ensure the orchestrator can reach Redis and the Kubernetes API server
+More in the [Troubleshooting Guide](../usage/troubleshooting.md).

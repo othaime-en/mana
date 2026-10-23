@@ -150,7 +150,7 @@ mkdocs serve                 # live preview at http://127.0.0.1:8000
 mkdocs build --strict        # fails on broken links and nav errors
 ```
 
-Admonitions (`!!! note`), tabs (`=== "Title"`), task lists and `mermaid` fences are enabled. Prefer ASCII diagrams in code fences, as the existing pages do.
+Admonitions (`!!! note`), tabs (`=== "Title"`), task lists and `mermaid` fences are enabled. Draw diagrams as SVG files in `docs/assets/diagrams/` and embed them with a normal image link (for example `![Alt text](../assets/diagrams/component-map.svg)`) instead of ASCII art.
 
 ## Project Layout
 

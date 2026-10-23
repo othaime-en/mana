@@ -1,12 +1,12 @@
 # MANA - Self-Healing CI/CD Pipeline
 
-Welcome to the MANA documentation! MANA is a Kubernetes-native orchestration system that automatically detects and recovers from deployment failures through intelligent retry and rollback mechanisms, reducing Mean Time To Recovery (MTTR) from minutes to seconds.
+Welcome to the MANA documentation! MANA is a Kubernetes-native orchestration system that automatically detects and recovers from deployment failures through intelligent retry and rollback mechanisms, aiming to reduce Mean Time To Recovery (MTTR) from minutes to seconds.
 
 ## What is MANA?
 
 MANA (Self-Healing CI/CD Pipeline) is an open-source system designed to automate the recovery process when Kubernetes deployments fail. Instead of requiring manual intervention for routine failures, MANA:
 
-- **Detects failures** in real-time through health checks and pod monitoring
+- **Reacts to failures** reported by your CI/CD pipeline and verifies recovery with Kubernetes readiness and application health checks
 - **Intelligently retries** failed deployments with exponential backoff
 - **Automatically rolls back** to the last stable version when retries are exhausted
 - **Integrates with CI/CD** systems like GitHub Actions for automated workflow re-runs
@@ -20,7 +20,7 @@ MANA (Self-Healing CI/CD Pipeline) is an open-source system designed to automate
 - 🐳 **Kubernetes-Native**: Built specifically for Kubernetes with proper RBAC and resource management
 - 🔧 **CI/CD Integration**: GitHub Actions webhook support for automatic workflow re-runs
 - 📊 **Complete Observability**: Prometheus metrics, structured audit logging, and health checks
-- 🛡️ **Production-Ready**: Secure by design with least-privilege RBAC, non-root containers, and secret management
+- 🛡️ **Security-minded**: Non-root containers, dropped capabilities, scoped RBAC and Kubernetes Secrets (see [Security](about/security.md) for known gaps before production use)
 - 📝 **Comprehensive Audit Trail**: JSON-formatted audit logs for easy parsing and compliance
 
 ## Getting Started
@@ -46,9 +46,11 @@ To get started with MANA, check out our [Getting Started Guide](getting-started/
 ## Support
 
 If you encounter any issues or have questions, please:
+
 1. Check the [Troubleshooting Guide](usage/troubleshooting.md)
 2. Search existing [GitHub Issues](https://github.com/othaime-en/mana/issues)
 3. Open a new issue if needed
 
 ---
-*MANA is licensed under the MIT License - see the [LICENSE](about/license.md) file for details.*
+
+_MANA is licensed under the MIT License - see the [LICENSE](about/license.md) file for details._

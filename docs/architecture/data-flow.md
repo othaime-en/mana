@@ -9,16 +9,7 @@ Everything here describes the behaviour of the code in `orchestrator/src/` and `
 
 MANA is **event-driven**. The orchestrator does not poll the cluster for new deployments; it reacts to webhooks that the CI/CD pipeline sends at key moments, and it consults Kubernetes and Redis only while handling an event.
 
-```
- ┌──────────────┐  1. in_progress   ┌──────────────┐
- │ GitHub       │──────────────────▶│              │
- │ Actions      │  2. success /     │ Orchestrator │◀──── Redis (state)
- │ (deploy job) │     failed        │              │────▶ Kubernetes API
- └──────────────┘──────────────────▶└──────┬───────┘
-        ▲                                  │
-        │   3. re-run workflow (retry)     │
-        └──────────────────────────────────┘
-```
+![Event-driven data flow: GitHub Actions sends in_progress and success/failed webhooks to the Orchestrator, which reads and writes state in Redis, inspects and patches Kubernetes, and triggers workflow re-runs](../assets/diagrams/data-flow-overview.svg)
 
 ## Webhook Contract
 
@@ -52,36 +43,13 @@ How the orchestrator reacts depends on `status`:
 
 ## Successful Deployment
 
-```
-Developer      GitHub Actions            Orchestrator              Redis
-   │  push          │                        │                      │
-   ├───────────────▶│ build, test, push      │                      │
-   │                │ kubectl set image      │                      │
-   │                │ rollout + health check │                      │
-   │                │ POST status=success ──▶│                      │
-   │                │                        │ SET last_successful: │
-   │                │                        │   <ns>:<app> = ver ─▶│
-   │                │◀── 200 success ────────│                      │
-```
+![Successful deployment sequence: after a developer push, GitHub Actions builds, tests and deploys, then posts status=success to the Orchestrator, which stores the version as last_successful in Redis and replies 200](../assets/diagrams/sequence-successful-deployment.svg)
 
 The important side effect is `last_successful:<namespace>:<app_name>`. That value is what a later rollback restores.
 
 ## Failed Deployment
 
-```
-GitHub Actions                 Orchestrator                 Redis / Kubernetes
-      │ POST status=failed ───▶│                                   │
-      │   failure_type, run_id │ audit: deployment_received        │
-      │                        │ audit: failure_detected           │
-      │                        │ load state ◀─────────────────────▶│ GET deployment:<id>
-      │                        │ (none yet) resolve previous ver ─▶│ GET last_successful…
-      │                        │ retry_count += 1                  │
-      │                        │ decide ──┬─ retry    ─▶ schedule re-run (after backoff)
-      │                        │          ├─ rollback ─▶ patch Deployment image + labels
-      │                        │          └─ alert    ─▶ log manual_intervention_required
-      │                        │ save state ──────────────────────▶│ SETEX deployment:<id>
-      │◀── 200 {action_taken} ─│                                   │
-```
+![Failed deployment sequence: GitHub Actions posts status=failed, the Orchestrator audits, loads state from Redis, increments retry_count, then retries via a workflow re-run, rolls back by patching the Kubernetes Deployment, or alerts, saves state and replies 200 with the action taken](../assets/diagrams/sequence-failed-deployment.svg)
 
 ### The decision rule
 
@@ -172,13 +140,7 @@ TTL is 24 hours and is refreshed every time the state is saved.
 
 ### Status lifecycle
 
-```
-                     ┌────────────── success webhook ──────────────┐
-                     │                                              ▼
- (no state) ──failed──▶ retry_scheduled ──re-run fails──▶ … ──▶ rolling_back ──▶ rolled_back
-                     │                                              │
-                     └──────────── alert paths ──▶ failed ◀─────────┘ (rollback unhealthy)
-```
+![Deployment status lifecycle: from no state, a failed webhook leads to retry_scheduled, which repeats, reaches success on a success webhook, or moves to rolling_back when retries are exhausted; rolling_back ends in rolled_back or failed, and alert paths end in failed](../assets/diagrams/state-status-lifecycle.svg)
 
 `pending` and `in_progress` exist in the enum but are not currently written by the webhook handler.
 

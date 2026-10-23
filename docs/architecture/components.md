@@ -4,18 +4,7 @@ This page describes every moving part of MANA, what it is responsible for, and w
 
 ## Component Map
 
-```
- GitHub Actions ──webhook──▶ Orchestrator (FastAPI) ──K8s API──▶ Kubernetes
-        ▲                        │      │                         (sample-app Deployments)
-        │                        │      └──────state──────▶ Redis
-        └──workflow re-run───────┘
-                                 │
-                       /metrics  │  audit + app logs
-                                 ▼
-                    Prometheus ─▶ Grafana ◀─ Loki ◀─ Promtail
-                         │
-                         └──▶ Alertmanager ─▶ Slack / PagerDuty / Email
-```
+![MANA component map: GitHub Actions, Orchestrator, Kubernetes, Redis and the monitoring stack (Prometheus, Grafana, Loki, Promtail, Alertmanager)](../assets/diagrams/component-map.svg)
 
 | Component       | Path                          | Runtime                                           | Role                                                                        |
 | --------------- | ----------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------- |

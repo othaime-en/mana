@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import Mock, patch, MagicMock, call
+from unittest.mock import AsyncMock, Mock, patch, MagicMock, call
 from src.orchestrator import (
     SelfHealingOrchestrator,
     DeploymentStatus,
@@ -225,19 +225,23 @@ class TestEnhancedFailureHandling:
         orchestrator.redis_client.get.return_value = None
         orchestrator.redis_client.setex = Mock()
         
-        with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'):
+        with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'), \
+             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()) as rerun:
             result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
                 deployment_name='sample-app',
                 version='1.0.0',
-                failure_type=FailureType.DEPLOYMENT_FAILURE
+                failure_type=FailureType.DEPLOYMENT_FAILURE,
+                metadata={'workflow_run_id': '12345'}
             )
             
             assert result['action'] == 'retry'
             assert result['retry_count'] == 1
             assert 'backoff_seconds' in result
             assert result['backoff_seconds'] == 10.0  # First retry backoff
+            assert result['workflow_run_id'] == '12345'
+            rerun.assert_called_once_with('12345', 10.0)
     
     @pytest.mark.asyncio
     async def test_handle_deployment_failure_increasing_backoff(self, orchestrator):
@@ -257,19 +261,73 @@ class TestEnhancedFailureHandling:
         )
         
         with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
-             patch.object(orchestrator, 'save_deployment_state'):
+             patch.object(orchestrator, 'save_deployment_state'), \
+             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()) as rerun:
             
             result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
                 deployment_name='sample-app',
                 version='1.0.0',
-                failure_type=FailureType.DEPLOYMENT_FAILURE
+                failure_type=FailureType.DEPLOYMENT_FAILURE,
+                metadata={'workflow_run_id': '12345'}
             )
             
             assert result['action'] == 'retry'
             assert result['retry_count'] == 2
             assert result['backoff_seconds'] == 20.0  # Second retry backoff
+            rerun.assert_called_once_with('12345', 20.0)
+    
+    @pytest.mark.asyncio
+    async def test_handle_deployment_failure_alerts_without_workflow_run_id(self, orchestrator):
+        """Test failure without workflow_run_id in state or webhook falls back to alert"""
+        orchestrator.redis_client.get.return_value = None
+        orchestrator.redis_client.setex = Mock()
+        
+        with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'), \
+             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()) as rerun:
+            result = await orchestrator.handle_deployment_failure(
+                deployment_id='test-123',
+                namespace='production',
+                deployment_name='sample-app',
+                version='1.0.0',
+                failure_type=FailureType.DEPLOYMENT_FAILURE,
+                metadata={'commit': 'abc123'}
+            )
+            
+            assert result['action'] == 'alert'
+            rerun.assert_not_called()
+    
+    @pytest.mark.asyncio
+    async def test_handle_deployment_failure_persists_webhook_metadata(self, orchestrator):
+        """Test webhook metadata is merged into the saved deployment state"""
+        state = DeploymentState(
+            deployment_id='test-123',
+            namespace='production',
+            app_name='sample-app',
+            version='1.0.0',
+            status=DeploymentStatus.IN_PROGRESS,
+            previous_version='0.9.0',
+            retry_count=0,
+            failure_type=None,
+            timestamp=time.time(),
+            metadata={'commit': 'abc123'}
+        )
+        
+        with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
+             patch.object(orchestrator, 'save_deployment_state') as save, \
+             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()):
+            await orchestrator.handle_deployment_failure(
+                deployment_id='test-123',
+                namespace='production',
+                deployment_name='sample-app',
+                version='1.0.0',
+                failure_type=FailureType.DEPLOYMENT_FAILURE,
+                metadata={'workflow_run_id': '12345'}
+            )
+            
+            saved_state = save.call_args[0][0]
+            assert saved_state.metadata == {'commit': 'abc123', 'workflow_run_id': '12345'}
     
     @pytest.mark.asyncio
     async def test_handle_deployment_failure_rollback_after_retries(self, orchestrator):

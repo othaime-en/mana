@@ -32,7 +32,7 @@ jobs:
     uses: ./.github/workflows/build-and-test.yml
     secrets: inherit
     with:
-      push-images: ${{ github.event_name == 'push' }}
+      push-images: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target != 'none') }}
 
   # Always test locally with Kind
   local-validation:

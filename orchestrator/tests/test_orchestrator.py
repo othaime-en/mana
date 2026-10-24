@@ -219,13 +219,14 @@ class TestEnhancedHealthCheck:
 class TestEnhancedFailureHandling:
     """Test enhanced failure handling with backoff and audit logging"""
     
-    def test_handle_deployment_failure_retry_with_backoff(self, orchestrator):
+    @pytest.mark.asyncio
+    async def test_handle_deployment_failure_retry_with_backoff(self, orchestrator):
         """Test failure handling returns retry with backoff calculation"""
         orchestrator.redis_client.get.return_value = None
         orchestrator.redis_client.setex = Mock()
         
         with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'):
-            result = orchestrator.handle_deployment_failure(
+            result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
                 deployment_name='sample-app',
@@ -238,7 +239,8 @@ class TestEnhancedFailureHandling:
             assert 'backoff_seconds' in result
             assert result['backoff_seconds'] == 10.0  # First retry backoff
     
-    def test_handle_deployment_failure_increasing_backoff(self, orchestrator):
+    @pytest.mark.asyncio
+    async def test_handle_deployment_failure_increasing_backoff(self, orchestrator):
         """Test backoff increases with each retry"""
         # Simulate multiple retries
         state = DeploymentState(
@@ -257,7 +259,7 @@ class TestEnhancedFailureHandling:
         with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
              patch.object(orchestrator, 'save_deployment_state'):
             
-            result = orchestrator.handle_deployment_failure(
+            result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
                 deployment_name='sample-app',
@@ -269,7 +271,8 @@ class TestEnhancedFailureHandling:
             assert result['retry_count'] == 2
             assert result['backoff_seconds'] == 20.0  # Second retry backoff
     
-    def test_handle_deployment_failure_rollback_after_retries(self, orchestrator):
+    @pytest.mark.asyncio
+    async def test_handle_deployment_failure_rollback_after_retries(self, orchestrator):
         """Test rollback is triggered after exceeding retry threshold"""
         state = DeploymentState(
             deployment_id='test-123',
@@ -288,7 +291,7 @@ class TestEnhancedFailureHandling:
              patch.object(orchestrator, 'rollback_deployment', return_value=True), \
              patch.object(orchestrator, 'save_deployment_state'):
             
-            result = orchestrator.handle_deployment_failure(
+            result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
                 deployment_name='sample-app',

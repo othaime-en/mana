@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, List
+import asyncio
 import uvicorn
 import os
 from src.orchestrator import (
@@ -187,7 +188,7 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
                 state.metadata.update(payload.metadata)
                 orchestrator.save_deployment_state(state)
             
-            result = orchestrator.handle_deployment_failure(
+            result = await orchestrator.handle_deployment_failure(
                 deployment_id=payload.deployment_id,
                 namespace=payload.namespace,
                 deployment_name=payload.app_name,
@@ -264,7 +265,8 @@ async def manual_rollback(request: RollbackRequest):
     deployment_id = f"manual-rollback-{uuid.uuid4()}"
     
     try:
-        success = orchestrator.rollback_deployment(
+        success = await asyncio.to_thread(
+            orchestrator.rollback_deployment,
             namespace=request.namespace,
             deployment_name=request.deployment_name,
             target_version=request.target_version,
@@ -300,7 +302,8 @@ async def check_health(request: HealthCheckRequest):
     start_time = time.time()
     
     try:
-        is_healthy = orchestrator.check_deployment_health(
+        is_healthy = await asyncio.to_thread(
+            orchestrator.check_deployment_health,
             namespace=request.namespace,
             deployment_name=request.deployment_name,
             timeout=request.timeout

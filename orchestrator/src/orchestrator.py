@@ -768,7 +768,7 @@ class SelfHealingOrchestrator:
             logger.error(f"Error triggering GitHub workflow re-run: {e}")
             return False
     
-    def handle_deployment_failure(
+    async def handle_deployment_failure(
         self,
         deployment_id: str,
         namespace: str,
@@ -888,7 +888,8 @@ class SelfHealingOrchestrator:
             state.status = DeploymentStatus.ROLLING_BACK
             self.save_deployment_state(state)
             
-            success = self.rollback_deployment(
+            success = await asyncio.to_thread(
+                self.rollback_deployment,
                 namespace,
                 deployment_name,
                 state.previous_version,

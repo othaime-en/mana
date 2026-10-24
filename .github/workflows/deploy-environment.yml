@@ -103,7 +103,7 @@ jobs:
           sleep ${{ inputs.health-check-timeout }}
 
           READY_PODS=$(kubectl get pods -n ${{ inputs.namespace }} -l app=sample-app -o json | \
-            jq '[.items[] | select(.status.phase=="Running" and .status.conditions[]? | select(.type=="Ready" and .status=="True"))] | length')
+            jq '[.items[] | select(.status.phase=="Running" and (.status.conditions // [] | any(.type=="Ready" and .status=="True")))] | length')
           TOTAL_PODS=$(kubectl get deployment sample-app -n ${{ inputs.namespace }} -o jsonpath='{.spec.replicas}')
 
           echo "Ready pods: $READY_PODS / $TOTAL_PODS"

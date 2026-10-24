@@ -43,7 +43,7 @@ jobs:
 
   # Deploy to staging (conditional)
   deploy-staging:
-    needs: build-test-publish
+    needs: [build-test-publish, local-validation]
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'staging'
     uses: ./.github/workflows/deploy-environment.yml
     secrets: inherit
@@ -55,7 +55,7 @@ jobs:
 
   # Deploy to production (conditional)
   deploy-production:
-    needs: build-test-publish
+    needs: [build-test-publish, local-validation]
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'production'
     uses: ./.github/workflows/deploy-environment.yml
     secrets: inherit

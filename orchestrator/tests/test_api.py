@@ -1,6 +1,6 @@
 import asyncio
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -19,6 +19,20 @@ def api():
          patch("src.orchestrator.client.CoreV1Api"):
         from src import api as api_module
     return api_module
+
+
+class FakeRedis:
+    def __init__(self):
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def setex(self, key, _ttl, value):
+        self.data[key] = value
+
+    def ping(self):
+        return True
 
 
 def blocking(*_args, **_kwargs):
@@ -136,3 +150,63 @@ async def test_webhook_rollback_does_not_block_event_loop(api):
     assert response.json()["action_taken"]["action"] == "rollback"
     assert health.status_code == 200
     assert stall < MAX_LOOP_STALL_SECONDS
+
+
+def webhook_body(status, metadata, failure_type=None):
+    body = {
+        "deployment_id": "deploy-first-failure",
+        "namespace": "production",
+        "app_name": "sample-app",
+        "version": "1.0.0",
+        "status": status,
+        "metadata": metadata,
+    }
+    if failure_type:
+        body["failure_type"] = failure_type
+    return body
+
+
+@pytest.mark.asyncio
+async def test_first_failed_webhook_retries_when_workflow_run_id_sent(api):
+    transport = httpx.ASGITransport(app=api.app)
+    metadata = {"workflow_run_id": "987654", "commit": "abc123"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
+             patch.object(api.orchestrator, "get_previous_version", return_value="0.9.0"), \
+             patch.object(api.orchestrator, "trigger_github_workflow_rerun",
+                          new=AsyncMock(return_value=True)) as rerun:
+            started = await client.post(
+                "/webhook/deployment", json=webhook_body("in_progress", metadata)
+            )
+            failed = await client.post(
+                "/webhook/deployment",
+                json=webhook_body("failed", metadata, "health_check_failure"),
+            )
+            await asyncio.sleep(0)
+            state = await client.get("/deployment/deploy-first-failure")
+
+    assert started.status_code == 200
+    assert failed.status_code == 200
+    action = failed.json()["action_taken"]
+    assert action["action"] == "retry"
+    assert action["retry_count"] == 1
+    assert action["workflow_run_id"] == "987654"
+    rerun.assert_called_once_with("987654", 10.0)
+    assert state.json()["metadata"]["workflow_run_id"] == "987654"
+
+
+@pytest.mark.asyncio
+async def test_failed_webhook_without_workflow_run_id_still_alerts(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
+             patch.object(api.orchestrator, "get_previous_version", return_value="0.9.0"):
+            failed = await client.post(
+                "/webhook/deployment",
+                json=webhook_body("failed", {"commit": "abc123"}, "health_check_failure"),
+            )
+
+    assert failed.status_code == 200
+    assert failed.json()["action_taken"]["action"] == "alert"

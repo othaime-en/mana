@@ -154,8 +154,10 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
     """
     logger.info(f"Received deployment webhook: {payload.deployment_id}")
     
+    metadata = payload.metadata or {}
+    
     # Validate workflow_run_id is present for failed deployments
-    if payload.status == "failed" and not payload.metadata.get('workflow_run_id'):
+    if payload.status == "failed" and not metadata.get('workflow_run_id'):
         logger.warning(
             "Webhook payload missing workflow_run_id - retry functionality will be limited"
         )
@@ -181,19 +183,13 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             # Handle failure
             failure_type = FailureType(payload.failure_type)
             
-            # Create or update deployment state with metadata
-            state = orchestrator.get_deployment_state(payload.deployment_id)
-            if state:
-                # Update existing state with new metadata
-                state.metadata.update(payload.metadata)
-                orchestrator.save_deployment_state(state)
-            
             result = await orchestrator.handle_deployment_failure(
                 deployment_id=payload.deployment_id,
                 namespace=payload.namespace,
                 deployment_name=payload.app_name,
                 version=payload.version,
-                failure_type=failure_type
+                failure_type=failure_type,
+                metadata=metadata
             )
             
             # Track retry metrics

@@ -774,10 +774,15 @@ class SelfHealingOrchestrator:
         namespace: str,
         deployment_name: str,
         version: str,
-        failure_type: FailureType
+        failure_type: FailureType,
+        metadata: Optional[Dict] = None
     ) -> Dict:
         """
-        Main failure handling logic with retry execution        
+        Main failure handling logic with retry execution
+
+        Args:
+            metadata: Webhook metadata (e.g. workflow_run_id) merged into the
+                deployment state before the retry decision is made
         """
         # Log failure detection
         audit_logger.log_failure_detected(
@@ -805,6 +810,9 @@ class SelfHealingOrchestrator:
                 timestamp=time.time(),
                 metadata={}
             )
+        
+        if metadata:
+            state.metadata.update(metadata)
         
         state.retry_count += 1
         state.failure_type = failure_type

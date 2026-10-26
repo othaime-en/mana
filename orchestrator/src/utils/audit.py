@@ -6,7 +6,7 @@ Provides structured, searchable audit trail for compliance and debugging.
 import logging
 import json
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -21,6 +21,7 @@ class AuditAction(Enum):
     ROLLBACK_INITIATED = "rollback_initiated"
     ROLLBACK_COMPLETED = "rollback_completed"
     ROLLBACK_FAILED = "rollback_failed"
+    ROLLBACK_SKIPPED = "rollback_skipped"
     HEALTH_CHECK_STARTED = "health_check_started"
     HEALTH_CHECK_PASSED = "health_check_passed"
     HEALTH_CHECK_FAILED = "health_check_failed"
@@ -66,7 +67,7 @@ class AuditLogger:
             error: Error message if action failed
         """
         audit_event = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "service": self.service_name,
             "action": action.value,
             "success": success,
@@ -231,6 +232,31 @@ class AuditLogger:
             error=error,
             details={
                 "message": f"Rollback to {target_version} failed"
+            }
+        )
+    
+    def log_rollback_skipped(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        failed_version: str,
+        live_version: str
+    ):
+        """Log when a rollback is skipped because the failed version is not live"""
+        self.log_event(
+            action=AuditAction.ROLLBACK_SKIPPED,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=failed_version,
+            success=True,
+            details={
+                "live_version": live_version,
+                "message": (
+                    f"Live version {live_version} is not the failed version "
+                    f"{failed_version}; rollback skipped"
+                )
             }
         )
     

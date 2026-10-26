@@ -2,9 +2,12 @@
 Configuration management for orchestrator
 """
 
+import logging
 import os
 from typing import Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -15,7 +18,6 @@ class OrchestratorConfig:
     redis_port: int
     
     max_retries: int
-    rollback_threshold: int
     
     initial_backoff: float
     max_backoff: float
@@ -31,6 +33,12 @@ class OrchestratorConfig:
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
         """Load configuration from environment variables"""
+        if os.getenv('ROLLBACK_THRESHOLD') is not None:
+            logger.warning(
+                "ROLLBACK_THRESHOLD is deprecated and ignored: rollback happens "
+                "once MAX_RETRIES retries are exhausted"
+            )
+        
         return cls(
             # Redis
             redis_host=os.getenv('REDIS_HOST', 'localhost'),
@@ -38,7 +46,6 @@ class OrchestratorConfig:
             
             # Retry
             max_retries=int(os.getenv('MAX_RETRIES', '3')),
-            rollback_threshold=int(os.getenv('ROLLBACK_THRESHOLD', '2')),
             
             # Exponential backoff
             initial_backoff=float(os.getenv('INITIAL_BACKOFF', '10.0')),
@@ -59,9 +66,6 @@ class OrchestratorConfig:
         """Validate configuration values"""
         if self.max_retries < 1:
             raise ValueError("max_retries must be >= 1")
-        
-        if self.rollback_threshold < 1:
-            raise ValueError("rollback_threshold must be >= 1")
         
         if self.initial_backoff <= 0:
             raise ValueError("initial_backoff must be > 0")

@@ -8,22 +8,18 @@ from .logger import (
     set_request_id,
     clear_request_id,
     log_with_context,
-    JSONFormatter
+    JSONFormatter,
 )
-from .shutdown import (
-    get_shutdown_manager,
-    register_cleanup_handler,
-    GracefulShutdown
-)
+from .shutdown import get_shutdown_manager, register_cleanup_handler, GracefulShutdown
 
 __all__ = [
-    'setup_logging',
-    'get_request_id',
-    'set_request_id',
-    'clear_request_id',
-    'log_with_context',
-    'JSONFormatter',
-    'get_shutdown_manager',
-    'register_cleanup_handler',
-    'GracefulShutdown',
+    "setup_logging",
+    "get_request_id",
+    "set_request_id",
+    "clear_request_id",
+    "log_with_context",
+    "JSONFormatter",
+    "get_shutdown_manager",
+    "register_cleanup_handler",
+    "GracefulShutdown",
 ]

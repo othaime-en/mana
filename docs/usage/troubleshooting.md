@@ -177,7 +177,7 @@ The role needs `get/list/watch/update/patch` on Deployments and ReplicaSets and 
 | Response                                      | Cause                                                         | Fix                                                                                            |
 | --------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `422`                                         | A required field is missing or has the wrong type             | Include `deployment_id`, `namespace`, `app_name`, `version`, `status`; build JSON with `jq`    |
-| `500` with `'...' is not a valid FailureType` | Unsupported `failure_type` (for example `smoke_test_failure`) | Use `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure` or `timeout` |
+| `422` mentioning `failure_type`               | Unknown `failure_type`, or `status: failed` without one      | Use `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure`, `smoke_test_failure` or `timeout` |
 | `500` with a Redis error                      | State could not be saved                                      | [Redis](#cannot-connect-to-redis)                                                              |
 | Timeout on the client                         | A rollback is synchronous and can take up to 5 minutes        | Raise the client timeout                                                                       |
 | Connection refused / no route                 | Orchestrator unreachable from the runner                      | Self-hosted runner, tunnel, or authenticated ingress                                           |
@@ -188,7 +188,7 @@ The role needs `get/list/watch/update/patch` on Deployments and ReplicaSets and 
 
 | `message`                                                               | Meaning                                                                                                                                                          | Fix                                                                                                                                                   |
 | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Cannot retry - missing workflow_run_id. Manual intervention required.` | The stored state has no `workflow_run_id`. The first failure for a new deployment ID always hits this today; later failures include it if the payload carries it | Include `metadata.workflow_run_id` on every webhook. See [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations) |
+| `Cannot retry - missing workflow_run_id. Manual intervention required.` | The failure webhook carried no `metadata.workflow_run_id` and no earlier webhook for this deployment ID stored one | Include `metadata.workflow_run_id` on the failure webhook (the shipped deploy workflow does; the build-stage webhook does not) |
 | `No previous version available - manual intervention required`          | No `last_successful:<ns>:<app>` key and no versioned ReplicaSet                                                                                                  | Report a `success` webhook for a good deployment; label pods with `version`                                                                           |
 | `Rollback failed - manual intervention required`                        | The rolled-back Deployment did not become healthy in time                                                                                                        | [Rollbacks not succeeding](#rollbacks-not-succeeding)                                                                                                 |
 
@@ -205,16 +205,16 @@ Each of these also writes a `manual_intervention_required` audit event.
 
 ### Rollbacks not happening
 
-A rollback needs: the failure count to exceed `MAX_RETRIES` **and** `ROLLBACK_THRESHOLD`, and a known previous version.
+A rollback needs: the failure count to exceed `MAX_RETRIES`, a known previous version, and the failed version to be the one running.
 
 ```bash
-curl -s $MANA/config | jq '{max_retries, rollback_threshold}'
+curl -s $MANA/config | jq '{max_retries}'
 curl -s $MANA/deployment/<id> | jq '{status, retry_count, previous_version}'
 kubectl -n orchestrator exec deploy/redis -- redis-cli get last_successful:<ns>:<app>
 ```
 
 - With the defaults, rollback starts on the **fourth** failure for the same deployment ID.
-- `ROLLBACK_THRESHOLD > MAX_RETRIES` produces `alert` in between; lower it.
+- A `skip` answer means another version is live, so there was nothing to roll back; `alert` for a build or test failure means nothing was deployed.
 - If every attempt uses a new deployment ID the count never grows.
 - To roll back immediately, use `POST /rollback`.
 
@@ -227,7 +227,7 @@ kubectl -n production rollout status deployment/sample-app
 kubectl -n production get deploy sample-app -o jsonpath='{.spec.template.spec.containers[*].name}{"\n"}'
 ```
 
-- The **container name must equal the Deployment name**; the orchestrator edits only that container.
+- The **container name must equal the Deployment name** unless the pod has a single container; with several containers and no match the rollback fails and says so in `rollback_failed`.
 - The target image tag must exist and be pullable (`ErrImagePull` otherwise).
 - Resource quotas or scheduling problems can stop the old version from starting.
 - Verification also needs the health endpoint to answer; see below.
@@ -315,7 +315,7 @@ No. GitHub (`GITHUB_TOKEN`, `GITHUB_REPO`) is only used to re-run workflows for 
 By default four failures for the same deployment ID: three retries, then rollback.
 
 **Why did my first failure return `alert`?**
-The first failure for a new deployment ID has no stored `workflow_run_id`, so a retry cannot be scheduled. See the [known behaviours](../architecture/data-flow.md#known-behaviours-and-limitations).
+The failure webhook had no `metadata.workflow_run_id`, so a retry cannot be scheduled. The ID is read from the webhook that reports the failure (or from earlier state for the same deployment ID).
 
 **Can I run MANA without Redis?**
 No. Startup fails without it.
@@ -343,7 +343,7 @@ They depend on metrics the orchestrator does not emit yet; see [Monitoring](moni
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | `Cannot connect to Redis: <error>`                                                                                                                                                                                                                         | Redis unreachable; process exits                     |
 | `Cannot load Kubernetes config: <error>`                                                                                                                                                                                                                   | No ServiceAccount token or kubeconfig; process exits |
-| `max_retries must be >= 1`, `rollback_threshold must be >= 1`, `initial_backoff must be > 0`, `max_backoff must be > initial_backoff`, `backoff_multiplier must be > 1.0`, `health_check_timeout must be > 0`, `health_check_port must be between 1-65535` | Validation failures                                  |
+| `max_retries must be >= 1`, `initial_backoff must be > 0`, `max_backoff must be > initial_backoff`, `backoff_multiplier must be > 1.0`, `health_check_timeout must be > 0`, `health_check_port must be between 1-65535` | Validation failures                                  |
 
 ### Runtime
 
@@ -364,5 +364,5 @@ They depend on metrics the orchestrator does not emit yet; see [Monitoring](moni
 | 200  | Success (including `action: alert`; check the body)                     |
 | 404  | `GET /deployment/<id>` for an unknown or expired ID                     |
 | 422  | Invalid request body                                                    |
-| 500  | Rollback failed, unsupported `failure_type`, Redis or Kubernetes errors |
+| 500  | Rollback failed, Redis or Kubernetes errors |
 | 307  | `/metrics` redirecting to `/metrics/`                                   |

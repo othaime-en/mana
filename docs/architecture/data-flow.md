@@ -56,15 +56,19 @@ The important side effect is `last_successful:<namespace>:<app_name>`. That valu
 After incrementing `retry_count`, `handle_deployment_failure()` evaluates these conditions **in order**:
 
 1. **Retry**: `retry_count <= MAX_RETRIES`
-   - Requires `workflow_run_id` in the stored state's `metadata`. If it is missing, the result is **alert** instead.
+   - Requires `workflow_run_id` in the state's `metadata`, which is filled from the failure webhook's own `metadata` and from earlier state for the same deployment ID. If it is missing, the result is **alert** instead.
    - Backoff is `INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(retry_count - 1)`, capped at `MAX_BACKOFF`.
    - Status becomes `retry_scheduled`; a background task waits for the backoff, then calls the GitHub re-run API.
-2. **Rollback**: `retry_count > ROLLBACK_THRESHOLD` **and** a previous version is known
+2. **Alert, nothing to roll back**: the failure is `build_failure` or `test_failure`. Nothing was deployed, so rollback is never attempted for these types.
+3. **Rollback**: retries are exhausted **and** a previous version is known **and** the failed version is the one running
+   - Before touching the cluster, the orchestrator reads the image tag the Deployment is running. If it equals the failed `version`, the rollback proceeds.
+   - If another version is running (for example the failed version never reached the cluster, or someone already rolled back), the result is **skip**: nothing is changed, the status becomes `failed` and a `rollback_skipped` audit event is written.
+   - If the live version cannot be read, or the image is pinned by digest so no tag can be compared, the result is **alert**.
    - Status becomes `rolling_back`, then `rolled_back` on success or `failed` if the rollback does not become healthy.
-3. **Alert**: everything else (no previous version, or the rollback threshold is not yet exceeded)
+4. **Alert**: everything else (for example, no previous version is known)
    - Status becomes `failed` and a `manual_intervention_required` audit event is written.
 
-With the defaults (`MAX_RETRIES=3`, `ROLLBACK_THRESHOLD=2`, `INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
+With the defaults (`MAX_RETRIES=3`, `INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
 
 | Failure # for this deployment ID | Action                                  | Delay |
 | -------------------------------- | --------------------------------------- | ----- |
@@ -74,18 +78,17 @@ With the defaults (`MAX_RETRIES=3`, `ROLLBACK_THRESHOLD=2`, `INITIAL_BACKOFF=10`
 | 4                                | rollback (if a previous version exists) | n/a   |
 | 4, no previous version           | alert                                   | n/a   |
 
-!!! tip "How the two thresholds interact"
-Retries are evaluated first, so rollback can only happen once `retry_count` exceeds **both** `MAX_RETRIES` and `ROLLBACK_THRESHOLD`. If `ROLLBACK_THRESHOLD >= MAX_RETRIES`, failures in between produce an `alert` rather than a rollback. In practice `MAX_RETRIES` is the setting that decides when rollback starts; keep `ROLLBACK_THRESHOLD <= MAX_RETRIES`.
-
 ### Executing a rollback
 
 `rollback_deployment()` performs these steps:
 
-1. Read the Deployment from Kubernetes.
-2. For the container whose **name equals the deployment name**, replace the image tag with the target version (the registry and repository part of the image is preserved).
-3. Set the `version` label on the Deployment and on the pod template.
-4. `PATCH` the Deployment. Kubernetes performs a normal rolling update back to the old image.
-5. Wait for health (see below). Success writes `rollback_completed` to the audit log; failure writes `rollback_failed` and the decision becomes `alert`.
+1. Read the Deployment from Kubernetes and find the application container: the one **named like the Deployment**, or the only container if there is exactly one. If neither applies, the rollback fails without changing anything.
+2. Build the target image from the running one. The registry (including a port) and repository are preserved, the tag is replaced, and a digest is dropped.
+3. `PATCH` only that container's image and the `version` labels (Deployment and pod template). Kubernetes performs a normal rolling update back to the old image.
+4. Check that the Deployment reports the target image after the patch. If not, the rollback fails.
+5. Wait for the new revision to finish rolling out (the controller observed the patched generation, every replica is updated and no old replicas remain), then for health (see below). Success writes `rollback_completed` to the audit log; failure writes `rollback_failed` and the decision becomes `alert`.
+
+Any error during these steps, not only Kubernetes API errors, counts as a failed rollback and is recorded in `rollback_failed` with the error type. `rollback_initiated` records the version that was actually running.
 
 ### Previous-version resolution
 
@@ -148,7 +151,7 @@ TTL is 24 hours and is refreshed every time the state is saved.
 
 Each stage above emits an audit event so the full story of a deployment can be reconstructed by filtering on `deployment_id`:
 
-`deployment_received` → `failure_detected` → `retry_initiated` or `rollback_initiated` → `health_check_started` → `health_check_passed`/`health_check_failed` → `rollback_completed`/`rollback_failed` → `state_saved` → `manual_intervention_required` (when a human is needed).
+`deployment_received` → `failure_detected` → `retry_initiated`, `rollback_initiated` or `rollback_skipped` → `health_check_started` → `health_check_passed`/`health_check_failed` → `rollback_completed`/`rollback_failed` → `state_saved` → `manual_intervention_required` (when a human is needed).
 
 ## Metrics Emitted
 
@@ -165,20 +168,8 @@ See [Monitoring](../usage/monitoring.md) for the complete list, including metric
 
 These were found by reading the code and exercising the webhook endpoint against mocked Redis and Kubernetes clients. They are documented here so that operators are not surprised, and are good candidates for follow-up issues.
 
-!!! warning "1. Retry needs `workflow_run_id`, which is not carried over from earlier webhooks"
-The `in_progress` webhook (which carries `workflow_run_id`) does not create a state record, and the failure handler builds a new state with empty `metadata`. As a result the **first** failure for a deployment ID returns `action: alert` ("missing workflow_run_id") even when the webhook included the ID. Two tests in `orchestrator/tests/test_orchestrator.py` (`test_handle_deployment_failure_retry_with_backoff` and `test_handle_deployment_failure_increasing_backoff`) currently fail for this reason. A fix is to merge `payload.metadata` into the state when it is created.
+!!! note "1. GitHub re-runs apply to finished runs"
+GitHub allows re-running a workflow run once it has completed. The webhook is sent from inside the running workflow, so the backoff delay must outlast the remaining steps or the re-run request may be rejected. Monitor the `retries_total` metric and orchestrator logs for `GitHub API permission denied` or non-201 responses.
 
-!!! warning "2. A re-run likely generates a new deployment ID"
-`build-and-test.yml` creates `deployment_id` with `uuidgen`. When GitHub re-runs the workflow, that step runs again, so each attempt starts with a fresh state and `retry_count` restarts at 1. The retry counter then never reaches `MAX_RETRIES`, and the rollback branch is not reached through this path. Deriving the ID from `github.run_id` (stable across attempts) would make the counter accumulate.
-
-!!! warning "3. `smoke_test_failure` is rejected"
-`deploy-environment.yml` can send `failure_type: smoke_test_failure`, which is not a member of `FailureType`. The webhook returns HTTP 500 for it. Either add the value to the enum or map it to `deployment_failure` in the workflow.
-
-!!! note "4. The deploy workflow also rolls back on its own"
-The final step of `deploy-environment.yml` runs `kubectl rollout undo` whenever the job fails, independently of the orchestrator. Both mechanisms can act on the same failure. Decide which one owns rollback in your environment and disable the other.
-
-!!! note "5. GitHub re-runs apply to finished runs"
-GitHub allows re-running a workflow run once it has completed. The webhook is sent from inside the running workflow, so the backoff delay must outlast the remaining steps (including the workflow's own rollback step) or the re-run request may be rejected. Monitor the `retries_total` metric and orchestrator logs for `GitHub API permission denied` or non-201 responses.
-
-!!! note "6. Build-stage failures have nothing to roll back"
-`build-and-test.yml` reports `build_failure`/`test_failure` with `namespace: ci` and no `workflow_run_id`. These produce an `alert` because no Deployment exists to retry or roll back.
+!!! note "2. Build-stage failures have nothing to roll back"
+`build-and-test.yml` reports `build_failure`/`test_failure` with `namespace: ci` and no `workflow_run_id`. These produce an `alert` because no Deployment exists to retry or roll back. The orchestrator also never rolls back for these two types, even when a `workflow_run_id` is present and retries are exhausted.

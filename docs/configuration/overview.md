@@ -22,7 +22,7 @@ This page is the starting point. It shows where to set values, summarises what y
 | --------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | Kubernetes manifests              | `env:` list in `orchestrator/k8s/deployment.yaml`                             | `kubectl apply -f orchestrator/k8s/ && kubectl rollout restart deployment/orchestrator -n orchestrator` |
 | Quick change on a running cluster | `kubectl set env`                                                             | `kubectl set env deployment/orchestrator MAX_RETRIES=2 -n orchestrator` (triggers a rollout)            |
-| Terraform                         | `max_retries`, `rollback_threshold`, `replicas`, `resources` module variables | `terraform apply` (other variables are not exposed yet)                                                 |
+| Terraform                         | `max_retries`, `replicas`, `resources` module variables | `terraform apply` (other variables are not exposed yet)                                                 |
 | Docker Compose                    | `environment:` under `services.orchestrator` in `docker-compose.yml`          | `docker compose up -d`                                                                                  |
 | Local process                     | `orchestrator/.env` (copy from `.env.example`) loaded into your shell         | restart `uvicorn`                                                                                       |
 
@@ -36,7 +36,7 @@ Changes made with `kubectl set env` are overwritten the next time you `kubectl a
 | Area               | Variables                                                        | What it controls                                                                    |
 | ------------------ | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | Redis              | `REDIS_HOST`, `REDIS_PORT`                                       | Where state is stored                                                               |
-| Retry and rollback | `MAX_RETRIES`, `ROLLBACK_THRESHOLD`                              | How many failures are retried, and when rollback becomes allowed                    |
+| Retry and rollback | `MAX_RETRIES`                                                    | How many failures are retried before rollback                                       |
 | Backoff            | `INITIAL_BACKOFF`, `BACKOFF_MULTIPLIER`, `MAX_BACKOFF`           | Delay before each retry                                                             |
 | Health checks      | `HEALTH_CHECK_PORT`, `HEALTH_CHECK_PATH`, `HEALTH_CHECK_TIMEOUT` | How the application's health endpoint is called                                     |
 | GitHub             | `GITHUB_TOKEN`, `GITHUB_REPO`                                    | Whether retries can trigger workflow re-runs                                        |
@@ -59,7 +59,7 @@ Changes made with `kubectl set env` are overwritten the next time you `kubectl a
 
 ## Understanding the Key Settings
 
-**Retries versus rollback.** Retries are decided first: while the failure count for a deployment ID is `<= MAX_RETRIES`, MANA schedules a re-run. Once it is higher, MANA rolls back if the count also exceeds `ROLLBACK_THRESHOLD` and a previous version is known. With the defaults (`3` and `2`) that means three retries and a rollback on the fourth failure. Keep `ROLLBACK_THRESHOLD <= MAX_RETRIES`. See [Data Flow](../architecture/data-flow.md#the-decision-rule).
+**Retries versus rollback.** Retries are decided first: while the failure count for a deployment ID is `<= MAX_RETRIES`, MANA schedules a re-run. Once it is higher, MANA rolls back if a previous version is known and the failed version is the one running. With the default (`3`) that means three retries and a rollback on the fourth failure. `MAX_RETRIES` is the only setting that decides when rollback starts; a leftover `ROLLBACK_THRESHOLD` is ignored and logged as deprecated. See [Data Flow](../architecture/data-flow.md#the-decision-rule).
 
 **Backoff.** The delay before retry _n_ is `min(INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(n-1), MAX_BACKOFF)`: 10, 20, 40 seconds by default. There is no jitter.
 
@@ -79,7 +79,6 @@ Copy the block that fits and adjust. All variables are optional because every on
 
     ```bash
     MAX_RETRIES=2
-    ROLLBACK_THRESHOLD=1
     INITIAL_BACKOFF=2.0
     MAX_BACKOFF=30.0
     BACKOFF_MULTIPLIER=2.0
@@ -92,7 +91,6 @@ Copy the block that fits and adjust. All variables are optional because every on
 
     ```bash
     MAX_RETRIES=3
-    ROLLBACK_THRESHOLD=2
     INITIAL_BACKOFF=5.0
     MAX_BACKOFF=60.0
     BACKOFF_MULTIPLIER=2.0
@@ -105,7 +103,6 @@ Copy the block that fits and adjust. All variables are optional because every on
 
     ```bash
     MAX_RETRIES=3
-    ROLLBACK_THRESHOLD=2
     INITIAL_BACKOFF=10.0
     MAX_BACKOFF=120.0
     BACKOFF_MULTIPLIER=2.0
@@ -118,7 +115,6 @@ Copy the block that fits and adjust. All variables are optional because every on
 
     ```bash
     MAX_RETRIES=1
-    ROLLBACK_THRESHOLD=1
     INITIAL_BACKOFF=5.0
     MAX_BACKOFF=30.0
     ```
@@ -127,7 +123,7 @@ Apply a profile to a running cluster:
 
 ```bash
 kubectl set env deployment/orchestrator -n orchestrator \
-  MAX_RETRIES=2 ROLLBACK_THRESHOLD=1 INITIAL_BACKOFF=5.0
+  MAX_RETRIES=2 INITIAL_BACKOFF=5.0
 kubectl rollout status deployment/orchestrator -n orchestrator
 curl -s $MANA/config | jq
 ```
@@ -153,7 +149,6 @@ For production-grade secret management (Sealed Secrets, External Secrets Operato
 | Setting                | Rule                                   |
 | ---------------------- | -------------------------------------- |
 | `MAX_RETRIES`          | integer, at least 1                    |
-| `ROLLBACK_THRESHOLD`   | integer, at least 1                    |
 | `INITIAL_BACKOFF`      | number, greater than 0                 |
 | `MAX_BACKOFF`          | number, greater than `INITIAL_BACKOFF` |
 | `BACKOFF_MULTIPLIER`   | number, greater than 1.0               |
@@ -173,11 +168,10 @@ MAX_RETRIES=0 python -c "from src.config import OrchestratorConfig as C; C.from_
 1. **Keep manifests as the source of truth.** Avoid long-lived `kubectl set env` overrides.
 2. **Change one thing at a time** and confirm with `GET /config`.
 3. **Match the health settings to your app** before trusting rollbacks: a wrong path or port makes every verification fail.
-4. **Keep `ROLLBACK_THRESHOLD <= MAX_RETRIES`.**
-5. **Make sure a rollback target exists.** Send a `success` webhook for each good deployment, and give pods a `version` label.
-6. **Document non-default values** and why you chose them.
-7. **Test in staging** with the failure recipes in [Sample App Configuration](sample-app.md#failure-recipes).
-8. **Review the audit log** after tuning to see how decisions changed ([Monitoring](../usage/monitoring.md)).
+4. **Make sure a rollback target exists.** Send a `success` webhook for each good deployment, and give pods a `version` label.
+5. **Document non-default values** and why you chose them.
+6. **Test in staging** with the failure recipes in [Sample App Configuration](sample-app.md#failure-recipes).
+7. **Review the audit log** after tuning to see how decisions changed ([Monitoring](../usage/monitoring.md)).
 
 ## Troubleshooting Configuration
 

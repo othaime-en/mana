@@ -13,7 +13,6 @@ class TestOrchestratorConfig:
         assert config.redis_host == os.getenv('REDIS_HOST', 'localhost')
         assert config.redis_port == int(os.getenv('REDIS_PORT', '6379'))
         assert config.max_retries == int(os.getenv('MAX_RETRIES', '3'))
-        assert config.rollback_threshold == int(os.getenv('ROLLBACK_THRESHOLD', '2'))
         assert config.initial_backoff == float(os.getenv('INITIAL_BACKOFF', '10.0'))
         assert config.max_backoff == float(os.getenv('MAX_BACKOFF', '300.0'))
         assert config.backoff_multiplier == float(os.getenv('BACKOFF_MULTIPLIER', '2.0'))
@@ -24,7 +23,6 @@ class TestOrchestratorConfig:
         monkeypatch.setenv('REDIS_HOST', 'redis.example.com')
         monkeypatch.setenv('REDIS_PORT', '6380')
         monkeypatch.setenv('MAX_RETRIES', '5')
-        monkeypatch.setenv('ROLLBACK_THRESHOLD', '3')
         monkeypatch.setenv('INITIAL_BACKOFF', '15.0')
         monkeypatch.setenv('MAX_BACKOFF', '600.0')
         monkeypatch.setenv('BACKOFF_MULTIPLIER', '3.0')
@@ -37,7 +35,6 @@ class TestOrchestratorConfig:
         assert config.redis_host == 'redis.example.com'
         assert config.redis_port == 6380
         assert config.max_retries == 5
-        assert config.rollback_threshold == 3
         assert config.initial_backoff == 15.0
         assert config.max_backoff == 600.0
         assert config.backoff_multiplier == 3.0
@@ -51,7 +48,6 @@ class TestOrchestratorConfig:
             redis_host='localhost',
             redis_port=6379,
             max_retries=3,
-            rollback_threshold=2,
             initial_backoff=10.0,
             max_backoff=300.0,
             backoff_multiplier=2.0,
@@ -71,7 +67,6 @@ class TestOrchestratorConfig:
             redis_host='localhost',
             redis_port=6379,
             max_retries=0,  # Invalid
-            rollback_threshold=2,
             initial_backoff=10.0,
             max_backoff=300.0,
             backoff_multiplier=2.0,
@@ -85,25 +80,23 @@ class TestOrchestratorConfig:
         with pytest.raises(ValueError, match="max_retries must be >= 1"):
             config.validate()
     
-    def test_config_validation_rollback_threshold_invalid(self):
-        """Test config validation fails with invalid rollback_threshold"""
-        config = OrchestratorConfig(
-            redis_host='localhost',
-            redis_port=6379,
-            max_retries=3,
-            rollback_threshold=0,  # Invalid
-            initial_backoff=10.0,
-            max_backoff=300.0,
-            backoff_multiplier=2.0,
-            health_check_timeout=5,
-            health_check_port=5000,
-            health_check_path='/health',
-            log_level='INFO',
-            enable_audit_logging=True
-        )
+    def test_rollback_threshold_is_deprecated_and_ignored(self, monkeypatch, caplog):
+        """A leftover ROLLBACK_THRESHOLD warns instead of changing behaviour"""
+        monkeypatch.setenv('ROLLBACK_THRESHOLD', '1')
         
-        with pytest.raises(ValueError, match="rollback_threshold must be >= 1"):
-            config.validate()
+        with caplog.at_level('WARNING'):
+            config = OrchestratorConfig.from_env()
+        
+        assert not hasattr(config, 'rollback_threshold')
+        assert 'ROLLBACK_THRESHOLD is deprecated' in caplog.text
+    
+    def test_no_deprecation_warning_without_rollback_threshold(self, monkeypatch, caplog):
+        monkeypatch.delenv('ROLLBACK_THRESHOLD', raising=False)
+        
+        with caplog.at_level('WARNING'):
+            OrchestratorConfig.from_env()
+        
+        assert 'deprecated' not in caplog.text
     
     def test_config_validation_backoff_invalid(self):
         """Test config validation fails with invalid backoff values"""
@@ -111,7 +104,6 @@ class TestOrchestratorConfig:
             redis_host='localhost',
             redis_port=6379,
             max_retries=3,
-            rollback_threshold=2,
             initial_backoff=100.0,
             max_backoff=50.0,  # Less than initial_backoff
             backoff_multiplier=2.0,
@@ -131,7 +123,6 @@ class TestOrchestratorConfig:
             redis_host='localhost',
             redis_port=6379,
             max_retries=3,
-            rollback_threshold=2,
             initial_backoff=10.0,
             max_backoff=300.0,
             backoff_multiplier=1.0,  # Must be > 1.0
@@ -151,7 +142,6 @@ class TestOrchestratorConfig:
             redis_host='localhost',
             redis_port=6379,
             max_retries=3,
-            rollback_threshold=2,
             initial_backoff=10.0,
             max_backoff=300.0,
             backoff_multiplier=2.0,

@@ -11,13 +11,21 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 - Complete documentation set under `docs/` (published with MkDocs): architecture, configuration, usage, reference, contributing and about sections (PR #9).
 
+### Fixed
+
+- The first failure webhook for a deployment now returns `retry` instead of `alert`: the webhook's `metadata`, including `workflow_run_id`, is carried into the failure state (PR #31).
+- `deployment_id` is now `deploy-<run_id>-<namespace>` and the image version is `v<sha7>`, so a workflow re-run reports the same deployment and the retry counter accumulates (CORE-01). Webhook metadata now carries `run_attempt`.
+- `failure_type: smoke_test_failure` is accepted. `status` and `failure_type` are validated as enums, so unknown values return HTTP 422 instead of 500, an empty `failure_type` counts as absent, and `status: failed` requires a `failure_type` (CORE-13, TEST-04).
+- Rollback guards (CORE-16): the orchestrator never rolls back for `build_failure` or `test_failure`, and rolls back only when the image tag running in the cluster equals the failed version. Otherwise it answers `skip` (another version is live) or `alert` (the live version cannot be read or compared) and writes a `rollback_skipped` audit event for a skip. The workflows no longer run `kubectl rollout undo`, so the orchestrator is the only rollback owner (CORE-04).
+- `ROLLBACK_THRESHOLD` is removed (CORE-03). It had no effect unless larger than `MAX_RETRIES`. Rollback now starts when `MAX_RETRIES` retries are exhausted. A leftover `ROLLBACK_THRESHOLD` is ignored with a deprecation warning, and the `rollback_threshold` field is gone from `GET /config` and from the Terraform `orchestrator` module (remove it from your `.tfvars` if you set it).
+- `rollback_deployment` is hardened (CORE-09). It sends a minimal patch (image and version labels) instead of the whole Deployment, builds the target image correctly for registry ports and digests, fails loudly when it cannot identify the container instead of silently changing nothing, verifies the image after the patch, and waits for the patched generation to finish rolling out so old ready replicas cannot pass the health check. All errors are caught and audited, and `rollback_initiated` records the real running version and the reason (manual rollbacks no longer say "Exceeded retry threshold").
+- CI runs the orchestrator tests with a 75% coverage gate, and the sample-app tests with an 80% gate (CI-01, CI-02). Test tools moved out of the orchestrator runtime image into `orchestrator/requirements-dev.txt`, which also adds the missing `httpx`. The sample-app lint step (flake8 and black, pinned) is now blocking, and `sample-app/src` was formatted to pass it.
+- Timestamps in audit events and sample-app logs use timezone-aware UTC with the same `...Z` format. Sample-app shutdown cleanup runs once instead of twice on SIGTERM (TEST-03).
+
 ### Known issues
 
 These are confirmed by the current code and are tracked in [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations):
 
-- The first failure webhook for a deployment returns `alert` instead of `retry`, because `workflow_run_id` from earlier webhooks is not stored in the new state. Two orchestrator unit tests fail for this reason.
-- `deployment_id` is regenerated on each workflow re-run, so the retry counter never accumulates and the rollback branch is not reached through the webhook path.
-- `failure_type: smoke_test_failure` (sent by `deploy-environment.yml`) is rejected with HTTP 500.
 - `GET /metrics/deployment/{namespace}/{deployment_name}` is shadowed by the Prometheus mount and returns Prometheus text.
 - Metrics `deployment_duration_seconds` and `active_deployments` are declared but never updated; several alerts reference metrics the orchestrator does not emit.
 - `LOG_LEVEL` and `ENABLE_AUDIT_LOGGING` are parsed but not applied.
@@ -81,6 +89,7 @@ These are confirmed by the current code and are tracked in [Data Flow: Known Beh
 
 ### Fixed
 
+- The first failure webhook for a deployment now returns `retry` instead of `alert`: the webhook's `metadata`, including `workflow_run_id`, is carried into the failure state (PR #31).
 - `app.start_time` initialised at import so readiness works under WSGI servers.
 
 ## Milestone 1: Initial implementation (December 2025 to January 2026)

@@ -15,7 +15,7 @@ import json
 from kubernetes import client, config as k8s_config
 from kubernetes.client.rest import ApiException
 
-from src.utils import get_audit_logger, AuditAction
+from src.utils import get_audit_logger, AuditAction, split_image_reference, with_tag
 from src.config import get_config
 
 
@@ -45,7 +45,57 @@ class FailureType(Enum):
     TEST_FAILURE = "test_failure"
     DEPLOYMENT_FAILURE = "deployment_failure"
     HEALTH_CHECK_FAILURE = "health_check_failure"
+    SMOKE_TEST_FAILURE = "smoke_test_failure"
     TIMEOUT = "timeout"
+
+
+NON_ROLLBACK_FAILURES = frozenset({
+    FailureType.BUILD_FAILURE,
+    FailureType.TEST_FAILURE,
+})
+
+
+class ContainerNotFoundError(Exception):
+    """The Deployment has no container Mana can identify as the application"""
+
+
+class RollbackError(Exception):
+    """A rollback patch was accepted but did not produce the expected image"""
+
+
+def rollout_complete(deployment, generation: int) -> bool:
+    """
+    Whether the Deployment finished rolling out the given generation
+
+    Mirrors kubectl rollout status: the controller has observed the spec, all
+    replicas are updated, and no replicas from older revisions remain.
+    """
+    status = deployment.status
+    updated = status.updated_replicas or 0
+    return (
+        (status.observed_generation or 0) >= generation
+        and updated == deployment.spec.replicas
+        and (status.replicas or 0) == updated
+    )
+
+
+def find_container(deployment, deployment_name: str):
+    """
+    Return the application container of a Deployment
+
+    Matches the container named like the Deployment, or the only container
+    when there is exactly one.
+    """
+    containers = deployment.spec.template.spec.containers or []
+    for container in containers:
+        if container.name == deployment_name:
+            return container
+    if len(containers) == 1:
+        return containers[0]
+    names = [container.name for container in containers]
+    raise ContainerNotFoundError(
+        f"No container named {deployment_name} in deployment (found {names})"
+    )
 
 
 @dataclass
@@ -100,7 +150,6 @@ class SelfHealingOrchestrator:
             
             # Retry/Rollback configuration
             self.max_retries = cfg.max_retries
-            self.rollback_threshold = cfg.rollback_threshold
             
             # Exponential backoff configuration
             self.initial_backoff = cfg.initial_backoff
@@ -121,7 +170,6 @@ class SelfHealingOrchestrator:
                 decode_responses=True
             )
             self.max_retries = 3
-            self.rollback_threshold = 2
             self.initial_backoff = 10.0
             self.max_backoff = 300.0
             self.backoff_multiplier = 2.0
@@ -165,7 +213,6 @@ class SelfHealingOrchestrator:
             "Self-Healing Orchestrator initialized successfully",
             extra={
                 "max_retries": self.max_retries,
-                "rollback_threshold": self.rollback_threshold,
                 "initial_backoff": self.initial_backoff,
                 "max_backoff": self.max_backoff,
                 "github_integration": bool(self.github_token and self.github_repo)
@@ -367,11 +414,15 @@ class SelfHealingOrchestrator:
         namespace: str,
         deployment_name: str,
         timeout: int = 300,
-        deployment_id: Optional[str] = None
+        deployment_id: Optional[str] = None,
+        expected_generation: Optional[int] = None
     ) -> bool:
         """
         Check if deployment is healthy (pods + application health)
         Properly handles application health check failures
+        
+        With expected_generation, pods only count once that generation has
+        finished rolling out, so replicas of the old revision cannot pass.
         
         Returns True if all checks pass
         """
@@ -397,8 +448,13 @@ class SelfHealingOrchestrator:
                 replicas = deployment.spec.replicas
                 ready_replicas = deployment.status.ready_replicas or 0
                 
+                rolled_out = (
+                    expected_generation is None
+                    or rollout_complete(deployment, expected_generation)
+                )
+                
                 # Check if all pods are ready
-                if ready_replicas == replicas:
+                if rolled_out and ready_replicas == replicas:
                     # Additionally check application health endpoint
                     if self.check_application_health(namespace, deployment_name):
                         duration = time.time() - start_time
@@ -494,6 +550,25 @@ class SelfHealingOrchestrator:
             )
         
         return False
+    
+    def get_live_version(
+        self,
+        namespace: str,
+        deployment_name: str
+    ) -> Optional[str]:
+        """
+        Read the image tag the Deployment is running now
+
+        Returns None when the image is pinned by digest or has no tag.
+        Raises ApiException or ContainerNotFoundError when it cannot be read.
+        """
+        deployment = self.k8s_apps.read_namespaced_deployment(
+            name=deployment_name,
+            namespace=namespace
+        )
+        container = find_container(deployment, deployment_name)
+        reference = split_image_reference(container.image)
+        return reference.tag if reference.digest is None else None
     
     def save_successful_deployment_version(
         self,
@@ -604,16 +679,31 @@ class SelfHealingOrchestrator:
         namespace: str,
         deployment_name: str,
         target_version: str,
-        deployment_id: Optional[str] = None
+        deployment_id: Optional[str] = None,
+        reason: str = "retries exhausted"
     ) -> bool:
         """
-        Rollback deployment to previous version with full audit trail
+        Rollback deployment to a previous version with full audit trail
+
+        Patches only the container image and version labels, then waits for
+        the new revision to finish rolling out and report healthy.
         """
         start_time = time.time()
+        current_version = "unknown"
         
         try:
+            deployment = self.k8s_apps.read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace
+            )
+            container = find_container(deployment, deployment_name)
+            current_reference = split_image_reference(container.image)
+            current_version = current_reference.tag or "unknown"
+            target_image = with_tag(container.image, target_version)
+            
             logger.info(
-                f"Rolling back {deployment_name} to version {target_version}"
+                f"Rolling back {deployment_name} from {current_version} "
+                f"to version {target_version}"
             )
             
             if deployment_id:
@@ -621,33 +711,31 @@ class SelfHealingOrchestrator:
                     deployment_id=deployment_id,
                     namespace=namespace,
                     deployment_name=deployment_name,
-                    current_version="unknown",
+                    current_version=current_version,
                     target_version=target_version,
-                    reason="Exceeded retry threshold"
+                    reason=reason
                 )
             
-            # Read current deployment
-            deployment = self.k8s_apps.read_namespaced_deployment(
-                name=deployment_name,
-                namespace=namespace
-            )
-            
-            # Update image tag to target version
-            for container in deployment.spec.template.spec.containers:
-                if container.name == deployment_name:
-                    image_parts = container.image.split(':')
-                    container.image = f"{image_parts[0]}:{target_version}"
-            
-            # Update version label
-            deployment.metadata.labels['version'] = target_version
-            deployment.spec.template.metadata.labels['version'] = target_version
-            
-            # Apply changes
-            self.k8s_apps.patch_namespaced_deployment(
+            patched = self.k8s_apps.patch_namespaced_deployment(
                 name=deployment_name,
                 namespace=namespace,
-                body=deployment
+                body={
+                    "metadata": {"labels": {"version": target_version}},
+                    "spec": {"template": {
+                        "metadata": {"labels": {"version": target_version}},
+                        "spec": {"containers": [
+                            {"name": container.name, "image": target_image}
+                        ]}
+                    }}
+                }
             )
+            
+            patched_image = find_container(patched, deployment_name).image
+            if patched_image != target_image:
+                raise RollbackError(
+                    f"Deployment runs {patched_image} after the patch, "
+                    f"expected {target_image}"
+                )
             
             logger.info(f"Rollback initiated for {deployment_name}")
             
@@ -655,7 +743,8 @@ class SelfHealingOrchestrator:
             if self.check_deployment_health(
                 namespace,
                 deployment_name,
-                deployment_id=deployment_id
+                deployment_id=deployment_id,
+                expected_generation=patched.metadata.generation
             ):
                 duration = time.time() - start_time
                 
@@ -688,8 +777,10 @@ class SelfHealingOrchestrator:
                 
                 return False
                 
-        except ApiException as e:
-            logger.error(f"Error during rollback: {e}")
+        except Exception as e:
+            logger.exception(
+                f"Error during rollback of {deployment_name} from {current_version}"
+            )
             
             if deployment_id:
                 audit_logger.log_rollback_failed(
@@ -697,7 +788,7 @@ class SelfHealingOrchestrator:
                     namespace=namespace,
                     deployment_name=deployment_name,
                     target_version=target_version,
-                    error=str(e)
+                    error=f"{type(e).__name__}: {e}"
                 )
             
             return False
@@ -886,7 +977,18 @@ class SelfHealingOrchestrator:
                 )
             }
         
-        elif state.retry_count > self.rollback_threshold and state.previous_version:
+        elif failure_type in NON_ROLLBACK_FAILURES:
+            reason = (
+                f"{failure_type.value} happened before anything was deployed, "
+                f"so there is nothing to roll back"
+            )
+            return self._alert(state, version, reason)
+        
+        elif state.previous_version:
+            blocked = await self._rollback_blocker(state, version)
+            if blocked:
+                return blocked
+            
             # Rollback to previous version
             logger.warning(
                 f"Max retries exceeded ({state.retry_count}), "
@@ -950,6 +1052,81 @@ class SelfHealingOrchestrator:
                 'action': 'alert',
                 'message': 'No previous version available - manual intervention required'
             }
+    
+    def _alert(self, state: DeploymentState, version: str, reason: str) -> Dict:
+        """Mark the deployment failed and ask for manual intervention"""
+        state.status = DeploymentStatus.FAILED
+        self.save_deployment_state(state)
+        
+        audit_logger.log_manual_intervention_required(
+            deployment_id=state.deployment_id,
+            namespace=state.namespace,
+            deployment_name=state.app_name,
+            version=version,
+            reason=reason
+        )
+        
+        return {
+            'action': 'alert',
+            'message': f'{reason} - manual intervention required'
+        }
+    
+    async def _rollback_blocker(
+        self,
+        state: DeploymentState,
+        version: str
+    ) -> Optional[Dict]:
+        """
+        Check that the failed version is the one running before rolling back
+
+        Returns the response to send instead of rolling back, or None when the
+        rollback may go ahead.
+        """
+        try:
+            live_version = await asyncio.to_thread(
+                self.get_live_version,
+                state.namespace,
+                state.app_name
+            )
+        except ApiException as e:
+            return self._alert(
+                state, version,
+                f"Cannot read the live version (Kubernetes API error {e.status})"
+            )
+        except ContainerNotFoundError as e:
+            return self._alert(state, version, f"Cannot read the live version: {e}")
+        
+        if live_version is None:
+            return self._alert(
+                state, version,
+                "Live image is not addressed by tag, so it cannot be matched "
+                "to the failed version"
+            )
+        
+        if live_version != version:
+            logger.warning(
+                f"Skipping rollback: live version {live_version} is not the "
+                f"failed version {version}"
+            )
+            state.status = DeploymentStatus.FAILED
+            self.save_deployment_state(state)
+            audit_logger.log_rollback_skipped(
+                deployment_id=state.deployment_id,
+                namespace=state.namespace,
+                deployment_name=state.app_name,
+                failed_version=version,
+                live_version=live_version
+            )
+            return {
+                'action': 'skip',
+                'live_version': live_version,
+                'message': (
+                    f'Live version {live_version} is not the failed version '
+                    f'{version}; rollback skipped'
+                )
+            }
+        
+        return None
     
     def get_deployment_metrics(
         self,

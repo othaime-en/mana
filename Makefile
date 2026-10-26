@@ -38,7 +38,7 @@ setup-cluster: ## Setup Kubernetes cluster
 setup-deps: ## Install Python dependencies
 	@echo "$(COLOR_BLUE)Installing dependencies...$(COLOR_RESET)"
 	@pip install -r sample-app/requirements.txt
-	@pip install -r orchestrator/requirements.txt
+	@pip install -r orchestrator/requirements-dev.txt
 
 ## Build Commands
 

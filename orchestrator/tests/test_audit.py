@@ -1,6 +1,7 @@
 import pytest
 import json
 import logging
+from datetime import datetime, timezone
 from io import StringIO
 from src.utils import (
     AuditLogger,
@@ -152,6 +153,33 @@ class TestAuditLogger:
         
         assert 'rollback_failed' in caplog.text
     
+    def test_event_timestamp_is_utc_with_z_suffix(self, audit_logger, caplog):
+        """Timestamps keep the ISO 8601 UTC form that log parsers expect"""
+        before = datetime.now(timezone.utc)
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_event(action=AuditAction.STATE_SAVED)
+        after = datetime.now(timezone.utc)
+        
+        timestamp = json.loads(caplog.records[-1].audit_event)['timestamp']
+        
+        assert timestamp.endswith('Z')
+        assert '+00:00' not in timestamp
+        parsed = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        assert before <= parsed <= after
+    
+    def test_log_rollback_skipped(self, audit_logger, caplog):
+        """Test skipped rollback logging"""
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_rollback_skipped(
+                deployment_id='test-123',
+                namespace='production',
+                deployment_name='sample-app',
+                failed_version='1.0.0',
+                live_version='0.9.0'
+            )
+        
+        assert 'rollback_skipped' in caplog.text
+    
     def test_log_health_check_started(self, audit_logger, caplog):
         """Test health check start logging"""
         with caplog.at_level(logging.INFO):
@@ -236,6 +264,7 @@ class TestAuditAction:
         assert AuditAction.ROLLBACK_INITIATED.value == "rollback_initiated"
         assert AuditAction.ROLLBACK_COMPLETED.value == "rollback_completed"
         assert AuditAction.ROLLBACK_FAILED.value == "rollback_failed"
+        assert AuditAction.ROLLBACK_SKIPPED.value == "rollback_skipped"
         assert AuditAction.HEALTH_CHECK_STARTED.value == "health_check_started"
         assert AuditAction.HEALTH_CHECK_PASSED.value == "health_check_passed"
         assert AuditAction.HEALTH_CHECK_FAILED.value == "health_check_failed"

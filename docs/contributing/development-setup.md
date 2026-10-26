@@ -24,13 +24,15 @@ You only need Python and Git for unit-test work.
 git clone https://github.com/othaime-en/mana.git
 cd mana
 
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r orchestrator/requirements.txt -r sample-app/requirements.txt
-pip install flake8 black isort pylint   # optional: linters used by `make lint`
+python -m venv .venv-orchestrator
+.venv-orchestrator/bin/pip install -r orchestrator/requirements-dev.txt
+python -m venv .venv-sample-app
+.venv-sample-app/bin/pip install -r sample-app/requirements.txt
 ```
 
-Both `requirements.txt` files include the test tools (`pytest`, `pytest-cov`, and `pytest-asyncio` for the orchestrator), so no separate dev requirements file exists.
+Use one virtual environment per component (on Windows, `Scripts\pip` instead of `bin/pip`). The two `requirements.txt` files pin different versions of `requests` and `pytest`, so installing both into one environment fails. The orchestrator's test tools (`pytest`, `pytest-cov`, `pytest-asyncio`, `httpx`) live in `orchestrator/requirements-dev.txt` and are not in the runtime image. The sample app still lists its test tools in `requirements.txt`.
+
+Optional linters used by `make lint`: `pip install flake8 black isort pylint`.
 
 ## 2. Run the Tests
 
@@ -38,21 +40,21 @@ Tests mock Redis, Kubernetes and GitHub, so no cluster is needed.
 
 ```bash
 make test                                   # both suites
-cd sample-app   && pytest tests/ -v --cov=src --cov-report=term-missing
-cd orchestrator && pytest tests/ -v --cov=src --cov-report=term-missing
+cd sample-app   && ../.venv-sample-app/bin/pytest tests/ -v --cov=src --cov-report=term-missing
+cd orchestrator && ../.venv-orchestrator/bin/pytest tests/ -v --cov=src --cov-report=term-missing
 ```
 
 Current baseline (at the time of writing):
 
-| Suite          | Result                  | Coverage                          |
-| -------------- | ----------------------- | --------------------------------- |
-| `sample-app`   | 35 passed               | n/a                               |
-| `orchestrator` | 41 passed, **2 failed** | about 48% (`api.py` has no tests) |
+| Suite          | Result     | Coverage | CI gate |
+| -------------- | ---------- | -------- | ------- |
+| `sample-app`   | 46 passed  | 93%      | 80%     |
+| `orchestrator` | 122 passed | 75%      | 75%     |
 
-The two failing tests, `test_handle_deployment_failure_retry_with_backoff` and `test_handle_deployment_failure_increasing_backoff`, fail because the retry path returns `alert` when `workflow_run_id` is not in the stored state. This is a real bug rather than a flaky test; see [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations). Fixing it is a good first contribution.
+CI runs both suites on every push and pull request, and fails when coverage drops below the gate. Raise the gate in `.github/workflows/build-and-test.yml` as coverage improves (the orchestrator target is 85%).
 
 !!! note "Test isolation"
-`orchestrator/src/api.py` creates the orchestrator at import time, which connects to Redis and loads a kubeconfig. Tests that import it must patch `redis.Redis` and the `kubernetes.config`/`client` calls (as in `tests/conftest.py`-style fixtures), or construct `SelfHealingOrchestrator(use_config=False)`.
+`orchestrator/src/api.py` creates the orchestrator at import time, which connects to Redis and loads a kubeconfig. Tests that import it must patch `redis.Redis` and the `kubernetes.config`/`client` calls (the `api` fixture in `orchestrator/tests/conftest.py` does this), or construct `SelfHealingOrchestrator(use_config=False)`.
 
 ## 3. Run Services Locally Without Containers
 

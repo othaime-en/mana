@@ -30,9 +30,6 @@ The result step derives the outcome from the earlier steps:
 | `kubectl set image`/`rollout status` failed      | `failed`  | `deployment_failure`   |
 | Anything else (smoke tests)                      | `failed`  | `smoke_test_failure`   |
 
-!!! warning "Fix before relying on retries"
-Three details in the shipped workflows currently prevent the retry to rollback path from working end to end: `smoke_test_failure` is not a value the orchestrator accepts (HTTP 500), the generated `deployment_id` changes on every re-run so the retry counter resets, and the first failure webhook does not find the `workflow_run_id` from the earlier `in_progress` event. The [recommended changes](#recommended-workflow-changes) below and the notes in [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) describe each.
-
 Deployments are only triggered by **manual dispatch** (`workflow_dispatch` with `deploy_target` set to `staging` or `production`). A push to `main` or `develop` builds, tests and validates in Kind but does not deploy. Because only the deploy workflow sends `success` events, the orchestrator learns a "known good" version only after a successful manual deploy. Until then, rollback relies on the ReplicaSet fallback.
 
 ## Setup
@@ -98,28 +95,29 @@ After a successful run the Redis key `last_successful:staging:sample-app` holds 
 
 ```json
 {
-  "deployment_id": "deploy-<unique>",
+  "deployment_id": "deploy-<run_id>-staging",
   "namespace": "staging",
   "app_name": "sample-app",
-  "version": "v1a2b3c4-1760000000",
+  "version": "v1a2b3c4",
   "status": "in_progress | success | failed",
-  "failure_type": "build_failure | test_failure | deployment_failure | health_check_failure | timeout",
+  "failure_type": "build_failure | test_failure | deployment_failure | health_check_failure | smoke_test_failure | timeout",
   "metadata": {
     "commit": "<sha>",
     "author": "<actor>",
     "branch": "<ref>",
-    "workflow_run_id": "<github.run_id>"
+    "workflow_run_id": "<github.run_id>",
+    "run_attempt": "<github.run_attempt>"
   }
 }
 ```
 
 Rules that matter:
 
-- `deployment_id` must be **stable across retry attempts** of the same logical deployment, or the retry counter resets.
+- `deployment_id` must be **stable across retry attempts** of the same logical deployment, or the retry counter resets. The shipped workflows use `deploy-<github.run_id>-<namespace>`, which a GitHub re-run keeps, and derive `version` from the commit SHA (`v<sha7>`) for the same reason.
 - `app_name` must equal the Kubernetes Deployment name, its `app` label and its container name.
 - `version` must equal the image tag you deploy, since rollback swaps tags.
 - `workflow_run_id` must be present on every webhook for a deployment that you want retried.
-- `failure_type` must be one of the five accepted values.
+- `failure_type` must be one of the six accepted values, and is required when `status` is `failed`. An empty string is treated as absent. Unknown `status` or `failure_type` values are rejected with HTTP 422.
 
 ## How a Retry Plays Out
 
@@ -129,36 +127,15 @@ Rules that matter:
 4. GitHub starts a new attempt of the **same run**. The attempt posts its own `in_progress` and `success` or `failed` events.
 5. After more than `MAX_RETRIES` failures for one deployment ID, the orchestrator patches the Deployment back to the last good version instead.
 
-Timing matters: GitHub allows a re-run only for a run that has finished. The result webhook is sent from inside the run, and the shipped workflow still has a final rollback step after it. A short backoff can therefore reach GitHub while the run is still active and be rejected. Watch the orchestrator log for `Failed to trigger re-run` or `permission denied` lines.
+The workflows never roll back themselves: the orchestrator is the only component that changes the image back. Until the fast-path rollback is built, a failed version therefore stays live while the retries run.
+
+Timing matters: GitHub allows a re-run only for a run that has finished. The result webhook is sent from inside the run, so a short backoff can reach GitHub while the run is still active and be rejected. Watch the orchestrator log for `Failed to trigger re-run` or `permission denied` lines.
 
 ## Recommended Workflow Changes
 
 These small edits bring the workflows in line with the orchestrator's behaviour.
 
-**1. Use a stable deployment ID** (`build-and-test.yml`):
-
-```yaml
-- name: Generate deployment ID
-  id: deployment
-  run: echo "id=deploy-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
-```
-
-`GITHUB_RUN_ID` stays the same across re-run attempts, so `retry_count` accumulates and rollback is eventually reached.
-
-**2. Map smoke-test failures to a known type** (`deploy-environment.yml`, "Determine deployment status"):
-
-```yaml
-else
-echo "status=failed" >> $GITHUB_OUTPUT
-echo "failure_type=deployment_failure" >> $GITHUB_OUTPUT
-fi
-```
-
-**3. Let one system own rollback.** The final step `Rollback on failure` runs `kubectl rollout undo`. If MANA should decide when to roll back (after retries), remove that step or guard it with `if: false`. If you prefer the immediate pipeline rollback, set `ORCHESTRATOR_URL` only for success notifications and skip the failure webhook.
-
-**4. Send `workflow_run_id` on build-stage failures** if you want them retried (add `"workflow_run_id": "${{ github.run_id }}"` to the `metadata` in `build-and-test.yml`). Note that these events use `namespace: ci`, for which there is no Deployment to roll back.
-
-The orchestrator also needs a code change for the first-failure case: copy `payload.metadata` into the new state in `handle_deployment_failure` (or save a state on `in_progress`). Until then, the first failure returns `action: alert`.
+**1. Send `workflow_run_id` on build-stage failures** if you want them retried (add `"workflow_run_id": "${{ github.run_id }}"` to the `metadata` in `build-and-test.yml`). Note that these events use `namespace: ci`, for which there is no Deployment to roll back.
 
 ## Sending Webhooks Safely
 
@@ -178,8 +155,8 @@ Only the webhook half is CI-agnostic. Any system that can send the JSON above ca
 | Webhook steps print "Orchestrator URL not configured" | `ORCHESTRATOR_URL` secret empty                                                        | Repository secrets                                                                                                                      |
 | `curl: (6)`, `(7)` or timeouts                        | Runner cannot reach the orchestrator                                                   | Use a self-hosted runner or tunnel; test with `curl $ORCHESTRATOR_URL/health` from the runner                                           |
 | HTTP 422                                              | Payload missing a required field or malformed JSON                                     | Build with `jq`; compare with the contract above                                                                                        |
-| HTTP 500 and "is not a valid FailureType"             | Unsupported `failure_type` (for example `smoke_test_failure`)                          | Map to one of the five values                                                                                                           |
-| `action: alert` with "missing workflow_run_id"        | Failure state has no `workflow_run_id`                                                 | See [Recommended changes](#recommended-workflow-changes) and [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) |
+| HTTP 422 mentioning `failure_type`                    | Unknown `failure_type`, or `status: failed` without one                                | Use one of the six values in the contract above                                                                                         |
+| `action: alert` with "missing workflow_run_id"        | The failure webhook has no `metadata.workflow_run_id`                                  | Send it on failure webhooks; build-stage failures currently omit it and always alert (see [Recommended changes](#recommended-workflow-changes)) |
 | Retries scheduled but no new run starts               | Token lacks Actions write permission, wrong `GITHUB_REPO`, or the run was still active | Orchestrator logs: `permission denied`, `Failed to trigger re-run`                                                                      |
 | Retries never end in a rollback                       | New `deployment_id` per attempt                                                        | Use `deploy-${GITHUB_RUN_ID}`                                                                                                           |
 | `action: alert` with "No previous version"            | No successful deploy recorded and no versioned ReplicaSets                             | Run one successful deployment first, or ensure pods carry a `version` label                                                             |

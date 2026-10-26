@@ -12,9 +12,6 @@ on:
       version:
         description: 'Generated version tag'
         value: ${{ jobs.build.outputs.version }}
-      deployment_id:
-        description: 'Generated deployment ID'
-        value: ${{ jobs.build.outputs.deployment_id }}
       image_tag:
         description: 'Full image tag'
         value: ${{ jobs.build.outputs.image_tag }}
@@ -25,31 +22,49 @@ env:
   ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
 
 jobs:
+  orchestrator-tests:
+    name: Orchestrator Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: orchestrator
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: orchestrator/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage gate
+        run: python -m pytest tests -v --cov=src --cov-report=term-missing --cov-fail-under=75
+
   build:
     name: Build and Test
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      deployment_id: ${{ steps.deployment.outputs.id }}
       image_tag: ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Generate version and deployment ID
+      - name: Derive version from commit
         id: version
         run: |
-          VERSION="v${GITHUB_SHA::7}-$(date +%s)"
+          VERSION="v${GITHUB_SHA::7}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Generated version: $VERSION"
-
-      - name: Generate deployment ID
-        id: deployment
-        run: |
-          DEPLOYMENT_ID="deploy-$(uuidgen | tr '[:upper:]' '[:lower:]')"
-          echo "id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
-          echo "Generated deployment ID: $DEPLOYMENT_ID"
+          echo "Derived version: $VERSION"
 
       # Python testing and linting
       - name: Set up Python
@@ -69,19 +84,18 @@ jobs:
         working-directory: ./sample-app
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-cov flake8 black
+          pip install flake8==7.4.1 black==26.10.1
 
       - name: Run linting
         working-directory: ./sample-app
         run: |
           flake8 src/ --max-line-length=100 --extend-ignore=E203,W503
           black --check src/
-        continue-on-error: true
 
       - name: Run tests with coverage
         working-directory: ./sample-app
         run: |
-          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing --cov-fail-under=80
 
       - name: Upload coverage
         uses: codecov/codecov-action@v3
@@ -188,7 +202,7 @@ jobs:
           curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d "{
-              \"deployment_id\": \"${{ steps.deployment.outputs.id }}\",
+              \"deployment_id\": \"ci-${{ github.run_id }}\",
               \"namespace\": \"ci\",
               \"app_name\": \"sample-app\",
               \"version\": \"${{ steps.version.outputs.version }}\",
@@ -197,6 +211,7 @@ jobs:
               \"metadata\": {
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\"
+                \"branch\": \"${{ github.ref_name }}\",
+                \"run_attempt\": \"${{ github.run_attempt }}\"
               }
             }" || echo "Failed to notify orchestrator"

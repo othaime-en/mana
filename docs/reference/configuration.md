@@ -12,7 +12,6 @@ A compact lookup for every tunable in the repository: environment defaults per d
 | `REDIS_HOST`           | `localhost`  | `localhost`    | `redis`              | `redis-service`                    | `redis-service`            |
 | `REDIS_PORT`           | `6379`       | `6379`         | `6379`               | `6379`                             | `6379`                     |
 | `MAX_RETRIES`          | `3`          | `3`            | `3`                  | `3`                                | `3` (`max_retries`)        |
-| `ROLLBACK_THRESHOLD`   | `2`          | `2`            | `2`                  | `2`                                | `2` (`rollback_threshold`) |
 | `INITIAL_BACKOFF`      | `10.0`       | `10.0`         | unset                | `10.0`                             | unset                      |
 | `MAX_BACKOFF`          | `300.0`      | `300.0`        | unset                | `300.0`                            | unset                      |
 | `BACKOFF_MULTIPLIER`   | `2.0`        | `2.0`          | unset                | `2.0`                              | unset                      |
@@ -54,7 +53,6 @@ Root `required_version` is `>= 1.5.0`; providers are `hashicorp/kubernetes ~> 2.
 | `redis_enabled`        | `true`                                     | Deploy Redis (as `redis-service`)                                                                                               |
 | `redis_password`       | `""` (sensitive)                           | Passes `--requirepass` to Redis. The orchestrator cannot authenticate to Redis yet, so leave empty unless you extend the client |
 | `max_retries`          | `3`                                        | Written to env `MAX_RETRIES`                                                                                                    |
-| `rollback_threshold`   | `2`                                        | Written to env `ROLLBACK_THRESHOLD`                                                                                             |
 | `resources`            | 200m / 256Mi requests; 500m / 512Mi limits | Container resources                                                                                                             |
 
 ### Sample-app module (`terraform/modules/sample-app/variables.tf`)

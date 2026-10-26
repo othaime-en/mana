@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
+from enum import Enum
 from typing import Optional, Dict, List
 import asyncio
 import uvicorn
@@ -66,19 +67,39 @@ orchestrator = SelfHealingOrchestrator(use_config=True)
 
 
 # Request models
+class WebhookStatus(str, Enum):
+    """Deployment states a pipeline may report"""
+    IN_PROGRESS = "in_progress"
+    SUCCESS = "success"
+    FAILED = "failed"
+
+
 class WebhookPayload(BaseModel):
     """
     GitHub Actions webhook payload
-    
-    Requires workflow_run_id for retry mechanism
+
+    Requires workflow_run_id in metadata for the retry mechanism.
+    Unknown status or failure_type values are rejected with HTTP 422.
     """
     deployment_id: str
     namespace: str
     app_name: str
     version: str
-    status: str
-    failure_type: Optional[str] = None
-    metadata: Optional[Dict] = {}  # Should include workflow_run_id
+    status: WebhookStatus
+    failure_type: Optional[FailureType] = None
+    metadata: Optional[Dict] = Field(default_factory=dict)
+
+    @field_validator("failure_type", mode="before")
+    @classmethod
+    def blank_failure_type_means_none(cls, value):
+        """The deploy workflow sends an empty string when nothing failed"""
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def failed_requires_failure_type(self) -> "WebhookPayload":
+        if self.status is WebhookStatus.FAILED and self.failure_type is None:
+            raise ValueError("failure_type is required when status is failed")
+        return self
 
 
 class RollbackRequest(BaseModel):
@@ -157,7 +178,7 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
     metadata = payload.metadata or {}
     
     # Validate workflow_run_id is present for failed deployments
-    if payload.status == "failed" and not metadata.get('workflow_run_id'):
+    if payload.status is WebhookStatus.FAILED and not metadata.get('workflow_run_id'):
         logger.warning(
             "Webhook payload missing workflow_run_id - retry functionality will be limited"
         )
@@ -168,20 +189,19 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
         namespace=payload.namespace,
         deployment_name=payload.app_name,
         version=payload.version,
-        status=payload.status,
-        failure_type=payload.failure_type
+        status=payload.status.value,
+        failure_type=payload.failure_type.value if payload.failure_type else None
     )
     
     try:
         # Update metrics
         deployment_counter.labels(
             namespace=payload.namespace,
-            status=payload.status
+            status=payload.status.value
         ).inc()
         
-        if payload.status == "failed" and payload.failure_type:
-            # Handle failure
-            failure_type = FailureType(payload.failure_type)
+        if payload.status is WebhookStatus.FAILED:
+            failure_type = payload.failure_type
             
             result = await orchestrator.handle_deployment_failure(
                 deployment_id=payload.deployment_id,
@@ -203,7 +223,7 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             if result['action'] == 'rollback':
                 rollback_counter.labels(
                     namespace=payload.namespace,
-                    reason=payload.failure_type
+                    reason=failure_type.value
                 ).inc()
             
             return JSONResponse(
@@ -215,7 +235,7 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
                 }
             )
         
-        elif payload.status == "success":
+        elif payload.status is WebhookStatus.SUCCESS:
             # Track successful deployment for rollback reference
             state = orchestrator.get_deployment_state(payload.deployment_id)
             if state:
@@ -266,7 +286,8 @@ async def manual_rollback(request: RollbackRequest):
             namespace=request.namespace,
             deployment_name=request.deployment_name,
             target_version=request.target_version,
-            deployment_id=deployment_id
+            deployment_id=deployment_id,
+            reason="manual rollback requested"
         )
         
         if success:
@@ -391,7 +412,6 @@ async def get_config():
     """Get orchestrator configuration"""
     return {
         "max_retries": orchestrator.max_retries,
-        "rollback_threshold": orchestrator.rollback_threshold,
         "initial_backoff": orchestrator.initial_backoff,
         "max_backoff": orchestrator.max_backoff,
         "backoff_multiplier": orchestrator.backoff_multiplier,

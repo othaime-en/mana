@@ -35,8 +35,6 @@ spec:
           value: "6379"
         - name: MAX_RETRIES
           value: "3"
-        - name: ROLLBACK_THRESHOLD
-          value: "2"
         - name: INITIAL_BACKOFF
           value: "10.0"
         - name: MAX_BACKOFF

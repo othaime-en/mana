@@ -15,8 +15,7 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | ---------------------- | ------ | ----------- | -------------- | --------------------------------------------------------------------------- |
 | `REDIS_HOST`           | string | `localhost` | yes in cluster | Redis hostname (`redis-service` in Kubernetes, `redis` in Compose)          |
 | `REDIS_PORT`           | int    | `6379`      | no             | Redis port                                                                  |
-| `MAX_RETRIES`          | int    | `3`         | no             | Failures answered with a retry. Must be `>= 1`                              |
-| `ROLLBACK_THRESHOLD`   | int    | `2`         | no             | Failure count that must be exceeded before rollback. Must be `>= 1`         |
+| `MAX_RETRIES`          | int    | `3`         | no             | Failures answered with a retry before rolling back. Must be `>= 1`          |
 | `INITIAL_BACKOFF`      | float  | `10.0`      | no             | Seconds before the first retry. Must be `> 0`                               |
 | `MAX_BACKOFF`          | float  | `300.0`     | no             | Cap on any retry delay. Must be `> INITIAL_BACKOFF`                         |
 | `BACKOFF_MULTIPLIER`   | float  | `2.0`       | no             | Delay growth factor. Must be `> 1.0`                                        |
@@ -113,7 +112,6 @@ Details and defaults: [Configuration Reference](../reference/configuration.md#te
     REDIS_HOST=localhost
     REDIS_PORT=6379
     MAX_RETRIES=3
-    ROLLBACK_THRESHOLD=2
     INITIAL_BACKOFF=10.0
     MAX_BACKOFF=300.0
     BACKOFF_MULTIPLIER=2.0

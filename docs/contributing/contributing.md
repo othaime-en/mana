@@ -7,7 +7,7 @@ By participating you agree to follow the [Code of Conduct](code-of-conduct.md). 
 ## Ways to Contribute
 
 - **Report a bug** or unexpected behaviour.
-- **Fix a known issue.** The [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) page lists confirmed problems that are good starting points: carrying `workflow_run_id` into new state, a stable deployment ID across re-runs, accepting `smoke_test_failure`, the `/metrics/deployment/...` route shadowed by the Prometheus mount, and metrics that alerts reference but the orchestrator does not emit.
+- **Fix a known issue.** The [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) page lists confirmed problems that are good starting points: the `/metrics/deployment/...` route shadowed by the Prometheus mount, and metrics that alerts reference but the orchestrator does not emit.
 - **Improve tests.** The orchestrator's API layer (`api.py`) has no tests and overall coverage is under 50%.
 - **Improve the docs.** Corrections, clearer examples and missing sections are all valuable.
 - **Propose a feature** such as webhook authentication, a Redis password option, or adapters for other CI systems.
@@ -60,7 +60,7 @@ The history follows [Conventional Commits](https://www.conventionalcommits.org/)
 
 ```text
 feat(orchestrator): copy webhook metadata into new deployment state
-fix: accept smoke_test_failure as a failure type
+fix: reject unknown failure types with 422
 docs: document the rollback decision rule
 test: cover manual rollback endpoint
 chore: bump prometheus-client

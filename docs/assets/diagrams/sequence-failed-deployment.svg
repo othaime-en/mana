@@ -41,7 +41,7 @@
 <path d="M340 508 H95" fill="none" stroke="#8A8984" stroke-width="2" stroke-linejoin="round" marker-end="url(#arr)"/>
 <text x="217.5" y="500" text-anchor="middle" font-size="13" fill="#55534F">schedule re-run (after backoff)</text>
 <line x1="10" y1="530" x2="940" y2="530" stroke="#8C8A85" stroke-width="1.2" stroke-dasharray="6 5"/>
-<text x="108" y="550" font-size="13" fill="#55534F"><tspan font-weight="600" fill="#3C3489">[rollback]</tspan> retry_count &gt; ROLLBACK_THRESHOLD and a previous version is known</text>
+<text x="108" y="550" font-size="13" fill="#55534F"><tspan font-weight="600" fill="#3C3489">[rollback]</tspan> retry_count &gt; MAX_RETRIES and a previous version is known</text>
 <path d="M340 588 H850" fill="none" stroke="#8A8984" stroke-width="2" stroke-linejoin="round" marker-end="url(#arr)"/>
 <text x="595.0" y="580" text-anchor="middle" font-size="13" fill="#55534F">patch Deployment image + labels</text>
 <line x1="10" y1="610" x2="940" y2="610" stroke="#8C8A85" stroke-width="1.2" stroke-dasharray="6 5"/>

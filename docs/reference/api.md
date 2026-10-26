@@ -322,7 +322,6 @@ Shows the values the running process is using, which is the fastest way to confi
 ```json
 {
   "max_retries": 3,
-  "rollback_threshold": 2,
   "initial_backoff": 10.0,
   "max_backoff": 300.0,
   "backoff_multiplier": 2.0,

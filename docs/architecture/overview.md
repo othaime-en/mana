@@ -36,7 +36,7 @@ This page explains the design at a high level. Details are in [Components](compo
 2. On **success**, the orchestrator records the version as the new rollback target.
 3. On **failure**, it increments the retry count for that deployment ID and applies the rule:
    - up to `MAX_RETRIES` failures: schedule a GitHub Actions re-run after an exponential backoff;
-   - after that, and once `ROLLBACK_THRESHOLD` is exceeded: patch the Deployment back to the last good version and verify health;
+   - after that, if a previous version is known and the failed version is the one running: patch the Deployment back to the last good version and verify health;
    - if neither is possible (no previous version, rollback unhealthy): raise an alert (`manual_intervention_required`).
 4. Every step is written to the audit log, and Prometheus counters are updated.
 

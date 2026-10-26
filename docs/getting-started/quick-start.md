@@ -165,7 +165,7 @@ What happened:
 | ------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1       | `alert`    | The first failure for a new deployment ID has no stored `workflow_run_id` yet (a known limitation; see [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations))                                                                                                     |
 | 2, 3    | `retry`    | Within `MAX_RETRIES=3`; a workflow re-run is scheduled after 20 s and 40 s of backoff. Because the token is a placeholder, GitHub rejects the re-run request (an error such as `Failed to trigger re-run: 401` appears in the logs after the backoff), which is harmless for this demo |
-| 4       | `rollback` | `retry_count` (4) now exceeds both `MAX_RETRIES` and `ROLLBACK_THRESHOLD`, and a previous version (`1.0.0`) is known                                                                                                                                                                   |
+| 4       | `rollback` | `retry_count` (4) now exceeds `MAX_RETRIES`, a previous version (`1.0.0`) is known, and the failed version is the one running                                                                                                                                                                   |
 
 The fourth call takes a few seconds: the orchestrator patches the Deployment back to `sample-app:1.0.0`, waits for all replicas to be ready, and calls each pod's `/health` endpoint before answering.
 

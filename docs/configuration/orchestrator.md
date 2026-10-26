@@ -28,8 +28,7 @@ The client uses a 5-second connect and socket timeout. There is no password or T
 
 | Variable             | Default | Constraint          | Description                                                          |
 | -------------------- | ------- | ------------------- | -------------------------------------------------------------------- |
-| `MAX_RETRIES`        | `3`     | `>= 1`              | Number of failures that are answered with a retry                    |
-| `ROLLBACK_THRESHOLD` | `2`     | `>= 1`              | Failure count that must be **exceeded** before a rollback is allowed |
+| `MAX_RETRIES`        | `3`     | `>= 1`              | Number of failures answered with a retry; the next failure rolls back |
 | `INITIAL_BACKOFF`    | `10.0`  | `> 0`               | Seconds to wait before the first retry                               |
 | `BACKOFF_MULTIPLIER` | `2.0`   | `> 1.0`             | Growth factor between retries                                        |
 | `MAX_BACKOFF`        | `300.0` | `> INITIAL_BACKOFF` | Upper bound on any single delay, in seconds                          |
@@ -47,12 +46,12 @@ delay(n) = min(INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(n-1), MAX_BACKOFF)
 | 3     | 40 s                    | 8 s                     | 270 s                       |
 | 4     | 80 s                    | 16 s                    | 600 s (capped)              |
 
-**Choosing values.** The decision rule is retry while `failure_count <= MAX_RETRIES`, otherwise roll back if `failure_count > ROLLBACK_THRESHOLD` and a previous version exists (see [Data Flow](../architecture/data-flow.md#the-decision-rule)). Because retries are checked first:
+**Choosing values.** The decision rule is retry while `failure_count <= MAX_RETRIES`, otherwise roll back if a previous version exists and the failed version is the one running (see [Data Flow](../architecture/data-flow.md#the-decision-rule)):
 
-- `MAX_RETRIES=3, ROLLBACK_THRESHOLD=2` (default): three retries, rollback on the fourth failure.
-- `MAX_RETRIES=1, ROLLBACK_THRESHOLD=1`: one retry, rollback on the second failure. Good for fast-moving staging environments.
+- `MAX_RETRIES=3` (default): three retries, rollback on the fourth failure.
+- `MAX_RETRIES=1`: one retry, rollback on the second failure. Good for fast-moving staging environments.
 - `MAX_RETRIES=0` is rejected by validation, so at least one retry is always attempted before a rollback. There is currently no "roll back immediately" mode.
-- Avoid `ROLLBACK_THRESHOLD > MAX_RETRIES`: the failures in between result in an alert, not a rollback.
+- `ROLLBACK_THRESHOLD` was removed. If it is still set, the orchestrator logs a deprecation warning and ignores it.
 
 The worst-case time spent retrying before a rollback is the sum of the backoff delays plus the time each re-run takes. With the defaults that is 70 s of backoff alone. If your target MTTR is under a minute, lower `INITIAL_BACKOFF` and `MAX_RETRIES`.
 
@@ -121,7 +120,7 @@ Both values are loaded and validated into the config object, but the logging set
 
 === "Docker Compose"
 
-    Set values under `services.orchestrator.environment` in `docker-compose.yml`. The shipped file sets `REDIS_HOST=redis`, `MAX_RETRIES=3`, `ROLLBACK_THRESHOLD=2` and `LOG_LEVEL=INFO`. Add `GITHUB_TOKEN` and `GITHUB_REPO` there (or via an `env_file`) to enable retries.
+    Set values under `services.orchestrator.environment` in `docker-compose.yml`. The shipped file sets `REDIS_HOST=redis`, `MAX_RETRIES=3` and `LOG_LEVEL=INFO`. Add `GITHUB_TOKEN` and `GITHUB_REPO` there (or via an `env_file`) to enable retries.
 
 === "Kubernetes manifests"
 
@@ -136,7 +135,7 @@ Both values are loaded and validated into the config object, but the logging set
 
 === "Terraform"
 
-    The `orchestrator` module exposes `max_retries` and `rollback_threshold` (plus `replicas`, `resources` and Redis options). The Deployment it creates sets only `PORT`, `REDIS_HOST`, `REDIS_PORT`, `MAX_RETRIES`, `ROLLBACK_THRESHOLD` and `LOG_LEVEL`. It does **not** set `GITHUB_TOKEN` or `GITHUB_REPO`, so a Terraform-deployed orchestrator has no GitHub integration (retries cannot trigger re-runs) until you add them. See [Configuration Reference](../reference/configuration.md#terraform-variables).
+    The `orchestrator` module exposes `max_retries` (plus `replicas`, `resources` and Redis options). The Deployment it creates sets only `PORT`, `REDIS_HOST`, `REDIS_PORT`, `MAX_RETRIES` and `LOG_LEVEL`. It does **not** set `GITHUB_TOKEN` or `GITHUB_REPO`, so a Terraform-deployed orchestrator has no GitHub integration (retries cannot trigger re-runs) until you add them. See [Configuration Reference](../reference/configuration.md#terraform-variables).
 
 ## Presets
 
@@ -145,7 +144,6 @@ Copy-paste starting points. Adjust to your risk tolerance.
 ```bash
 # Development: fast feedback
 MAX_RETRIES=2
-ROLLBACK_THRESHOLD=1
 INITIAL_BACKOFF=2.0
 MAX_BACKOFF=30.0
 BACKOFF_MULTIPLIER=2.0
@@ -155,7 +153,6 @@ HEALTH_CHECK_TIMEOUT=3
 ```bash
 # Production: patient, but bounded
 MAX_RETRIES=3
-ROLLBACK_THRESHOLD=2
 INITIAL_BACKOFF=10.0
 MAX_BACKOFF=120.0
 BACKOFF_MULTIPLIER=2.0
@@ -169,7 +166,6 @@ HEALTH_CHECK_TIMEOUT=5
 | Message                                     | Cause                                                    |
 | ------------------------------------------- | -------------------------------------------------------- |
 | `max_retries must be >= 1`                  | `MAX_RETRIES` is 0 or negative                           |
-| `rollback_threshold must be >= 1`           | `ROLLBACK_THRESHOLD` is 0 or negative                    |
 | `initial_backoff must be > 0`               | `INITIAL_BACKOFF` is 0 or negative                       |
 | `max_backoff must be > initial_backoff`     | `MAX_BACKOFF` is less than or equal to `INITIAL_BACKOFF` |
 | `backoff_multiplier must be > 1.0`          | `BACKOFF_MULTIPLIER` is 1.0 or less                      |

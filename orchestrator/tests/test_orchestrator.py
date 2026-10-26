@@ -490,6 +490,47 @@ def container(name, image):
     return item
 
 
+class TestRollbackAfterRetries:
+    """MAX_RETRIES alone decides when retrying stops and rollback starts"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('max_retries,failures,expected', [
+        (1, [1, 2], ['retry', 'rollback']),
+        (2, [1, 2, 3], ['retry', 'retry', 'rollback']),
+        (3, [1, 2, 3, 4], ['retry', 'retry', 'retry', 'rollback']),
+    ])
+    async def test_rollback_follows_the_last_retry(
+        self, orchestrator, max_retries, failures, expected
+    ):
+        orchestrator.max_retries = max_retries
+        store = {}
+
+        def save(state):
+            store[state.deployment_id] = state
+
+        actions = []
+        with patch.object(orchestrator, 'get_deployment_state',
+                          side_effect=lambda deployment_id: store.get(deployment_id)), \
+             patch.object(orchestrator, 'save_deployment_state', side_effect=save), \
+             patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'), \
+             patch.object(orchestrator, 'get_live_version', return_value='1.0.0'), \
+             patch.object(orchestrator, 'trigger_github_workflow_rerun',
+                          new=AsyncMock(return_value=True)), \
+             patch.object(orchestrator, 'rollback_deployment', return_value=True):
+            for _ in failures:
+                result = await orchestrator.handle_deployment_failure(
+                    deployment_id='test-123',
+                    namespace='production',
+                    deployment_name='sample-app',
+                    version='1.0.0',
+                    failure_type=FailureType.DEPLOYMENT_FAILURE,
+                    metadata={'workflow_run_id': '1'}
+                )
+                actions.append(result['action'])
+
+        assert actions == expected
+
+
 class TestLiveVersion:
     """Reading the running version from the Deployment"""
 

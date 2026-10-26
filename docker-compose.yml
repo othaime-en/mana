@@ -55,7 +55,6 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - MAX_RETRIES=3
-      - ROLLBACK_THRESHOLD=2
       - LOG_LEVEL=INFO
     volumes:
       - ~/.kube/config:/root/.kube/config:ro

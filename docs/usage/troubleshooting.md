@@ -205,16 +205,16 @@ Each of these also writes a `manual_intervention_required` audit event.
 
 ### Rollbacks not happening
 
-A rollback needs: the failure count to exceed `MAX_RETRIES` **and** `ROLLBACK_THRESHOLD`, and a known previous version.
+A rollback needs: the failure count to exceed `MAX_RETRIES`, a known previous version, and the failed version to be the one running.
 
 ```bash
-curl -s $MANA/config | jq '{max_retries, rollback_threshold}'
+curl -s $MANA/config | jq '{max_retries}'
 curl -s $MANA/deployment/<id> | jq '{status, retry_count, previous_version}'
 kubectl -n orchestrator exec deploy/redis -- redis-cli get last_successful:<ns>:<app>
 ```
 
 - With the defaults, rollback starts on the **fourth** failure for the same deployment ID.
-- `ROLLBACK_THRESHOLD > MAX_RETRIES` produces `alert` in between; lower it.
+- A `skip` answer means another version is live, so there was nothing to roll back; `alert` for a build or test failure means nothing was deployed.
 - If every attempt uses a new deployment ID the count never grows.
 - To roll back immediately, use `POST /rollback`.
 
@@ -343,7 +343,7 @@ They depend on metrics the orchestrator does not emit yet; see [Monitoring](moni
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | `Cannot connect to Redis: <error>`                                                                                                                                                                                                                         | Redis unreachable; process exits                     |
 | `Cannot load Kubernetes config: <error>`                                                                                                                                                                                                                   | No ServiceAccount token or kubeconfig; process exits |
-| `max_retries must be >= 1`, `rollback_threshold must be >= 1`, `initial_backoff must be > 0`, `max_backoff must be > initial_backoff`, `backoff_multiplier must be > 1.0`, `health_check_timeout must be > 0`, `health_check_port must be between 1-65535` | Validation failures                                  |
+| `max_retries must be >= 1`, `initial_backoff must be > 0`, `max_backoff must be > initial_backoff`, `backoff_multiplier must be > 1.0`, `health_check_timeout must be > 0`, `health_check_port must be between 1-65535` | Validation failures                                  |
 
 ### Runtime
 

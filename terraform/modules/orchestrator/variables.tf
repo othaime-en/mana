@@ -41,12 +41,6 @@ variable "max_retries" {
   default     = 3
 }
 
-variable "rollback_threshold" {
-  description = "Number of failures before rollback"
-  type        = number
-  default     = 2
-}
-
 variable "resources" {
   description = "Resource requests and limits"
   type = object({

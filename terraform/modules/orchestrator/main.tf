@@ -69,11 +69,10 @@ resource "kubernetes_config_map" "orchestrator" {
   }
 
   data = {
-    MAX_RETRIES        = tostring(var.max_retries)
-    ROLLBACK_THRESHOLD = tostring(var.rollback_threshold)
-    REDIS_HOST         = var.redis_enabled ? "redis-service" : "redis"
-    REDIS_PORT         = "6379"
-    LOG_LEVEL          = "INFO"
+    MAX_RETRIES = tostring(var.max_retries)
+    REDIS_HOST  = var.redis_enabled ? "redis-service" : "redis"
+    REDIS_PORT  = "6379"
+    LOG_LEVEL   = "INFO"
   }
 }
 
@@ -284,16 +283,6 @@ resource "kubernetes_deployment" "orchestrator" {
               config_map_key_ref {
                 name = kubernetes_config_map.orchestrator.metadata[0].name
                 key  = "MAX_RETRIES"
-              }
-            }
-          }
-
-          env {
-            name = "ROLLBACK_THRESHOLD"
-            value_from {
-              config_map_key_ref {
-                name = kubernetes_config_map.orchestrator.metadata[0].name
-                key  = "ROLLBACK_THRESHOLD"
               }
             }
           }

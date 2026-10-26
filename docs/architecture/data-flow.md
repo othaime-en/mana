@@ -60,15 +60,15 @@ After incrementing `retry_count`, `handle_deployment_failure()` evaluates these 
    - Backoff is `INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(retry_count - 1)`, capped at `MAX_BACKOFF`.
    - Status becomes `retry_scheduled`; a background task waits for the backoff, then calls the GitHub re-run API.
 2. **Alert, nothing to roll back**: the failure is `build_failure` or `test_failure`. Nothing was deployed, so rollback is never attempted for these types.
-3. **Rollback**: `retry_count > ROLLBACK_THRESHOLD` **and** a previous version is known **and** the failed version is the one running
+3. **Rollback**: retries are exhausted **and** a previous version is known **and** the failed version is the one running
    - Before touching the cluster, the orchestrator reads the image tag the Deployment is running. If it equals the failed `version`, the rollback proceeds.
    - If another version is running (for example the failed version never reached the cluster, or someone already rolled back), the result is **skip**: nothing is changed, the status becomes `failed` and a `rollback_skipped` audit event is written.
    - If the live version cannot be read, or the image is pinned by digest so no tag can be compared, the result is **alert**.
    - Status becomes `rolling_back`, then `rolled_back` on success or `failed` if the rollback does not become healthy.
-4. **Alert**: everything else (no previous version, or the rollback threshold is not yet exceeded)
+4. **Alert**: everything else (for example, no previous version is known)
    - Status becomes `failed` and a `manual_intervention_required` audit event is written.
 
-With the defaults (`MAX_RETRIES=3`, `ROLLBACK_THRESHOLD=2`, `INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
+With the defaults (`MAX_RETRIES=3`, `INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
 
 | Failure # for this deployment ID | Action                                  | Delay |
 | -------------------------------- | --------------------------------------- | ----- |
@@ -77,9 +77,6 @@ With the defaults (`MAX_RETRIES=3`, `ROLLBACK_THRESHOLD=2`, `INITIAL_BACKOFF=10`
 | 3                                | retry                                   | 40 s  |
 | 4                                | rollback (if a previous version exists) | n/a   |
 | 4, no previous version           | alert                                   | n/a   |
-
-!!! tip "How the two thresholds interact"
-Retries are evaluated first, so rollback can only happen once `retry_count` exceeds **both** `MAX_RETRIES` and `ROLLBACK_THRESHOLD`. If `ROLLBACK_THRESHOLD >= MAX_RETRIES`, failures in between produce an `alert` rather than a rollback. In practice `MAX_RETRIES` is the setting that decides when rollback starts; keep `ROLLBACK_THRESHOLD <= MAX_RETRIES`.
 
 ### Executing a rollback
 

@@ -411,7 +411,6 @@ async def get_config():
     """Get orchestrator configuration"""
     return {
         "max_retries": orchestrator.max_retries,
-        "rollback_threshold": orchestrator.rollback_threshold,
         "initial_backoff": orchestrator.initial_backoff,
         "max_backoff": orchestrator.max_backoff,
         "backoff_multiplier": orchestrator.backoff_multiplier,

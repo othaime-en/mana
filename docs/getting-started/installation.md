@@ -106,7 +106,7 @@ This creates all namespaces (`production`, `staging`, `canary`, `orchestrator`, 
 
 Differences from the manual manifests:
 
-- Terraform sets only `PORT`, `REDIS_HOST`, `REDIS_PORT`, `MAX_RETRIES`, `ROLLBACK_THRESHOLD` and `LOG_LEVEL` on the orchestrator. Add `GITHUB_TOKEN` and `GITHUB_REPO` yourself to enable retries.
+- Terraform sets only `PORT`, `REDIS_HOST`, `REDIS_PORT`, `MAX_RETRIES` and `LOG_LEVEL` on the orchestrator. Add `GITHUB_TOKEN` and `GITHUB_REPO` yourself to enable retries.
 - Do not mix `kubectl apply` and Terraform on the same resources; pick one to avoid drift.
 - State is local by default. For teams, switch `backend.tf` to the S3 and DynamoDB example it contains.
 

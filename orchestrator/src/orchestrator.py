@@ -130,7 +130,6 @@ class SelfHealingOrchestrator:
             
             # Retry/Rollback configuration
             self.max_retries = cfg.max_retries
-            self.rollback_threshold = cfg.rollback_threshold
             
             # Exponential backoff configuration
             self.initial_backoff = cfg.initial_backoff
@@ -151,7 +150,6 @@ class SelfHealingOrchestrator:
                 decode_responses=True
             )
             self.max_retries = 3
-            self.rollback_threshold = 2
             self.initial_backoff = 10.0
             self.max_backoff = 300.0
             self.backoff_multiplier = 2.0
@@ -195,7 +193,6 @@ class SelfHealingOrchestrator:
             "Self-Healing Orchestrator initialized successfully",
             extra={
                 "max_retries": self.max_retries,
-                "rollback_threshold": self.rollback_threshold,
                 "initial_backoff": self.initial_backoff,
                 "max_backoff": self.max_backoff,
                 "github_integration": bool(self.github_token and self.github_repo)
@@ -942,7 +939,7 @@ class SelfHealingOrchestrator:
             )
             return self._alert(state, version, reason)
         
-        elif state.retry_count > self.rollback_threshold and state.previous_version:
+        elif state.previous_version:
             blocked = await self._rollback_blocker(state, version)
             if blocked:
                 return blocked

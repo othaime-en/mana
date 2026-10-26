@@ -22,6 +22,32 @@ env:
   ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
 
 jobs:
+  orchestrator-tests:
+    name: Orchestrator Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: orchestrator
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: orchestrator/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage gate
+        run: python -m pytest tests -v --cov=src --cov-report=term-missing --cov-fail-under=75
+
   build:
     name: Build and Test
     runs-on: ubuntu-latest
@@ -70,7 +96,7 @@ jobs:
       - name: Run tests with coverage
         working-directory: ./sample-app
         run: |
-          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing --cov-fail-under=80
 
       - name: Upload coverage
         uses: codecov/codecov-action@v3

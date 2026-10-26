@@ -200,12 +200,3 @@ jobs:
                 \"run_attempt\": \"${{ github.run_attempt }}\"
               }
             }" || echo "⚠️  Failed to notify orchestrator"
-
-      - name: Rollback on failure
-        if: failure()
-        run: |
-          export KUBECONFIG=./kubeconfig
-          echo "⚠️  Deployment failed - initiating rollback"
-          kubectl rollout undo deployment/sample-app -n ${{ inputs.namespace }}
-          kubectl rollout status deployment/sample-app -n ${{ inputs.namespace }} --timeout=5m
-          echo "✓ Rollback completed"

@@ -95,3 +95,10 @@ def test_every_status_a_workflow_can_send_is_accepted(api):
         failure_type = "deployment_failure" if status == "failed" else ""
         parsed = api.WebhookPayload.model_validate(payload(status, failure_type))
         assert parsed.status.value == status
+
+
+def test_orchestrator_is_the_only_rollback_owner():
+    offenders = [
+        name for name, text in all_workflow_texts().items() if "rollout undo" in text
+    ]
+    assert offenders == []

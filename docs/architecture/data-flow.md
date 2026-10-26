@@ -168,11 +168,8 @@ These were found by reading the code and exercising the webhook endpoint against
 !!! warning "1. Retry needs `workflow_run_id`, which is not carried over from earlier webhooks"
 The `in_progress` webhook (which carries `workflow_run_id`) does not create a state record, and the failure handler builds a new state with empty `metadata`. As a result the **first** failure for a deployment ID returns `action: alert` ("missing workflow_run_id") even when the webhook included the ID. Two tests in `orchestrator/tests/test_orchestrator.py` (`test_handle_deployment_failure_retry_with_backoff` and `test_handle_deployment_failure_increasing_backoff`) currently fail for this reason. A fix is to merge `payload.metadata` into the state when it is created.
 
-!!! note "2. The deploy workflow also rolls back on its own"
-The final step of `deploy-environment.yml` runs `kubectl rollout undo` whenever the job fails, independently of the orchestrator. Both mechanisms can act on the same failure. Decide which one owns rollback in your environment and disable the other.
+!!! note "2. GitHub re-runs apply to finished runs"
+GitHub allows re-running a workflow run once it has completed. The webhook is sent from inside the running workflow, so the backoff delay must outlast the remaining steps or the re-run request may be rejected. Monitor the `retries_total` metric and orchestrator logs for `GitHub API permission denied` or non-201 responses.
 
-!!! note "3. GitHub re-runs apply to finished runs"
-GitHub allows re-running a workflow run once it has completed. The webhook is sent from inside the running workflow, so the backoff delay must outlast the remaining steps (including the workflow's own rollback step) or the re-run request may be rejected. Monitor the `retries_total` metric and orchestrator logs for `GitHub API permission denied` or non-201 responses.
-
-!!! note "4. Build-stage failures have nothing to roll back"
+!!! note "3. Build-stage failures have nothing to roll back"
 `build-and-test.yml` reports `build_failure`/`test_failure` with `namespace: ci` and no `workflow_run_id`. These produce an `alert` because no Deployment exists to retry or roll back.

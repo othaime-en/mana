@@ -127,15 +127,15 @@ Rules that matter:
 4. GitHub starts a new attempt of the **same run**. The attempt posts its own `in_progress` and `success` or `failed` events.
 5. After more than `MAX_RETRIES` failures for one deployment ID, the orchestrator patches the Deployment back to the last good version instead.
 
-Timing matters: GitHub allows a re-run only for a run that has finished. The result webhook is sent from inside the run, and the shipped workflow still has a final rollback step after it. A short backoff can therefore reach GitHub while the run is still active and be rejected. Watch the orchestrator log for `Failed to trigger re-run` or `permission denied` lines.
+The workflows never roll back themselves: the orchestrator is the only component that changes the image back. Until the fast-path rollback is built, a failed version therefore stays live while the retries run.
+
+Timing matters: GitHub allows a re-run only for a run that has finished. The result webhook is sent from inside the run, so a short backoff can reach GitHub while the run is still active and be rejected. Watch the orchestrator log for `Failed to trigger re-run` or `permission denied` lines.
 
 ## Recommended Workflow Changes
 
 These small edits bring the workflows in line with the orchestrator's behaviour.
 
-**1. Let one system own rollback.** The final step `Rollback on failure` runs `kubectl rollout undo`. If MANA should decide when to roll back (after retries), remove that step or guard it with `if: false`. If you prefer the immediate pipeline rollback, set `ORCHESTRATOR_URL` only for success notifications and skip the failure webhook.
-
-**2. Send `workflow_run_id` on build-stage failures** if you want them retried (add `"workflow_run_id": "${{ github.run_id }}"` to the `metadata` in `build-and-test.yml`). Note that these events use `namespace: ci`, for which there is no Deployment to roll back.
+**1. Send `workflow_run_id` on build-stage failures** if you want them retried (add `"workflow_run_id": "${{ github.run_id }}"` to the `metadata` in `build-and-test.yml`). Note that these events use `namespace: ci`, for which there is no Deployment to roll back.
 
 ## Sending Webhooks Safely
 

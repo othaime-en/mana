@@ -11,10 +11,6 @@ on:
         description: 'Version to deploy'
         required: true
         type: string
-      deployment-id:
-        description: 'Deployment ID for tracking'
-        required: true
-        type: string
       namespace:
         description: 'Kubernetes namespace'
         required: true
@@ -48,6 +44,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Derive deployment identity
+        id: identity
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+        run: |
+          echo "deployment_id=deploy-${GITHUB_RUN_ID}-${NAMESPACE}" >> "$GITHUB_OUTPUT"
+
       - name: Set up kubectl
         uses: azure/setup-kubectl@v3
         with:
@@ -70,7 +73,7 @@ jobs:
           curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d "{
-              \"deployment_id\": \"${{ inputs.deployment-id }}\",
+              \"deployment_id\": \"${{ steps.identity.outputs.deployment_id }}\",
               \"namespace\": \"${{ inputs.namespace }}\",
               \"app_name\": \"sample-app\",
               \"version\": \"${{ inputs.version }}\",
@@ -79,7 +82,8 @@ jobs:
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
                 \"branch\": \"${{ github.ref_name }}\",
-                \"workflow_run_id\": \"${{ github.run_id }}\"
+                \"workflow_run_id\": \"${{ github.run_id }}\",
+                \"run_attempt\": \"${{ github.run_attempt }}\"
               }
             }" || echo "⚠️  Failed to notify orchestrator"
 
@@ -182,7 +186,7 @@ jobs:
           curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d "{
-              \"deployment_id\": \"${{ inputs.deployment-id }}\",
+              \"deployment_id\": \"${{ steps.identity.outputs.deployment_id }}\",
               \"namespace\": \"${{ inputs.namespace }}\",
               \"app_name\": \"sample-app\",
               \"version\": \"${{ inputs.version }}\",
@@ -192,7 +196,8 @@ jobs:
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
                 \"branch\": \"${{ github.ref_name }}\",
-                \"workflow_run_id\": \"${{ github.run_id }}\"
+                \"workflow_run_id\": \"${{ github.run_id }}\",
+                \"run_attempt\": \"${{ github.run_attempt }}\"
               }
             }" || echo "⚠️  Failed to notify orchestrator"
 

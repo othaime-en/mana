@@ -12,9 +12,6 @@ on:
       version:
         description: 'Generated version tag'
         value: ${{ jobs.build.outputs.version }}
-      deployment_id:
-        description: 'Generated deployment ID'
-        value: ${{ jobs.build.outputs.deployment_id }}
       image_tag:
         description: 'Full image tag'
         value: ${{ jobs.build.outputs.image_tag }}
@@ -30,26 +27,18 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      deployment_id: ${{ steps.deployment.outputs.id }}
       image_tag: ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Generate version and deployment ID
+      - name: Derive version from commit
         id: version
         run: |
-          VERSION="v${GITHUB_SHA::7}-$(date +%s)"
+          VERSION="v${GITHUB_SHA::7}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Generated version: $VERSION"
-
-      - name: Generate deployment ID
-        id: deployment
-        run: |
-          DEPLOYMENT_ID="deploy-$(uuidgen | tr '[:upper:]' '[:lower:]')"
-          echo "id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
-          echo "Generated deployment ID: $DEPLOYMENT_ID"
+          echo "Derived version: $VERSION"
 
       # Python testing and linting
       - name: Set up Python
@@ -188,7 +177,7 @@ jobs:
           curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
             -H "Content-Type: application/json" \
             -d "{
-              \"deployment_id\": \"${{ steps.deployment.outputs.id }}\",
+              \"deployment_id\": \"ci-${{ github.run_id }}\",
               \"namespace\": \"ci\",
               \"app_name\": \"sample-app\",
               \"version\": \"${{ steps.version.outputs.version }}\",
@@ -197,6 +186,7 @@ jobs:
               \"metadata\": {
                 \"commit\": \"${{ github.sha }}\",
                 \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\"
+                \"branch\": \"${{ github.ref_name }}\",
+                \"run_attempt\": \"${{ github.run_attempt }}\"
               }
             }" || echo "Failed to notify orchestrator"

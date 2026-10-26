@@ -31,7 +31,7 @@ The result step derives the outcome from the earlier steps:
 | Anything else (smoke tests)                      | `failed`  | `smoke_test_failure`   |
 
 !!! warning "Fix before relying on retries"
-Three details in the shipped workflows currently prevent the retry to rollback path from working end to end: `smoke_test_failure` is not a value the orchestrator accepts (HTTP 500), the generated `deployment_id` changes on every re-run so the retry counter resets, and the first failure webhook does not find the `workflow_run_id` from the earlier `in_progress` event. The [recommended changes](#recommended-workflow-changes) below and the notes in [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) describe each.
+Two details in the shipped workflows currently prevent the retry to rollback path from working end to end: `smoke_test_failure` is not a value the orchestrator accepts (HTTP 500), and the first failure webhook does not find the `workflow_run_id` from the earlier `in_progress` event. The [recommended changes](#recommended-workflow-changes) below and the notes in [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) describe each.
 
 Deployments are only triggered by **manual dispatch** (`workflow_dispatch` with `deploy_target` set to `staging` or `production`). A push to `main` or `develop` builds, tests and validates in Kind but does not deploy. Because only the deploy workflow sends `success` events, the orchestrator learns a "known good" version only after a successful manual deploy. Until then, rollback relies on the ReplicaSet fallback.
 
@@ -98,24 +98,25 @@ After a successful run the Redis key `last_successful:staging:sample-app` holds 
 
 ```json
 {
-  "deployment_id": "deploy-<unique>",
+  "deployment_id": "deploy-<run_id>-staging",
   "namespace": "staging",
   "app_name": "sample-app",
-  "version": "v1a2b3c4-1760000000",
+  "version": "v1a2b3c4",
   "status": "in_progress | success | failed",
   "failure_type": "build_failure | test_failure | deployment_failure | health_check_failure | timeout",
   "metadata": {
     "commit": "<sha>",
     "author": "<actor>",
     "branch": "<ref>",
-    "workflow_run_id": "<github.run_id>"
+    "workflow_run_id": "<github.run_id>",
+    "run_attempt": "<github.run_attempt>"
   }
 }
 ```
 
 Rules that matter:
 
-- `deployment_id` must be **stable across retry attempts** of the same logical deployment, or the retry counter resets.
+- `deployment_id` must be **stable across retry attempts** of the same logical deployment, or the retry counter resets. The shipped workflows use `deploy-<github.run_id>-<namespace>`, which a GitHub re-run keeps, and derive `version` from the commit SHA (`v<sha7>`) for the same reason.
 - `app_name` must equal the Kubernetes Deployment name, its `app` label and its container name.
 - `version` must equal the image tag you deploy, since rollback swaps tags.
 - `workflow_run_id` must be present on every webhook for a deployment that you want retried.
@@ -135,17 +136,7 @@ Timing matters: GitHub allows a re-run only for a run that has finished. The res
 
 These small edits bring the workflows in line with the orchestrator's behaviour.
 
-**1. Use a stable deployment ID** (`build-and-test.yml`):
-
-```yaml
-- name: Generate deployment ID
-  id: deployment
-  run: echo "id=deploy-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
-```
-
-`GITHUB_RUN_ID` stays the same across re-run attempts, so `retry_count` accumulates and rollback is eventually reached.
-
-**2. Map smoke-test failures to a known type** (`deploy-environment.yml`, "Determine deployment status"):
+**1. Map smoke-test failures to a known type** (`deploy-environment.yml`, "Determine deployment status"):
 
 ```yaml
 else
@@ -154,9 +145,9 @@ echo "failure_type=deployment_failure" >> $GITHUB_OUTPUT
 fi
 ```
 
-**3. Let one system own rollback.** The final step `Rollback on failure` runs `kubectl rollout undo`. If MANA should decide when to roll back (after retries), remove that step or guard it with `if: false`. If you prefer the immediate pipeline rollback, set `ORCHESTRATOR_URL` only for success notifications and skip the failure webhook.
+**2. Let one system own rollback.** The final step `Rollback on failure` runs `kubectl rollout undo`. If MANA should decide when to roll back (after retries), remove that step or guard it with `if: false`. If you prefer the immediate pipeline rollback, set `ORCHESTRATOR_URL` only for success notifications and skip the failure webhook.
 
-**4. Send `workflow_run_id` on build-stage failures** if you want them retried (add `"workflow_run_id": "${{ github.run_id }}"` to the `metadata` in `build-and-test.yml`). Note that these events use `namespace: ci`, for which there is no Deployment to roll back.
+**3. Send `workflow_run_id` on build-stage failures** if you want them retried (add `"workflow_run_id": "${{ github.run_id }}"` to the `metadata` in `build-and-test.yml`). Note that these events use `namespace: ci`, for which there is no Deployment to roll back.
 
 The orchestrator also needs a code change for the first-failure case: copy `payload.metadata` into the new state in `handle_deployment_failure` (or save a state on `in_progress`). Until then, the first failure returns `action: alert`.
 

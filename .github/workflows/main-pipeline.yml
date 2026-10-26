@@ -50,7 +50,6 @@ jobs:
     with:
       environment: staging
       version: ${{ needs.build-test-publish.outputs.version }}
-      deployment-id: ${{ needs.build-test-publish.outputs.deployment_id }}
       namespace: staging
 
   # Deploy to production (conditional)
@@ -62,7 +61,6 @@ jobs:
     with:
       environment: production
       version: ${{ needs.build-test-publish.outputs.version }}
-      deployment-id: ${{ needs.build-test-publish.outputs.deployment_id }}
       namespace: production
       smoke-tests: true
       health-check-timeout: 60

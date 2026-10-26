@@ -11,12 +11,15 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 - Complete documentation set under `docs/` (published with MkDocs): architecture, configuration, usage, reference, contributing and about sections (PR #9).
 
+### Fixed
+
+- `deployment_id` is now `deploy-<run_id>-<namespace>` and the image version is `v<sha7>`, so a workflow re-run reports the same deployment and the retry counter accumulates (CORE-01). Webhook metadata now carries `run_attempt`.
+
 ### Known issues
 
 These are confirmed by the current code and are tracked in [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations):
 
 - The first failure webhook for a deployment returns `alert` instead of `retry`, because `workflow_run_id` from earlier webhooks is not stored in the new state. Two orchestrator unit tests fail for this reason.
-- `deployment_id` is regenerated on each workflow re-run, so the retry counter never accumulates and the rollback branch is not reached through the webhook path.
 - `failure_type: smoke_test_failure` (sent by `deploy-environment.yml`) is rejected with HTTP 500.
 - `GET /metrics/deployment/{namespace}/{deployment_name}` is shadowed by the Prometheus mount and returns Prometheus text.
 - Metrics `deployment_duration_seconds` and `active_deployments` are declared but never updated; several alerts reference metrics the orchestrator does not emit.

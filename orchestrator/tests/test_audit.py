@@ -1,6 +1,7 @@
 import pytest
 import json
 import logging
+from datetime import datetime, timezone
 from io import StringIO
 from src.utils import (
     AuditLogger,
@@ -151,6 +152,20 @@ class TestAuditLogger:
             )
         
         assert 'rollback_failed' in caplog.text
+    
+    def test_event_timestamp_is_utc_with_z_suffix(self, audit_logger, caplog):
+        """Timestamps keep the ISO 8601 UTC form that log parsers expect"""
+        before = datetime.now(timezone.utc)
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_event(action=AuditAction.STATE_SAVED)
+        after = datetime.now(timezone.utc)
+        
+        timestamp = json.loads(caplog.records[-1].audit_event)['timestamp']
+        
+        assert timestamp.endswith('Z')
+        assert '+00:00' not in timestamp
+        parsed = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        assert before <= parsed <= after
     
     def test_log_rollback_skipped(self, audit_logger, caplog):
         """Test skipped rollback logging"""

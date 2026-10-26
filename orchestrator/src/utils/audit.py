@@ -6,7 +6,7 @@ Provides structured, searchable audit trail for compliance and debugging.
 import logging
 import json
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -67,7 +67,7 @@ class AuditLogger:
             error: Error message if action failed
         """
         audit_event = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "service": self.service_name,
             "action": action.value,
             "success": success,

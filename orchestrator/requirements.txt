@@ -4,4 +4,4 @@ redis==5.2.1
 kubernetes==31.0.0
 pydantic==2.9.2
 prometheus-client==0.24.0
-requests==2.32.3
+requests==2.34.2

@@ -48,8 +48,8 @@ Current baseline (at the time of writing):
 
 | Suite          | Result     | Coverage | CI gate |
 | -------------- | ---------- | -------- | ------- |
-| `sample-app`   | 35 passed  | 84%      | 80%     |
-| `orchestrator` | 121 passed | 75%      | 75%     |
+| `sample-app`   | 46 passed  | 93%      | 80%     |
+| `orchestrator` | 122 passed | 75%      | 75%     |
 
 CI runs both suites on every push and pull request, and fails when coverage drops below the gate. Raise the gate in `.github/workflows/build-and-test.yml` as coverage improves (the orchestrator target is 85%).
 

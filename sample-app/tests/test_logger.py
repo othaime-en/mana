@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime, timezone
 from io import StringIO
 from src.utils.logger import (
     setup_logging,
@@ -13,6 +14,23 @@ from src.utils.logger import (
 
 class TestJSONFormatter:
     """Test JSON log formatter"""
+    
+    def test_timestamp_is_utc_with_z_suffix(self):
+        """Timestamps keep the ISO 8601 UTC form that log parsers expect"""
+        formatter = JSONFormatter(app_name='test-app', environment='test')
+        record = logging.LogRecord(
+            name='test', level=logging.INFO, pathname='test.py', lineno=1,
+            msg='Test message', args=(), exc_info=None
+        )
+        before = datetime.now(timezone.utc)
+        
+        timestamp = json.loads(formatter.format(record))['timestamp']
+        after = datetime.now(timezone.utc)
+        
+        assert timestamp.endswith('Z')
+        assert '+00:00' not in timestamp
+        parsed = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        assert before <= parsed <= after
     
     def test_json_formatter_basic(self):
         """Test basic JSON formatting"""

@@ -16,6 +16,7 @@ class GracefulShutdown:
     def __init__(self):
         self.shutdown_handlers: List[Callable] = []
         self.is_shutting_down = False
+        self._cleanup_done = False
         self._setup_signal_handlers()
     
     def _setup_signal_handlers(self):
@@ -44,7 +45,11 @@ class GracefulShutdown:
         sys.exit(0)
     
     def _cleanup(self):
-        """Execute all registered cleanup handlers"""
+        """Execute all registered cleanup handlers once"""
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+        
         if not self.shutdown_handlers:
             logger.info("No cleanup handlers to execute")
             return

@@ -184,7 +184,7 @@ The rollback branch runs synchronously inside the request, including the health 
 
 ## `POST /rollback`
 
-Rolls a Deployment back to a specific version without any retry logic. The image tag of the container named `deployment_name` is replaced and the `version` labels are updated, then health is verified.
+Rolls a Deployment back to a specific version without any retry logic. The image tag of the application container (named `deployment_name`, or the only container) is replaced and the `version` labels are updated, then health is verified.
 
 | Field             | Type   | Required | Description             |
 | ----------------- | ------ | -------- | ----------------------- |

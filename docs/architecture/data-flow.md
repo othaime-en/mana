@@ -82,11 +82,13 @@ With the defaults (`MAX_RETRIES=3`, `INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`
 
 `rollback_deployment()` performs these steps:
 
-1. Read the Deployment from Kubernetes.
-2. For the container whose **name equals the deployment name**, replace the image tag with the target version (the registry and repository part of the image is preserved).
-3. Set the `version` label on the Deployment and on the pod template.
-4. `PATCH` the Deployment. Kubernetes performs a normal rolling update back to the old image.
-5. Wait for health (see below). Success writes `rollback_completed` to the audit log; failure writes `rollback_failed` and the decision becomes `alert`.
+1. Read the Deployment from Kubernetes and find the application container: the one **named like the Deployment**, or the only container if there is exactly one. If neither applies, the rollback fails without changing anything.
+2. Build the target image from the running one. The registry (including a port) and repository are preserved, the tag is replaced, and a digest is dropped.
+3. `PATCH` only that container's image and the `version` labels (Deployment and pod template). Kubernetes performs a normal rolling update back to the old image.
+4. Check that the Deployment reports the target image after the patch. If not, the rollback fails.
+5. Wait for the new revision to finish rolling out (the controller observed the patched generation, every replica is updated and no old replicas remain), then for health (see below). Success writes `rollback_completed` to the audit log; failure writes `rollback_failed` and the decision becomes `alert`.
+
+Any error during these steps, not only Kubernetes API errors, counts as a failed rollback and is recorded in `rollback_failed` with the error type. `rollback_initiated` records the version that was actually running.
 
 ### Previous-version resolution
 

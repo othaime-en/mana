@@ -572,30 +572,189 @@ class TestLiveVersion:
             find_container(deployment_with(), 'sample-app')
 
 
-class TestEnhancedRollback:
-    """Test enhanced rollback with audit logging"""
-    
-    def test_rollback_deployment_with_audit(self, orchestrator):
-        """Test rollback includes audit logging"""
-        mock_deployment = Mock()
-        mock_deployment.spec.template.spec.containers = [
-            Mock(name='sample-app', image='sample-app:1.0.0')
-        ]
-        mock_deployment.metadata.labels = {'version': '1.0.0'}
-        mock_deployment.spec.template.metadata.labels = {'version': '1.0.0'}
-        
-        orchestrator.k8s_apps.read_namespaced_deployment.return_value = mock_deployment
-        orchestrator.k8s_apps.patch_namespaced_deployment.return_value = mock_deployment
-        
-        with patch.object(orchestrator, 'check_deployment_health', return_value=True):
+def serve(orchestrator, *containers, generation=7):
+    """Make the fake API server return a Deployment and apply image patches"""
+    orchestrator.k8s_apps.read_namespaced_deployment.return_value = deployment_with(*containers)
+
+    def apply(name, namespace, body):
+        patch_container = body['spec']['template']['spec']['containers'][0]
+        patched = deployment_with(container(patch_container['name'], patch_container['image']))
+        patched.metadata.generation = generation
+        return patched
+
+    orchestrator.k8s_apps.patch_namespaced_deployment.side_effect = apply
+
+
+class TestRollbackDeployment:
+    """Rollback patches only the image and waits for the new revision"""
+
+    def roll_back(self, orchestrator, **kwargs):
+        with patch.object(orchestrator, 'check_deployment_health', return_value=True) as health:
             result = orchestrator.rollback_deployment(
-                'production',
-                'sample-app',
-                '0.9.0',
-                deployment_id='test-123'
+                'production', 'sample-app', '0.9.0', deployment_id='test-123', **kwargs
             )
-            
-            assert result is True
+        return result, health
+
+    def test_patches_only_the_image_and_version_labels(self, orchestrator):
+        serve(orchestrator, container('sample-app', 'ghcr.io/o/sample-app:1.0.0'))
+
+        result, _ = self.roll_back(orchestrator)
+
+        assert result is True
+        body = orchestrator.k8s_apps.patch_namespaced_deployment.call_args.kwargs['body']
+        assert body == {
+            'metadata': {'labels': {'version': '0.9.0'}},
+            'spec': {'template': {
+                'metadata': {'labels': {'version': '0.9.0'}},
+                'spec': {'containers': [
+                    {'name': 'sample-app', 'image': 'ghcr.io/o/sample-app:0.9.0'}
+                ]}
+            }}
+        }
+
+    def test_waits_for_the_patched_generation(self, orchestrator):
+        serve(orchestrator, container('sample-app', 'sample-app:1.0.0'), generation=12)
+
+        _, health = self.roll_back(orchestrator)
+
+        assert health.call_args.kwargs['expected_generation'] == 12
+
+    @pytest.mark.parametrize('image,expected', [
+        ('localhost:5000/sample-app:1.0.0', 'localhost:5000/sample-app:0.9.0'),
+        ('localhost:5000/sample-app', 'localhost:5000/sample-app:0.9.0'),
+        ('sample-app@sha256:' + 'a' * 64, 'sample-app:0.9.0'),
+    ])
+    def test_builds_the_target_image_from_any_reference_form(self, orchestrator, image, expected):
+        serve(orchestrator, container('sample-app', image))
+
+        result, _ = self.roll_back(orchestrator)
+
+        assert result is True
+        body = orchestrator.k8s_apps.patch_namespaced_deployment.call_args.kwargs['body']
+        assert body['spec']['template']['spec']['containers'][0]['image'] == expected
+
+    def test_patches_a_single_container_with_a_different_name(self, orchestrator):
+        serve(orchestrator, container('web', 'sample-app:1.0.0'))
+
+        result, _ = self.roll_back(orchestrator)
+
+        assert result is True
+        body = orchestrator.k8s_apps.patch_namespaced_deployment.call_args.kwargs['body']
+        assert body['spec']['template']['spec']['containers'][0]['name'] == 'web'
+
+    def test_fails_without_patching_when_the_container_is_ambiguous(self, orchestrator):
+        serve(orchestrator, container('a', 'a:1'), container('b', 'b:1'))
+
+        result, health = self.roll_back(orchestrator)
+
+        assert result is False
+        orchestrator.k8s_apps.patch_namespaced_deployment.assert_not_called()
+        health.assert_not_called()
+
+    def test_fails_when_the_patch_did_not_change_the_image(self, orchestrator):
+        serve(orchestrator, container('sample-app', 'sample-app:1.0.0'))
+        orchestrator.k8s_apps.patch_namespaced_deployment.side_effect = None
+        orchestrator.k8s_apps.patch_namespaced_deployment.return_value = deployment_with(
+            container('sample-app', 'sample-app:1.0.0')
+        )
+
+        result, health = self.roll_back(orchestrator)
+
+        assert result is False
+        health.assert_not_called()
+
+    @pytest.mark.parametrize('error', [
+        ApiException(status=409, reason='Conflict'),
+        RuntimeError('connection reset'),
+        TypeError('unexpected response'),
+    ])
+    def test_any_error_during_the_patch_is_a_failed_rollback(self, orchestrator, error):
+        serve(orchestrator, container('sample-app', 'sample-app:1.0.0'))
+        orchestrator.k8s_apps.patch_namespaced_deployment.side_effect = error
+
+        result, health = self.roll_back(orchestrator)
+
+        assert result is False
+        health.assert_not_called()
+
+    def test_unhealthy_rollout_is_a_failed_rollback(self, orchestrator):
+        serve(orchestrator, container('sample-app', 'sample-app:1.0.0'))
+
+        with patch.object(orchestrator, 'check_deployment_health', return_value=False):
+            result = orchestrator.rollback_deployment(
+                'production', 'sample-app', '0.9.0', deployment_id='test-123'
+            )
+
+        assert result is False
+
+    def test_audit_trail_records_the_running_version_and_reason(self, orchestrator):
+        serve(orchestrator, container('sample-app', 'sample-app:1.0.0'))
+
+        with patch('src.orchestrator.audit_logger') as audit:
+            self.roll_back(orchestrator, reason='manual rollback requested')
+
+        initiated = audit.log_rollback_initiated.call_args.kwargs
+        assert initiated['current_version'] == '1.0.0'
+        assert initiated['reason'] == 'manual rollback requested'
+        audit.log_rollback_completed.assert_called_once()
+
+    def test_failure_is_audited_with_the_error_type(self, orchestrator):
+        serve(orchestrator, container('a', 'a:1'), container('b', 'b:1'))
+
+        with patch('src.orchestrator.audit_logger') as audit:
+            self.roll_back(orchestrator)
+
+        assert 'ContainerNotFoundError' in audit.log_rollback_failed.call_args.kwargs['error']
+
+
+def rollout_status(*, generation=2, observed=2, replicas=3, updated=3, total=3, ready=3):
+    deployment = Mock()
+    deployment.spec.replicas = replicas
+    deployment.status.observed_generation = observed
+    deployment.status.updated_replicas = updated
+    deployment.status.replicas = total
+    deployment.status.ready_replicas = ready
+    return deployment
+
+
+class TestRolloutCompletion:
+    """A rollback only counts once the new revision replaced the old one"""
+
+    @pytest.mark.parametrize('kwargs,expected', [
+        ({}, True),
+        ({'observed': 1}, False),
+        ({'updated': 1}, False),
+        ({'total': 4}, False),
+        ({'updated': None, 'total': None}, False),
+    ])
+    def test_rollout_complete(self, kwargs, expected):
+        from src.orchestrator import rollout_complete
+
+        assert rollout_complete(rollout_status(**kwargs), generation=2) is expected
+
+    def test_old_ready_replicas_do_not_pass_the_health_check(self, orchestrator):
+        orchestrator.k8s_apps.read_namespaced_deployment.return_value = rollout_status(
+            observed=1, updated=0, total=3, ready=3
+        )
+
+        with patch('src.orchestrator.time.sleep'), \
+             patch.object(orchestrator, 'check_application_health', return_value=True) as app:
+            healthy = orchestrator.check_deployment_health(
+                'production', 'sample-app', timeout=0.2, expected_generation=2
+            )
+
+        assert healthy is False
+        app.assert_not_called()
+
+    def test_completed_rollout_passes_the_health_check(self, orchestrator):
+        orchestrator.k8s_apps.read_namespaced_deployment.return_value = rollout_status()
+
+        with patch.object(orchestrator, 'check_application_health', return_value=True):
+            healthy = orchestrator.check_deployment_health(
+                'production', 'sample-app', timeout=5, expected_generation=2
+            )
+
+        assert healthy is True
 
 
 class TestSaveAndRetrieveState:

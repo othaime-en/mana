@@ -286,7 +286,8 @@ async def manual_rollback(request: RollbackRequest):
             namespace=request.namespace,
             deployment_name=request.deployment_name,
             target_version=request.target_version,
-            deployment_id=deployment_id
+            deployment_id=deployment_id,
+            reason="manual rollback requested"
         )
         
         if success:

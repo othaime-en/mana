@@ -119,7 +119,7 @@ curl -s -X POST $MANA/rollback -H 'Content-Type: application/json' \
 }
 ```
 
-The image tag of the container named `sample-app` is replaced, the `version` labels are updated, and health is verified. If the rollback is not healthy the call returns HTTP 500. Manual rollbacks are audited and counted (`rollbacks_total{reason="manual"}`) but do not create a stored deployment record. Use this when you want MANA's verification and audit trail instead of a plain `kubectl rollout undo`.
+The image tag of the application container (named like the Deployment, or the only container) is replaced, the `version` labels are updated, and health is verified. If the rollback is not healthy the call returns HTTP 500. Manual rollbacks are audited and counted (`rollbacks_total{reason="manual"}`) but do not create a stored deployment record. Use this when you want MANA's verification and audit trail instead of a plain `kubectl rollout undo`.
 
 ### Simulate a pipeline event
 

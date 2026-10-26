@@ -227,7 +227,7 @@ kubectl -n production rollout status deployment/sample-app
 kubectl -n production get deploy sample-app -o jsonpath='{.spec.template.spec.containers[*].name}{"\n"}'
 ```
 
-- The **container name must equal the Deployment name**; the orchestrator edits only that container.
+- The **container name must equal the Deployment name** unless the pod has a single container; with several containers and no match the rollback fails and says so in `rollback_failed`.
 - The target image tag must exist and be pullable (`ErrImagePull` otherwise).
 - Resource quotas or scheduling problems can stop the old version from starting.
 - Verification also needs the health endpoint to answer; see below.

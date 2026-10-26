@@ -1,0 +1,3 @@
+# One virtualenv for working on both components
+-r orchestrator/requirements-dev.txt
+-r sample-app/requirements.txt

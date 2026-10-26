@@ -150,7 +150,7 @@ Expected output:
 
 ```text
 --- failure #1
-{"action":"alert","message":"Cannot retry - missing workflow_run_id. Manual intervention required."}
+{"action":"retry","retry_count":1,"backoff_seconds":10.0,"workflow_run_id":"1","message":"Retry 1/3 scheduled in 10.0s"}
 --- failure #2
 {"action":"retry","retry_count":2,"backoff_seconds":20.0,"workflow_run_id":"1","message":"Retry 2/3 scheduled in 20.0s"}
 --- failure #3
@@ -163,8 +163,7 @@ What happened:
 
 | Failure | Decision   | Why                                                                                                                                                                                                                                                                                    |
 | ------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1       | `alert`    | The first failure for a new deployment ID has no stored `workflow_run_id` yet (a known limitation; see [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations))                                                                                                     |
-| 2, 3    | `retry`    | Within `MAX_RETRIES=3`; a workflow re-run is scheduled after 20 s and 40 s of backoff. Because the token is a placeholder, GitHub rejects the re-run request (an error such as `Failed to trigger re-run: 401` appears in the logs after the backoff), which is harmless for this demo |
+| 1, 2, 3 | `retry`    | Within `MAX_RETRIES=3`; a workflow re-run is scheduled after 10 s, 20 s and 40 s of backoff. Because the token is a placeholder, GitHub rejects the re-run request (an error such as `Failed to trigger re-run: 401` appears in the logs after the backoff), which is harmless for this demo |
 | 4       | `rollback` | `retry_count` (4) now exceeds `MAX_RETRIES`, a previous version (`1.0.0`) is known, and the failed version is the one running                                                                                                                                                                   |
 
 The fourth call takes a few seconds: the orchestrator patches the Deployment back to `sample-app:1.0.0`, waits for all replicas to be ready, and calls each pod's `/health` endpoint before answering.

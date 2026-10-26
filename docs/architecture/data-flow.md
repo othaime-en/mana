@@ -56,7 +56,7 @@ The important side effect is `last_successful:<namespace>:<app_name>`. That valu
 After incrementing `retry_count`, `handle_deployment_failure()` evaluates these conditions **in order**:
 
 1. **Retry**: `retry_count <= MAX_RETRIES`
-   - Requires `workflow_run_id` in the stored state's `metadata`. If it is missing, the result is **alert** instead.
+   - Requires `workflow_run_id` in the state's `metadata`, which is filled from the failure webhook's own `metadata` and from earlier state for the same deployment ID. If it is missing, the result is **alert** instead.
    - Backoff is `INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(retry_count - 1)`, capped at `MAX_BACKOFF`.
    - Status becomes `retry_scheduled`; a background task waits for the backoff, then calls the GitHub re-run API.
 2. **Alert, nothing to roll back**: the failure is `build_failure` or `test_failure`. Nothing was deployed, so rollback is never attempted for these types.
@@ -168,11 +168,8 @@ See [Monitoring](../usage/monitoring.md) for the complete list, including metric
 
 These were found by reading the code and exercising the webhook endpoint against mocked Redis and Kubernetes clients. They are documented here so that operators are not surprised, and are good candidates for follow-up issues.
 
-!!! warning "1. Retry needs `workflow_run_id`, which is not carried over from earlier webhooks"
-The `in_progress` webhook (which carries `workflow_run_id`) does not create a state record, and the failure handler builds a new state with empty `metadata`. As a result the **first** failure for a deployment ID returns `action: alert` ("missing workflow_run_id") even when the webhook included the ID. Two tests in `orchestrator/tests/test_orchestrator.py` (`test_handle_deployment_failure_retry_with_backoff` and `test_handle_deployment_failure_increasing_backoff`) currently fail for this reason. A fix is to merge `payload.metadata` into the state when it is created.
-
-!!! note "2. GitHub re-runs apply to finished runs"
+!!! note "1. GitHub re-runs apply to finished runs"
 GitHub allows re-running a workflow run once it has completed. The webhook is sent from inside the running workflow, so the backoff delay must outlast the remaining steps or the re-run request may be rejected. Monitor the `retries_total` metric and orchestrator logs for `GitHub API permission denied` or non-201 responses.
 
-!!! note "3. Build-stage failures have nothing to roll back"
+!!! note "2. Build-stage failures have nothing to roll back"
 `build-and-test.yml` reports `build_failure`/`test_failure` with `namespace: ci` and no `workflow_run_id`. These produce an `alert` because no Deployment exists to retry or roll back. The orchestrator also never rolls back for these two types, even when a `workflow_run_id` is present and retries are exhausted.

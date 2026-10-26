@@ -239,7 +239,7 @@ kubectl -n orchestrator exec deploy/redis -- redis-cli ttl 'deployment:<deployme
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | MANA does not seem to react to a deployment          | Is the pipeline actually posting webhooks? `kubectl logs ... \| grep webhook`. Is `ORCHESTRATOR_URL` reachable from the runner?       |
 | `GET /deployment/<id>` returns 404                   | The ID is wrong, the state expired (24 h), or the webhook was `in_progress`/`success` only (these do not store state)                 |
-| Responses say `alert` with "missing workflow_run_id" | The failure state has no `workflow_run_id`; see [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations)            |
+| Responses say `alert` with "missing workflow_run_id" | The failure webhook has no `metadata.workflow_run_id`; add it so a retry can be scheduled                                              |
 | Retries are scheduled but nothing re-runs            | `GITHUB_TOKEN` or `GITHUB_REPO` is missing or invalid, or the run was still active; check logs for `Failed to trigger re-run`         |
 | Rollback says "No previous version"                  | No success webhook was ever recorded and pods have no `version` label                                                                 |
 | Rollback is unhealthy                                | Wrong `HEALTH_CHECK_PORT`/`PATH`, image pull problems, or a NetworkPolicy blocking the orchestrator; test the endpoint as shown above |

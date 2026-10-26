@@ -13,6 +13,7 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 ### Fixed
 
+- The first failure webhook for a deployment now returns `retry` instead of `alert`: the webhook's `metadata`, including `workflow_run_id`, is carried into the failure state (PR #31).
 - `deployment_id` is now `deploy-<run_id>-<namespace>` and the image version is `v<sha7>`, so a workflow re-run reports the same deployment and the retry counter accumulates (CORE-01). Webhook metadata now carries `run_attempt`.
 - `failure_type: smoke_test_failure` is accepted. `status` and `failure_type` are validated as enums, so unknown values return HTTP 422 instead of 500, an empty `failure_type` counts as absent, and `status: failed` requires a `failure_type` (CORE-13, TEST-04).
 - Rollback guards (CORE-16): the orchestrator never rolls back for `build_failure` or `test_failure`, and rolls back only when the image tag running in the cluster equals the failed version. Otherwise it answers `skip` (another version is live) or `alert` (the live version cannot be read or compared) and writes a `rollback_skipped` audit event for a skip. The workflows no longer run `kubectl rollout undo`, so the orchestrator is the only rollback owner (CORE-04).
@@ -25,7 +26,6 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 These are confirmed by the current code and are tracked in [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations):
 
-- The first failure webhook for a deployment returns `alert` instead of `retry`, because `workflow_run_id` from earlier webhooks is not stored in the new state. Two orchestrator unit tests fail for this reason.
 - `GET /metrics/deployment/{namespace}/{deployment_name}` is shadowed by the Prometheus mount and returns Prometheus text.
 - Metrics `deployment_duration_seconds` and `active_deployments` are declared but never updated; several alerts reference metrics the orchestrator does not emit.
 - `LOG_LEVEL` and `ENABLE_AUDIT_LOGGING` are parsed but not applied.
@@ -89,6 +89,7 @@ These are confirmed by the current code and are tracked in [Data Flow: Known Beh
 
 ### Fixed
 
+- The first failure webhook for a deployment now returns `retry` instead of `alert`: the webhook's `metadata`, including `workflow_run_id`, is carried into the failure state (PR #31).
 - `app.start_time` initialised at import so readiness works under WSGI servers.
 
 ## Milestone 1: Initial implementation (December 2025 to January 2026)

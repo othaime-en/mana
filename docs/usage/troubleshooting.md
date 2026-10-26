@@ -188,7 +188,7 @@ The role needs `get/list/watch/update/patch` on Deployments and ReplicaSets and 
 
 | `message`                                                               | Meaning                                                                                                                                                          | Fix                                                                                                                                                   |
 | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Cannot retry - missing workflow_run_id. Manual intervention required.` | The stored state has no `workflow_run_id`. The first failure for a new deployment ID always hits this today; later failures include it if the payload carries it | Include `metadata.workflow_run_id` on every webhook. See [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations) |
+| `Cannot retry - missing workflow_run_id. Manual intervention required.` | The failure webhook carried no `metadata.workflow_run_id` and no earlier webhook for this deployment ID stored one | Include `metadata.workflow_run_id` on the failure webhook (the shipped deploy workflow does; the build-stage webhook does not) |
 | `No previous version available - manual intervention required`          | No `last_successful:<ns>:<app>` key and no versioned ReplicaSet                                                                                                  | Report a `success` webhook for a good deployment; label pods with `version`                                                                           |
 | `Rollback failed - manual intervention required`                        | The rolled-back Deployment did not become healthy in time                                                                                                        | [Rollbacks not succeeding](#rollbacks-not-succeeding)                                                                                                 |
 
@@ -315,7 +315,7 @@ No. GitHub (`GITHUB_TOKEN`, `GITHUB_REPO`) is only used to re-run workflows for 
 By default four failures for the same deployment ID: three retries, then rollback.
 
 **Why did my first failure return `alert`?**
-The first failure for a new deployment ID has no stored `workflow_run_id`, so a retry cannot be scheduled. See the [known behaviours](../architecture/data-flow.md#known-behaviours-and-limitations).
+The failure webhook had no `metadata.workflow_run_id`, so a retry cannot be scheduled. The ID is read from the webhook that reports the failure (or from earlier state for the same deployment ID).
 
 **Can I run MANA without Redis?**
 No. Startup fails without it.

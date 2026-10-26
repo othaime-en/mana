@@ -131,4 +131,4 @@ See [Contributing](../contributing/contributing.md) for conventions.
 
 ## Known Limitations
 
-Behaviours that differ from the intended design (retry state carry-over, deployment ID stability, one unsupported failure type, a shadowed metrics route, and some alerts without matching metrics) are listed with explanations on the [Data Flow](data-flow.md#known-behaviours-and-limitations) page.
+Behaviours that differ from the intended design (re-run semantics, a shadowed metrics route, and some alerts without matching metrics) are listed with explanations on the [Data Flow](data-flow.md#known-behaviours-and-limitations) page.

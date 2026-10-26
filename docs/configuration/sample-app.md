@@ -107,8 +107,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/health  # 200
 
 Pods stay Ready because `/health` and `/ready` are unaffected, but the production smoke tests (`/`, `/api/data`) and the `flask_http_request_total{status="500"}` metric will show the failure.
 
-!!! warning
-A smoke-test failure reaches the orchestrator as `failure_type=smoke_test_failure`, which the orchestrator currently rejects with HTTP 500. See [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations).
+A smoke-test failure reaches the orchestrator as `failure_type=smoke_test_failure`.
 
 ### 3. Bad image (`deployment_failure`)
 

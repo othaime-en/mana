@@ -177,7 +177,7 @@ The role needs `get/list/watch/update/patch` on Deployments and ReplicaSets and 
 | Response                                      | Cause                                                         | Fix                                                                                            |
 | --------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `422`                                         | A required field is missing or has the wrong type             | Include `deployment_id`, `namespace`, `app_name`, `version`, `status`; build JSON with `jq`    |
-| `500` with `'...' is not a valid FailureType` | Unsupported `failure_type` (for example `smoke_test_failure`) | Use `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure` or `timeout` |
+| `422` mentioning `failure_type`               | Unknown `failure_type`, or `status: failed` without one      | Use `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure`, `smoke_test_failure` or `timeout` |
 | `500` with a Redis error                      | State could not be saved                                      | [Redis](#cannot-connect-to-redis)                                                              |
 | Timeout on the client                         | A rollback is synchronous and can take up to 5 minutes        | Raise the client timeout                                                                       |
 | Connection refused / no route                 | Orchestrator unreachable from the runner                      | Self-hosted runner, tunnel, or authenticated ingress                                           |
@@ -364,5 +364,5 @@ They depend on metrics the orchestrator does not emit yet; see [Monitoring](moni
 | 200  | Success (including `action: alert`; check the body)                     |
 | 404  | `GET /deployment/<id>` for an unknown or expired ID                     |
 | 422  | Invalid request body                                                    |
-| 500  | Rollback failed, unsupported `failure_type`, Redis or Kubernetes errors |
+| 500  | Rollback failed, Redis or Kubernetes errors |
 | 307  | `/metrics` redirecting to `/metrics/`                                   |

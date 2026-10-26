@@ -11,16 +11,6 @@ BLOCK_SECONDS = 1.0
 MAX_LOOP_STALL_SECONDS = 0.5
 
 
-@pytest.fixture(scope="module")
-def api():
-    with patch("src.orchestrator.redis.Redis"), \
-         patch("src.orchestrator.k8s_config.load_incluster_config"), \
-         patch("src.orchestrator.client.AppsV1Api"), \
-         patch("src.orchestrator.client.CoreV1Api"):
-        from src import api as api_module
-    return api_module
-
-
 class FakeRedis:
     def __init__(self):
         self.data = {}
@@ -210,3 +200,61 @@ async def test_failed_webhook_without_workflow_run_id_still_alerts(api):
 
     assert failed.status_code == 200
     assert failed.json()["action_taken"]["action"] == "alert"
+
+
+async def post_webhook(api, body):
+    transport = httpx.ASGITransport(app=api.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
+             patch.object(api.orchestrator, "get_previous_version", return_value="0.9.0"), \
+             patch.object(api.orchestrator, "trigger_github_workflow_rerun",
+                          new=AsyncMock(return_value=True)):
+            response = await client.post("/webhook/deployment", json=body)
+            await asyncio.sleep(0)
+    return response
+
+
+@pytest.mark.asyncio
+async def test_smoke_test_failure_is_accepted_and_handled(api):
+    response = await post_webhook(
+        api,
+        webhook_body("failed", {"workflow_run_id": "1"}, "smoke_test_failure"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["action_taken"]["action"] == "retry"
+
+
+@pytest.mark.asyncio
+async def test_unknown_failure_type_is_rejected_as_bad_input(api):
+    response = await post_webhook(
+        api, webhook_body("failed", {"workflow_run_id": "1"}, "disk_on_fire")
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_unknown_status_is_rejected_as_bad_input(api):
+    response = await post_webhook(api, webhook_body("exploded", {}))
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_failed_status_without_failure_type_is_rejected(api):
+    response = await post_webhook(api, webhook_body("failed", {"workflow_run_id": "1"}))
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", None])
+async def test_success_with_blank_failure_type_is_accepted(api, blank):
+    body = webhook_body("success", {})
+    body["failure_type"] = blank
+    with patch.object(api.orchestrator, "save_successful_deployment_version"):
+        response = await post_webhook(api, body)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"

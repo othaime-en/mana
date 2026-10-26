@@ -92,8 +92,8 @@ The entry point for CI/CD events. See [Data Flow](../architecture/data-flow.md) 
 | `namespace`     | string | yes                  | Kubernetes namespace of the target                                                                    |
 | `app_name`      | string | yes                  | Deployment name (also the `app` label and container name)                                             |
 | `version`       | string | yes                  | Version or image tag being deployed                                                                   |
-| `status`        | string | yes                  | `in_progress`, `success` or `failed`. Other values are acknowledged and ignored                       |
-| `failure_type`  | string | when `status=failed` | One of `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure`, `timeout`       |
+| `status`        | string | yes                  | `in_progress`, `success` or `failed`. Other values are rejected with HTTP 422                          |
+| `failure_type`  | string | when `status=failed` | One of `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure`, `smoke_test_failure`, `timeout` |
 | `metadata`      | object | no                   | Free-form. Include `workflow_run_id` (string) for retries. Typical keys: `commit`, `author`, `branch` |
 
 ```bash
@@ -167,14 +167,14 @@ curl -s -X POST $MANA/webhook/deployment \
 }
 ```
 
-**`status=in_progress` or any other value** (HTTP 200): `{"status": "acknowledged", "deployment_id": "deploy-123"}`
+**`status=in_progress`** (HTTP 200): `{"status": "acknowledged", "deployment_id": "deploy-123"}`
 
 ### Errors
 
 | Code  | Cause                                                                                                                                       |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `422` | Missing or mistyped required field                                                                                                          |
-| `500` | `failure_type` is not one of the five known values (for example `smoke_test_failure`), or an internal error such as Redis being unavailable |
+| `422` | Missing or mistyped required field, a `status` other than `in_progress`, `success` or `failed`, an unknown `failure_type`, or `status: failed` without a `failure_type` |
+| `500` | An internal error such as Redis being unavailable                                                                                           |
 
 !!! note
 The rollback branch runs synchronously inside the request, including the health verification wait (up to 300 s). Configure your CI client's HTTP timeout accordingly, or treat a timeout as "processing" and check `GET /deployment/{id}` afterwards.

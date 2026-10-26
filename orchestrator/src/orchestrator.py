@@ -45,6 +45,7 @@ class FailureType(Enum):
     TEST_FAILURE = "test_failure"
     DEPLOYMENT_FAILURE = "deployment_failure"
     HEALTH_CHECK_FAILURE = "health_check_failure"
+    SMOKE_TEST_FAILURE = "smoke_test_failure"
     TIMEOUT = "timeout"
 
 

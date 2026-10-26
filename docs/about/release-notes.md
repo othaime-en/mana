@@ -15,6 +15,7 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 - `deployment_id` is now `deploy-<run_id>-<namespace>` and the image version is `v<sha7>`, so a workflow re-run reports the same deployment and the retry counter accumulates (CORE-01). Webhook metadata now carries `run_attempt`.
 - `failure_type: smoke_test_failure` is accepted. `status` and `failure_type` are validated as enums, so unknown values return HTTP 422 instead of 500, an empty `failure_type` counts as absent, and `status: failed` requires a `failure_type` (CORE-13, TEST-04).
+- Rollback guards (CORE-16): the orchestrator never rolls back for `build_failure` or `test_failure`, and rolls back only when the image tag running in the cluster equals the failed version. Otherwise it answers `skip` (another version is live) or `alert` (the live version cannot be read or compared) and writes a `rollback_skipped` audit event for a skip. The workflows no longer run `kubectl rollout undo`, so the orchestrator is the only rollback owner (CORE-04).
 
 ### Known issues
 

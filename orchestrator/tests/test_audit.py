@@ -152,6 +152,19 @@ class TestAuditLogger:
         
         assert 'rollback_failed' in caplog.text
     
+    def test_log_rollback_skipped(self, audit_logger, caplog):
+        """Test skipped rollback logging"""
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_rollback_skipped(
+                deployment_id='test-123',
+                namespace='production',
+                deployment_name='sample-app',
+                failed_version='1.0.0',
+                live_version='0.9.0'
+            )
+        
+        assert 'rollback_skipped' in caplog.text
+    
     def test_log_health_check_started(self, audit_logger, caplog):
         """Test health check start logging"""
         with caplog.at_level(logging.INFO):
@@ -236,6 +249,7 @@ class TestAuditAction:
         assert AuditAction.ROLLBACK_INITIATED.value == "rollback_initiated"
         assert AuditAction.ROLLBACK_COMPLETED.value == "rollback_completed"
         assert AuditAction.ROLLBACK_FAILED.value == "rollback_failed"
+        assert AuditAction.ROLLBACK_SKIPPED.value == "rollback_skipped"
         assert AuditAction.HEALTH_CHECK_STARTED.value == "health_check_started"
         assert AuditAction.HEALTH_CHECK_PASSED.value == "health_check_passed"
         assert AuditAction.HEALTH_CHECK_FAILED.value == "health_check_failed"

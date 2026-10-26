@@ -1,10 +1,13 @@
 import pytest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock, call
+from kubernetes.client.rest import ApiException
 from src.orchestrator import (
     SelfHealingOrchestrator,
     DeploymentStatus,
     FailureType,
-    DeploymentState
+    DeploymentState,
+    ContainerNotFoundError,
+    find_container
 )
 import time
 
@@ -346,6 +349,7 @@ class TestEnhancedFailureHandling:
         )
         
         with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
+             patch.object(orchestrator, 'get_live_version', return_value='1.0.0'), \
              patch.object(orchestrator, 'rollback_deployment', return_value=True), \
              patch.object(orchestrator, 'save_deployment_state'):
             
@@ -359,6 +363,172 @@ class TestEnhancedFailureHandling:
             
             assert result['action'] == 'rollback'
             assert 'previous_version' in result
+
+
+def exhausted_state(failure_type=FailureType.DEPLOYMENT_FAILURE, previous_version='0.9.0'):
+    return DeploymentState(
+        deployment_id='test-123',
+        namespace='production',
+        app_name='sample-app',
+        version='1.0.0',
+        status=DeploymentStatus.FAILED,
+        previous_version=previous_version,
+        retry_count=3,
+        failure_type=failure_type,
+        timestamp=time.time(),
+        metadata={}
+    )
+
+
+class TestRollbackGuards:
+    """Rollback only happens for a deployed version that is still live"""
+
+    async def fail(self, orchestrator, failure_type, state, **patches):
+        live = patches.pop('live', '1.0.0')
+        live_patch = (
+            patch.object(orchestrator, 'get_live_version', side_effect=live)
+            if isinstance(live, Exception)
+            else patch.object(orchestrator, 'get_live_version', return_value=live)
+        )
+        with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
+             live_patch, \
+             patch.object(orchestrator, 'rollback_deployment', return_value=True) as rollback, \
+             patch.object(orchestrator, 'save_deployment_state') as save:
+            result = await orchestrator.handle_deployment_failure(
+                deployment_id='test-123',
+                namespace='production',
+                deployment_name='sample-app',
+                version='1.0.0',
+                failure_type=failure_type
+            )
+        return result, rollback, save
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('failure_type', [
+        FailureType.BUILD_FAILURE, FailureType.TEST_FAILURE
+    ])
+    async def test_build_and_test_failures_never_roll_back(self, orchestrator, failure_type):
+        result, rollback, save = await self.fail(
+            orchestrator, failure_type, exhausted_state(failure_type)
+        )
+
+        assert result['action'] == 'alert'
+        assert 'nothing to roll back' in result['message']
+        rollback.assert_not_called()
+        assert save.call_args[0][0].status == DeploymentStatus.FAILED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('failure_type', [
+        FailureType.DEPLOYMENT_FAILURE,
+        FailureType.HEALTH_CHECK_FAILURE,
+        FailureType.SMOKE_TEST_FAILURE,
+        FailureType.TIMEOUT,
+    ])
+    async def test_post_deploy_failures_roll_back_when_failed_version_is_live(
+        self, orchestrator, failure_type
+    ):
+        result, rollback, _ = await self.fail(
+            orchestrator, failure_type, exhausted_state(failure_type)
+        )
+
+        assert result['action'] == 'rollback'
+        rollback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_rollback_is_skipped_when_another_version_is_live(self, orchestrator):
+        result, rollback, save = await self.fail(
+            orchestrator, FailureType.DEPLOYMENT_FAILURE, exhausted_state(), live='0.9.0'
+        )
+
+        assert result['action'] == 'skip'
+        assert result['live_version'] == '0.9.0'
+        rollback.assert_not_called()
+        assert save.call_args[0][0].status == DeploymentStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_rollback_needs_manual_help_when_live_version_unreadable(self, orchestrator):
+        result, rollback, _ = await self.fail(
+            orchestrator, FailureType.DEPLOYMENT_FAILURE, exhausted_state(),
+            live=ApiException(status=403, reason='Forbidden')
+        )
+
+        assert result['action'] == 'alert'
+        assert '403' in result['message']
+        rollback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rollback_needs_manual_help_when_container_is_ambiguous(self, orchestrator):
+        result, rollback, _ = await self.fail(
+            orchestrator, FailureType.DEPLOYMENT_FAILURE, exhausted_state(),
+            live=ContainerNotFoundError('no container named sample-app')
+        )
+
+        assert result['action'] == 'alert'
+        rollback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rollback_needs_manual_help_when_image_is_pinned_by_digest(self, orchestrator):
+        result, rollback, _ = await self.fail(
+            orchestrator, FailureType.DEPLOYMENT_FAILURE, exhausted_state(), live=None
+        )
+
+        assert result['action'] == 'alert'
+        assert 'tag' in result['message']
+        rollback.assert_not_called()
+
+
+def deployment_with(*containers):
+    deployment = Mock()
+    deployment.spec.template.spec.containers = list(containers)
+    return deployment
+
+
+def container(name, image):
+    item = Mock()
+    item.name = name
+    item.image = image
+    return item
+
+
+class TestLiveVersion:
+    """Reading the running version from the Deployment"""
+
+    @pytest.mark.parametrize('image,expected', [
+        ('ghcr.io/o/r/sample-app:v1a2b3c4', 'v1a2b3c4'),
+        ('registry.local:5000/sample-app:1.0.0', '1.0.0'),
+        ('sample-app', None),
+        ('sample-app@sha256:' + 'a' * 64, None),
+        ('sample-app:1.0.0@sha256:' + 'a' * 64, None),
+    ])
+    def test_get_live_version_reads_the_tag(self, orchestrator, image, expected):
+        orchestrator.k8s_apps.read_namespaced_deployment.return_value = deployment_with(
+            container('sample-app', image)
+        )
+
+        assert orchestrator.get_live_version('production', 'sample-app') == expected
+
+    def test_get_live_version_uses_the_container_named_like_the_deployment(self, orchestrator):
+        orchestrator.k8s_apps.read_namespaced_deployment.return_value = deployment_with(
+            container('istio-proxy', 'proxy:9.9.9'),
+            container('sample-app', 'sample-app:1.0.0')
+        )
+
+        assert orchestrator.get_live_version('production', 'sample-app') == '1.0.0'
+
+    def test_find_container_accepts_a_single_differently_named_container(self):
+        only = container('web', 'sample-app:1.0.0')
+
+        assert find_container(deployment_with(only), 'sample-app') is only
+
+    def test_find_container_rejects_ambiguous_deployments(self):
+        deployment = deployment_with(container('a', 'a:1'), container('b', 'b:1'))
+
+        with pytest.raises(ContainerNotFoundError):
+            find_container(deployment, 'sample-app')
+
+    def test_find_container_rejects_deployments_without_containers(self):
+        with pytest.raises(ContainerNotFoundError):
+            find_container(deployment_with(), 'sample-app')
 
 
 class TestEnhancedRollback:

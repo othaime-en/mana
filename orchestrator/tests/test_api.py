@@ -119,6 +119,7 @@ async def test_webhook_rollback_does_not_block_event_loop(api):
         with patch.object(api.orchestrator, "get_deployment_state",
                           return_value=failed_state_past_retry_limit()), \
              patch.object(api.orchestrator, "save_deployment_state"), \
+             patch.object(api.orchestrator, "get_live_version", return_value="1.0.0"), \
              patch.object(api.orchestrator, "rollback_deployment", side_effect=blocking):
             stall, health, response = await run_with_heartbeat(
                 client,

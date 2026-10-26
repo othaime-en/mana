@@ -85,7 +85,7 @@ sum(rate(kube_pod_container_status_restarts_total{namespace="production"}[15m]))
 
 ### Audit events
 
-Every significant orchestrator action produces an audit event (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `health_check_*`, `state_saved`, `manual_intervention_required`). Each carries a UTC timestamp, deployment ID, namespace, version and a `success` flag, plus action-specific details.
+Every significant orchestrator action produces an audit event (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `rollback_skipped`, `health_check_*`, `state_saved`, `manual_intervention_required`). Each carries a UTC timestamp, deployment ID, namespace, version and a `success` flag, plus action-specific details.
 
 ```bash
 kubectl -n orchestrator logs -l app=orchestrator | grep "AUDIT:"

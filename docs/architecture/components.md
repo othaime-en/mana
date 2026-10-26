@@ -59,7 +59,7 @@ The module also defines the domain types:
 
 ### `utils/audit.py`: audit trail
 
-`AuditLogger` emits one structured JSON event per significant action (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `health_check_*`, `state_saved`, `manual_intervention_required`, and others). Every event carries a UTC timestamp, the deployment ID, namespace, version and a `success` flag. See [Monitoring](../usage/monitoring.md) for how to query them.
+`AuditLogger` emits one structured JSON event per significant action (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `rollback_skipped`, `health_check_*`, `state_saved`, `manual_intervention_required`, and others). Every event carries a UTC timestamp, the deployment ID, namespace, version and a `success` flag. See [Monitoring](../usage/monitoring.md) for how to query them.
 
 !!! note "Audit events and log formatting"
 Audit events are attached to the log record as `extra={"audit_event": ...}`. With the default `logging.basicConfig` format (`%(asctime)s - %(name)s - %(levelname)s - %(message)s`) only the `AUDIT: <action>` message line is printed. To get the full JSON payload into your log pipeline, use a JSON formatter that includes record extras.

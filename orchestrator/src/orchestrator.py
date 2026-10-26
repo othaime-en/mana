@@ -15,7 +15,7 @@ import json
 from kubernetes import client, config as k8s_config
 from kubernetes.client.rest import ApiException
 
-from src.utils import get_audit_logger, AuditAction
+from src.utils import get_audit_logger, AuditAction, split_image_reference
 from src.config import get_config
 
 
@@ -47,6 +47,35 @@ class FailureType(Enum):
     HEALTH_CHECK_FAILURE = "health_check_failure"
     SMOKE_TEST_FAILURE = "smoke_test_failure"
     TIMEOUT = "timeout"
+
+
+NON_ROLLBACK_FAILURES = frozenset({
+    FailureType.BUILD_FAILURE,
+    FailureType.TEST_FAILURE,
+})
+
+
+class ContainerNotFoundError(Exception):
+    """The Deployment has no container Mana can identify as the application"""
+
+
+def find_container(deployment, deployment_name: str):
+    """
+    Return the application container of a Deployment
+
+    Matches the container named like the Deployment, or the only container
+    when there is exactly one.
+    """
+    containers = deployment.spec.template.spec.containers or []
+    for container in containers:
+        if container.name == deployment_name:
+            return container
+    if len(containers) == 1:
+        return containers[0]
+    names = [container.name for container in containers]
+    raise ContainerNotFoundError(
+        f"No container named {deployment_name} in deployment (found {names})"
+    )
 
 
 @dataclass
@@ -496,6 +525,25 @@ class SelfHealingOrchestrator:
         
         return False
     
+    def get_live_version(
+        self,
+        namespace: str,
+        deployment_name: str
+    ) -> Optional[str]:
+        """
+        Read the image tag the Deployment is running now
+
+        Returns None when the image is pinned by digest or has no tag.
+        Raises ApiException or ContainerNotFoundError when it cannot be read.
+        """
+        deployment = self.k8s_apps.read_namespaced_deployment(
+            name=deployment_name,
+            namespace=namespace
+        )
+        container = find_container(deployment, deployment_name)
+        reference = split_image_reference(container.image)
+        return reference.tag if reference.digest is None else None
+    
     def save_successful_deployment_version(
         self,
         namespace: str,
@@ -887,7 +935,18 @@ class SelfHealingOrchestrator:
                 )
             }
         
+        elif failure_type in NON_ROLLBACK_FAILURES:
+            reason = (
+                f"{failure_type.value} happened before anything was deployed, "
+                f"so there is nothing to roll back"
+            )
+            return self._alert(state, version, reason)
+        
         elif state.retry_count > self.rollback_threshold and state.previous_version:
+            blocked = await self._rollback_blocker(state, version)
+            if blocked:
+                return blocked
+            
             # Rollback to previous version
             logger.warning(
                 f"Max retries exceeded ({state.retry_count}), "
@@ -951,6 +1010,81 @@ class SelfHealingOrchestrator:
                 'action': 'alert',
                 'message': 'No previous version available - manual intervention required'
             }
+    
+    def _alert(self, state: DeploymentState, version: str, reason: str) -> Dict:
+        """Mark the deployment failed and ask for manual intervention"""
+        state.status = DeploymentStatus.FAILED
+        self.save_deployment_state(state)
+        
+        audit_logger.log_manual_intervention_required(
+            deployment_id=state.deployment_id,
+            namespace=state.namespace,
+            deployment_name=state.app_name,
+            version=version,
+            reason=reason
+        )
+        
+        return {
+            'action': 'alert',
+            'message': f'{reason} - manual intervention required'
+        }
+    
+    async def _rollback_blocker(
+        self,
+        state: DeploymentState,
+        version: str
+    ) -> Optional[Dict]:
+        """
+        Check that the failed version is the one running before rolling back
+
+        Returns the response to send instead of rolling back, or None when the
+        rollback may go ahead.
+        """
+        try:
+            live_version = await asyncio.to_thread(
+                self.get_live_version,
+                state.namespace,
+                state.app_name
+            )
+        except ApiException as e:
+            return self._alert(
+                state, version,
+                f"Cannot read the live version (Kubernetes API error {e.status})"
+            )
+        except ContainerNotFoundError as e:
+            return self._alert(state, version, f"Cannot read the live version: {e}")
+        
+        if live_version is None:
+            return self._alert(
+                state, version,
+                "Live image is not addressed by tag, so it cannot be matched "
+                "to the failed version"
+            )
+        
+        if live_version != version:
+            logger.warning(
+                f"Skipping rollback: live version {live_version} is not the "
+                f"failed version {version}"
+            )
+            state.status = DeploymentStatus.FAILED
+            self.save_deployment_state(state)
+            audit_logger.log_rollback_skipped(
+                deployment_id=state.deployment_id,
+                namespace=state.namespace,
+                deployment_name=state.app_name,
+                failed_version=version,
+                live_version=live_version
+            )
+            return {
+                'action': 'skip',
+                'live_version': live_version,
+                'message': (
+                    f'Live version {live_version} is not the failed version '
+                    f'{version}; rollback skipped'
+                )
+            }
+        
+        return None
     
     def get_deployment_metrics(
         self,

@@ -155,7 +155,8 @@ curl -s -X POST $MANA/webhook/deployment \
 | ---------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | `retry`    | A workflow re-run has been scheduled after the backoff                                       | `retry_count`, `backoff_seconds`, `workflow_run_id`, `message` |
 | `rollback` | Rollback executed and verified healthy                                                       | `previous_version`, `message`                                  |
-| `alert`    | Cannot recover automatically (no `workflow_run_id`, no previous version, or rollback failed) | `message`                                                      |
+| `skip`     | The failed version is not the one running, so rolling back would change a healthy Deployment | `live_version`, `message`                                      |
+| `alert`    | Cannot recover automatically (no `workflow_run_id`, no previous version, a build or test failure, the live version could not be checked, or rollback failed) | `message` |
 
 **`status=success`** (HTTP 200):
 

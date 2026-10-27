@@ -1,28 +1,16 @@
 import asyncio
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
+import redis
 
 from src.orchestrator import DeploymentState, DeploymentStatus, FailureType
+from tests.fakes import FakeRedis
 
 BLOCK_SECONDS = 1.0
 MAX_LOOP_STALL_SECONDS = 0.5
-
-
-class FakeRedis:
-    def __init__(self):
-        self.data = {}
-
-    def get(self, key):
-        return self.data.get(key)
-
-    def setex(self, key, _ttl, value):
-        self.data[key] = value
-
-    def ping(self):
-        return True
 
 
 def blocking(*_args, **_kwargs):
@@ -259,3 +247,52 @@ async def test_success_with_blank_failure_type_is_accepted(api, blank):
 
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_in_progress_webhook_persists_the_deployment(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()):
+            response = await client.post(
+                "/webhook/deployment", json=webhook_body("in_progress", {"commit": "abc"})
+            )
+            state = (await client.get("/deployment/deploy-first-failure")).json()
+
+    assert response.json()["status"] == "acknowledged"
+    assert state["status"] == "in_progress"
+    assert state["started_at"] is not None
+    assert state["finished_at"] is None
+    assert state["metadata"] == {"commit": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_in_progress_webhook_is_acknowledged_when_redis_is_down(api):
+    transport = httpx.ASGITransport(app=api.app)
+    broken = FakeRedis()
+    broken.setex = Mock(side_effect=redis.ConnectionError("down"))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", broken):
+            response = await client.post(
+                "/webhook/deployment", json=webhook_body("in_progress", {})
+            )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "acknowledged"
+
+
+@pytest.mark.asyncio
+async def test_success_webhook_closes_the_lifecycle(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()):
+            await client.post("/webhook/deployment", json=webhook_body("in_progress", {}))
+            response = await client.post("/webhook/deployment", json=webhook_body("success", {}))
+            state = (await client.get("/deployment/deploy-first-failure")).json()
+
+    assert response.json()["status"] == "success"
+    assert state["status"] == "success"
+    assert state["finished_at"] >= state["started_at"]

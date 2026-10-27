@@ -8,7 +8,7 @@ import time
 import requests
 import asyncio
 from typing import Dict, List, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from enum import Enum
 import redis
 import json
@@ -49,6 +49,21 @@ NON_ROLLBACK_FAILURES = frozenset({
     FailureType.BUILD_FAILURE,
     FailureType.TEST_FAILURE,
 })
+
+ACTIVE_STATUSES = frozenset({
+    DeploymentStatus.IN_PROGRESS,
+    DeploymentStatus.RETRY_SCHEDULED,
+    DeploymentStatus.ROLLING_BACK,
+})
+
+TERMINAL_STATUSES = frozenset({
+    DeploymentStatus.SUCCESS,
+    DeploymentStatus.FAILED,
+    DeploymentStatus.ROLLED_BACK,
+})
+
+STATE_TTL_SECONDS = 86400
+ACTIVE_INDEX_KEY = "mana:active"
 
 
 class ContainerNotFoundError(Exception):
@@ -107,6 +122,16 @@ class DeploymentState:
     failure_type: Optional[FailureType]
     timestamp: float
     metadata: Dict
+    started_at: Optional[float] = None
+    first_failure_at: Optional[float] = None
+    finished_at: Optional[float] = None
+
+
+@dataclass
+class StateTransition:
+    """A saved state together with the status it replaced (None if new)"""
+    state: DeploymentState
+    previous_status: Optional[DeploymentStatus]
 
 
 class SelfHealingOrchestrator:
@@ -337,8 +362,14 @@ class SelfHealingOrchestrator:
     def save_deployment_state(self, state: DeploymentState) -> None:
         """
         Save deployment state to Redis with proper Enum serialization
+
+        Stamps finished_at on the first save in a terminal status and keeps the
+        active-deployment index in step with the status.
         """
         key = f"deployment:{state.deployment_id}"
+        
+        if state.status in TERMINAL_STATUSES and state.finished_at is None:
+            state.finished_at = time.time()
         
         # Convert state to dict and explicitly handle Enums
         state_dict = asdict(state)
@@ -349,7 +380,7 @@ class SelfHealingOrchestrator:
         try:
             self.redis_client.setex(
                 key,
-                86400,  # 24 hours TTL
+                STATE_TTL_SECONDS,
                 json.dumps(state_dict)
             )
             
@@ -371,6 +402,124 @@ class SelfHealingOrchestrator:
         except Exception as e:
             logger.error(f"Failed to save deployment state: {e}", exc_info=True)
             raise
+        
+        self._update_active_index(state)
+    
+    def _update_active_index(self, state: DeploymentState) -> None:
+        """Track deployments that have not reached a terminal status"""
+        member = f"{state.namespace}|{state.deployment_id}"
+        try:
+            if state.status in ACTIVE_STATUSES:
+                score = state.started_at or state.timestamp
+                self.redis_client.zadd(ACTIVE_INDEX_KEY, {member: score})
+            else:
+                self.redis_client.zrem(ACTIVE_INDEX_KEY, member)
+        except redis.RedisError as e:
+            logger.warning(f"Could not update the active deployment index: {e}")
+    
+    def active_deployment_counts(self) -> Dict[str, int]:
+        """
+        Count deployments that are still in flight, by namespace
+
+        Entries older than the state TTL are dropped first, so a workflow that
+        was cancelled without a terminal webhook does not stay active forever.
+        """
+        self.redis_client.zremrangebyscore(
+            ACTIVE_INDEX_KEY, "-inf", time.time() - STATE_TTL_SECONDS
+        )
+        counts: Dict[str, int] = {}
+        for member in self.redis_client.zrange(ACTIVE_INDEX_KEY, 0, -1):
+            namespace = member.partition("|")[0]
+            counts[namespace] = counts.get(namespace, 0) + 1
+        return counts
+    
+    def record_deployment_started(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        metadata: Optional[Dict] = None
+    ) -> StateTransition:
+        """
+        Persist an in_progress event
+
+        A re-run of a deployment that already has state reopens it and keeps
+        started_at, retry_count and previous_version, so the duration covers
+        every attempt. previous_version is resolved at failure time, because
+        the ReplicaSet fallback is only correct once the failed version exists.
+        """
+        state = self.get_deployment_state(deployment_id)
+        previous_status = state.status if state else None
+        now = time.time()
+        
+        if state is None:
+            state = DeploymentState(
+                deployment_id=deployment_id,
+                namespace=namespace,
+                app_name=deployment_name,
+                version=version,
+                status=DeploymentStatus.IN_PROGRESS,
+                previous_version=None,
+                retry_count=0,
+                failure_type=None,
+                timestamp=now,
+                metadata={},
+                started_at=now
+            )
+        else:
+            state.status = DeploymentStatus.IN_PROGRESS
+            state.version = version
+            state.finished_at = None
+            if state.started_at is None:
+                state.started_at = now
+        
+        if metadata:
+            state.metadata.update(metadata)
+        
+        self.save_deployment_state(state)
+        return StateTransition(state, previous_status)
+    
+    def record_deployment_succeeded(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        metadata: Optional[Dict] = None
+    ) -> StateTransition:
+        """Persist a success event and remember the version as a rollback target"""
+        state = self.get_deployment_state(deployment_id)
+        previous_status = state.status if state else None
+        
+        if state is None:
+            state = DeploymentState(
+                deployment_id=deployment_id,
+                namespace=namespace,
+                app_name=deployment_name,
+                version=version,
+                status=DeploymentStatus.SUCCESS,
+                previous_version=None,
+                retry_count=0,
+                failure_type=None,
+                timestamp=time.time(),
+                metadata={}
+            )
+        
+        state.status = DeploymentStatus.SUCCESS
+        if previous_status is not DeploymentStatus.SUCCESS:
+            state.finished_at = None
+        
+        if metadata:
+            state.metadata.update(metadata)
+        
+        self.save_deployment_state(state)
+        self.save_successful_deployment_version(
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version
+        )
+        return StateTransition(state, previous_status)
     
     def get_deployment_state(self, deployment_id: str) -> Optional[DeploymentState]:
         """
@@ -381,7 +530,11 @@ class SelfHealingOrchestrator:
         try:
             data = self.redis_client.get(key)
             if data:
-                state_dict = json.loads(data)
+                known_fields = {f.name for f in fields(DeploymentState)}
+                state_dict = {
+                    key: value for key, value in json.loads(data).items()
+                    if key in known_fields
+                }
                 
                 # Convert string values back to Enums
                 state_dict['status'] = DeploymentStatus(state_dict['status'])
@@ -884,22 +1037,29 @@ class SelfHealingOrchestrator:
         # Get or create deployment state
         state = self.get_deployment_state(deployment_id)
         if not state:
-            previous_version = self.get_previous_version(namespace, deployment_name)
             state = DeploymentState(
                 deployment_id=deployment_id,
                 namespace=namespace,
                 app_name=deployment_name,
                 version=version,
                 status=DeploymentStatus.FAILED,
-                previous_version=previous_version,
+                previous_version=None,
                 retry_count=0,
                 failure_type=failure_type,
                 timestamp=time.time(),
                 metadata={}
             )
         
+        if state.previous_version is None:
+            state.previous_version = await asyncio.to_thread(
+                self.get_previous_version, namespace, deployment_name
+            )
+        
         if metadata:
             state.metadata.update(metadata)
+        
+        if state.first_failure_at is None:
+            state.first_failure_at = time.time()
         
         state.retry_count += 1
         state.failure_type = failure_type

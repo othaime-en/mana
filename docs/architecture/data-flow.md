@@ -36,8 +36,8 @@ How the orchestrator reacts depends on `status`:
 
 | `status`                       | Orchestrator behaviour                                                                                                                     |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `in_progress`                  | Counts the event in `deployments_total` and returns `acknowledged`. Nothing is stored                                                      |
-| `success`                      | Marks the stored state (if any) as `success`, records `version` as the new last-known-good for `<namespace>/<app_name>`, returns `success` |
+| `in_progress`                  | Counts the event in `deployments_total`, stores the deployment as `in_progress` with its start time (a re-run reopens the existing state), returns `acknowledged`. A Redis error is logged and the event is still acknowledged |
+| `success`                      | Marks the state `success` and stamps `finished_at` (creating the state if none exists), records `version` as the new last-known-good for `<namespace>/<app_name>`, returns `success` |
 | `failed` (with `failure_type`) | Runs the failure-handling logic below                                                                                                      |
 | anything else                  | Counted and acknowledged                                                                                                                   |
 
@@ -145,7 +145,7 @@ TTL is 24 hours and is refreshed every time the state is saved.
 
 ![Deployment status lifecycle: from no state, a failed webhook leads to retry_scheduled, which repeats, reaches success on a success webhook, or moves to rolling_back when retries are exhausted; rolling_back ends in rolled_back or failed, and alert paths end in failed](../assets/diagrams/state-status-lifecycle.svg)
 
-`pending` and `in_progress` exist in the enum but are not currently written by the webhook handler.
+`in_progress` is written when the `in_progress` webhook arrives and `pending` is never written. A state carries `started_at` (first `in_progress`), `first_failure_at` (first failed attempt) and `finished_at` (first save in a terminal status: `success`, `failed` or `rolled_back`; cleared when a re-run reopens the deployment). States saved before these fields existed still load, with the fields empty. Deployments that are `in_progress`, `retry_scheduled` or `rolling_back` are tracked in the Redis sorted set `mana:active`, scored by start time; entries older than the 24 h state TTL are dropped when it is read.
 
 ## Audit Trail
 

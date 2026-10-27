@@ -256,9 +256,14 @@ curl -s $MANA/deployment/deploy-123
   "failure_type": "health_check_failure",
   "previous_version": "v0f9e8d7-1759990000",
   "timestamp": 1760000123.45,
+  "started_at": 1760000000.12,
+  "first_failure_at": 1760000060.5,
+  "finished_at": 1760000123.45,
   "metadata": { "workflow_run_id": "9876543210" }
 }
 ```
+
+`started_at`, `first_failure_at` and `finished_at` are Unix timestamps, or `null` when the event was never seen (for example `started_at` for a deployment whose first webhook was a failure).
 
 `status` is one of `pending`, `in_progress`, `success`, `failed`, `rolling_back`, `rolled_back`, `retry_scheduled`.
 

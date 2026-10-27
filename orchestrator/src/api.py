@@ -6,10 +6,10 @@ from typing import Optional, Dict, List
 import asyncio
 import uvicorn
 import os
+import redis
 from src.orchestrator import (
     SelfHealingOrchestrator,
-    FailureType,
-    DeploymentStatus
+    FailureType
 )
 from src.config import get_config
 from src.logging_config import configure_logging
@@ -239,17 +239,12 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             )
         
         elif payload.status is WebhookStatus.SUCCESS:
-            # Track successful deployment for rollback reference
-            state = orchestrator.get_deployment_state(payload.deployment_id)
-            if state:
-                state.status = DeploymentStatus.SUCCESS
-                orchestrator.save_deployment_state(state)
-            
-            # Store as rollback candidate
-            orchestrator.save_successful_deployment_version(
+            orchestrator.record_deployment_succeeded(
+                deployment_id=payload.deployment_id,
                 namespace=payload.namespace,
                 deployment_name=payload.app_name,
-                version=payload.version
+                version=payload.version,
+                metadata=metadata
             )
             
             return JSONResponse(
@@ -259,6 +254,21 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
                     "deployment_id": payload.deployment_id,
                     "message": "Deployment successful - version saved for future rollbacks"
                 }
+            )
+        
+        try:
+            orchestrator.record_deployment_started(
+                deployment_id=payload.deployment_id,
+                namespace=payload.namespace,
+                deployment_name=payload.app_name,
+                version=payload.version,
+                metadata=metadata
+            )
+        except redis.RedisError:
+            logger.error(
+                "Could not persist in_progress state for %s",
+                payload.deployment_id,
+                exc_info=True
             )
         
         return JSONResponse(
@@ -367,6 +377,9 @@ async def get_deployment(deployment_id: str):
         "failure_type": state.failure_type.value if state.failure_type else None,
         "previous_version": state.previous_version,
         "timestamp": state.timestamp,
+        "started_at": state.started_at,
+        "first_failure_at": state.first_failure_at,
+        "finished_at": state.finished_at,
         "metadata": state.metadata
     }
 

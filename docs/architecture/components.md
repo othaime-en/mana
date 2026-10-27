@@ -49,7 +49,7 @@ See the [API Reference](../reference/api.md) for every endpoint.
 
 The module also defines the domain types:
 
-- `DeploymentStatus`: `pending`, `in_progress`, `success`, `failed`, `rolling_back`, `rolled_back`, `retry_scheduled`
+- `DeploymentStatus`: `pending` (never persisted), `in_progress`, `success`, `failed`, `rolling_back`, `rolled_back`, `retry_scheduled`
 - `FailureType`: `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure`, `smoke_test_failure`, `timeout`
 - `DeploymentState`: the record stored in Redis (see [Data Flow](data-flow.md#state-model))
 

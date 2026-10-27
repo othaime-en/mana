@@ -296,3 +296,73 @@ async def test_success_webhook_closes_the_lifecycle(api):
     assert response.json()["status"] == "success"
     assert state["status"] == "success"
     assert state["finished_at"] >= state["started_at"]
+
+
+@pytest.mark.asyncio
+async def test_metrics_is_served_directly_in_exposition_format(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()):
+            response = await client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "# TYPE deployments_total counter" in response.text
+
+
+@pytest.mark.asyncio
+async def test_metrics_scrape_runs_off_the_event_loop(api):
+    transport = httpx.ASGITransport(app=api.app)
+    stalls = []
+
+    async def heartbeat():
+        last = time.monotonic()
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            now = time.monotonic()
+            stalls.append(now - last)
+            last = now
+
+    slow_source = Mock(side_effect=lambda: time.sleep(BLOCK_SECONDS) or {})
+    with patch.object(api.orchestrator, "active_deployment_counts", slow_source), \
+         patch.object(api.metrics.ActiveDeploymentsCollector, "collect", lambda self: (slow_source(), iter(()))[1]):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await asyncio.gather(client.get("/metrics"), heartbeat())
+
+    assert max(stalls) < MAX_LOOP_STALL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_deployment_status_is_json_and_not_shadowed_by_metrics(api):
+    transport = httpx.ASGITransport(app=api.app)
+    replicas = {"replicas": 3, "ready_replicas": 3}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "get_deployment_metrics", return_value=replicas) as read:
+            response = await client.get("/deployments/production/sample-app/status")
+
+    assert response.status_code == 200
+    assert response.json() == replicas
+    read.assert_called_once_with("production", "sample-app")
+
+
+@pytest.mark.asyncio
+async def test_deployment_status_reports_kubernetes_errors(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "get_deployment_metrics", side_effect=RuntimeError("boom")):
+            response = await client.get("/deployments/production/sample-app/status")
+
+    assert response.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_old_deployment_metrics_path_is_gone(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/metrics/deployment/production/sample-app")
+
+    assert response.status_code == 404

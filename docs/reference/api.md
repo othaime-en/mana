@@ -30,9 +30,9 @@ The API has **no authentication or authorization**. Anyone who can reach it can 
 | `POST` | `/health-check`                                     | Run a deployment health check on demand                                                           |
 | `GET`  | `/deployment/{deployment_id}`                       | Fetch one stored deployment state                                                                 |
 | `GET`  | `/deployments/recent`                               | List recent deployment states                                                                     |
-| `GET`  | `/metrics/deployment/{namespace}/{deployment_name}` | Replica counts and conditions (see [known issue](#get-metricsdeploymentnamespacedeployment_name)) |
+| `GET`  | `/deployments/{namespace}/{deployment_name}/status` | Replica counts and conditions                                                                     |
 | `GET`  | `/config`                                           | Effective orchestrator configuration                                                              |
-| `GET`  | `/metrics/`                                         | Prometheus metrics                                                                                |
+| `GET`  | `/metrics`                                          | Prometheus metrics                                                                                |
 
 ---
 
@@ -297,9 +297,9 @@ curl -s "$MANA/deployments/recent?namespace=production&limit=5"
 
 Results are sorted newest first. The list is built by scanning all `deployment:*` keys in Redis, so it is intended for dashboards and debugging rather than high-frequency polling.
 
-## `GET /metrics/deployment/{namespace}/{deployment_name}`
+## `GET /deployments/{namespace}/{deployment_name}/status`
 
-Intended to return live replica information straight from Kubernetes:
+Returns live replica information straight from Kubernetes. This replaces `/metrics/deployment/...`, which was unreachable because the Prometheus app was mounted over it and now returns `404`:
 
 ```json
 {
@@ -317,9 +317,6 @@ Intended to return live replica information straight from Kubernetes:
 }
 ```
 
-!!! warning "Known issue: route shadowed by the Prometheus mount"
-The Prometheus ASGI app is mounted at `/metrics` before this route is registered, so requests to `/metrics/deployment/<ns>/<name>` are handled by the Prometheus app and return Prometheus text instead of the JSON above. Until the route is moved (for example to `/deployment-metrics/{namespace}/{name}`), use `kubectl get deployment <name> -n <ns> -o json` or the metrics endpoint for the same information.
-
 ## `GET /config`
 
 Shows the values the running process is using, which is the fastest way to confirm a configuration change took effect.
@@ -336,9 +333,9 @@ Shows the values the running process is using, which is the fastest way to confi
 }
 ```
 
-## `GET /metrics/`
+## `GET /metrics`
 
-Prometheus text exposition format. A request to `/metrics` (without the trailing slash) returns a `307` redirect to `/metrics/`; Prometheus follows redirects, so scraping works with either form.
+Prometheus text exposition format, served directly (no redirect). Rendering reads the active-deployment count from Redis, so a scrape fails to include `active_deployments` while Redis is unreachable.
 
 ### Application metrics
 

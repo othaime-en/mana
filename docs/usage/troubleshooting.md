@@ -365,4 +365,3 @@ They depend on metrics the orchestrator does not emit yet; see [Monitoring](moni
 | 404  | `GET /deployment/<id>` for an unknown or expired ID                     |
 | 422  | Invalid request body                                                    |
 | 500  | Rollback failed, Redis or Kubernetes errors |
-| 307  | `/metrics` redirecting to `/metrics/`                                   |

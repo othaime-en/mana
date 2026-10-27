@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 from typing import Optional, Dict, List
@@ -14,7 +14,7 @@ from src.orchestrator import (
 from src.config import get_config
 from src.logging_config import configure_logging
 from src.utils import get_audit_logger
-from prometheus_client import REGISTRY, make_asgi_app
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from src import metrics
 import logging
 
@@ -29,10 +29,6 @@ app = FastAPI(
     description="API for managing self-healing CI/CD deployments",
     version="1.0.0"
 )
-
-# Mount Prometheus metrics endpoint
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
 
 # Initialize orchestrator with configuration from config.py
 orchestrator = SelfHealingOrchestrator(use_config=True)
@@ -385,14 +381,22 @@ async def get_recent_deployments(namespace: Optional[str] = None, limit: int = 1
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/metrics/deployment/{namespace}/{deployment_name}")
-async def get_metrics(namespace: str, deployment_name: str):
-    """Get deployment metrics"""
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus exposition; rendered in a thread because collectors read Redis"""
+    body = await asyncio.to_thread(generate_latest)
+    return Response(body, media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/deployments/{namespace}/{deployment_name}/status")
+async def get_deployment_status(namespace: str, deployment_name: str):
+    """Replica status of a Kubernetes Deployment"""
     try:
-        metrics = orchestrator.get_deployment_metrics(namespace, deployment_name)
-        return metrics
+        return await asyncio.to_thread(
+            orchestrator.get_deployment_metrics, namespace, deployment_name
+        )
     except Exception as e:
-        logger.error(f"Error getting metrics: {e}")
+        logger.error(f"Error getting deployment status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

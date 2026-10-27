@@ -6,7 +6,7 @@ MANA ships a complete observability setup (Prometheus, Grafana, Loki, Alertmanag
 
 | Signal                            | Source                                        | Where it goes                      |
 | --------------------------------- | --------------------------------------------- | ---------------------------------- |
-| Orchestrator metrics              | `GET /metrics/` on port 8000                  | Prometheus                         |
+| Orchestrator metrics              | `GET /metrics` on port 8000                   | Prometheus                         |
 | Sample app metrics                | `GET /metrics` on port 5000                   | Prometheus                         |
 | Kubernetes metrics                | kube-state-metrics, cAdvisor, node exporter   | Prometheus                         |
 | Audit events and application logs | stdout of each pod                            | Promtail to Loki                   |
@@ -35,7 +35,7 @@ Configuration files are in `monitoring/` (see [Components](../architecture/compo
 
 A failure for a deployment that is already `failed` (for example a fifth failure webhook) is not counted again, and a re-run that reopens a finished deployment and settles again is counted again. Build and test failures reported with `namespace: ci` are counted as `failed` in that namespace (CORE-14).
 
-Standard `python_*` and `process_*` metrics are also exported. Use `curl -s $MANA/metrics/` to see the live output.
+Standard `python_*` and `process_*` metrics are also exported. Use `curl -s $MANA/metrics` to see the live output.
 
 ### Sample app
 
@@ -240,7 +240,7 @@ curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' \
 
 | Symptom                               | Check                                                                                                                                                           |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Orchestrator target missing or `DOWN` | Pod annotations (manual install) or ServiceMonitor (Terraform); relabeling of `__address__`; port 8000 reachable; use `/metrics/` (a bare `/metrics` redirects) |
+| Orchestrator target missing or `DOWN` | Pod annotations (manual install) or ServiceMonitor (Terraform); relabeling of `__address__`; port 8000 reachable; the path is `/metrics` |
 | Metrics exist but panels are empty    | The panel uses a recording rule or metric that is not emitted yet; run the underlying query in Prometheus                                                       |
 | No dashboards in Grafana              | Provisioning paths (see warning above) or import manually                                                                                                       |
 | No logs in Loki                       | Promtail running? Check `kubectl logs -n monitoring -l app=promtail`; query `{namespace="orchestrator"}` first                                                  |

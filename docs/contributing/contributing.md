@@ -7,7 +7,7 @@ By participating you agree to follow the [Code of Conduct](code-of-conduct.md). 
 ## Ways to Contribute
 
 - **Report a bug** or unexpected behaviour.
-- **Fix a known issue.** The [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) page lists confirmed problems that are good starting points: the `/metrics/deployment/...` route shadowed by the Prometheus mount, and metrics that alerts reference but the orchestrator does not emit.
+- **Fix a known issue.** The [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) page lists confirmed problems that are good starting points: alerts and recording rules that reference metrics the orchestrator does not emit, and the `ci` namespace polluting deployment outcome counts.
 - **Improve tests.** The orchestrator's API layer (`api.py`) has no tests and overall coverage is under 50%.
 - **Improve the docs.** Corrections, clearer examples and missing sections are all valuable.
 - **Propose a feature** such as webhook authentication, a Redis password option, or adapters for other CI systems.

@@ -14,7 +14,8 @@ from src.orchestrator import (
 from src.config import get_config
 from src.logging_config import configure_logging
 from src.utils import get_audit_logger
-from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
+from prometheus_client import REGISTRY, make_asgi_app
+from src import metrics
 import logging
 
 _config = get_config()
@@ -29,44 +30,28 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Prometheus metrics
-deployment_counter = Counter(
-    'deployments_total',
-    'Total number of deployments',
-    ['namespace', 'status']
-)
-rollback_counter = Counter(
-    'rollbacks_total',
-    'Total number of rollbacks',
-    ['namespace', 'reason']
-)
-deployment_duration = Histogram(
-    'deployment_duration_seconds',
-    'Deployment duration in seconds',
-    ['namespace']
-)
-active_deployments = Gauge(
-    'active_deployments',
-    'Number of active deployments',
-    ['namespace']
-)
-health_check_duration = Histogram(
-    'health_check_duration_seconds',
-    'Health check duration in seconds',
-    ['namespace', 'deployment']
-)
-retry_counter = Counter(
-    'retries_total',
-    'Total number of deployment retries',
-    ['namespace', 'retry_attempt']
-)
-
 # Mount Prometheus metrics endpoint
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
 # Initialize orchestrator with configuration from config.py
 orchestrator = SelfHealingOrchestrator(use_config=True)
+REGISTRY.register(metrics.ActiveDeploymentsCollector(orchestrator.active_deployment_counts))
+
+
+@app.middleware("http")
+async def count_webhook_requests(request, call_next):
+    """Count webhook requests and their error responses, including 422s"""
+    if not request.url.path.startswith("/webhook/"):
+        return await call_next(request)
+    
+    try:
+        response = await call_next(request)
+    except Exception:
+        metrics.record_webhook(request.url.path, 500)
+        raise
+    metrics.record_webhook(request.url.path, response.status_code)
+    return response
 
 
 # Request models
@@ -197,12 +182,6 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
     )
     
     try:
-        # Update metrics
-        deployment_counter.labels(
-            namespace=payload.namespace,
-            status=payload.status.value
-        ).inc()
-        
         if payload.status is WebhookStatus.FAILED:
             failure_type = payload.failure_type
             
@@ -217,14 +196,14 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             
             # Track retry metrics
             if result['action'] == 'retry':
-                retry_counter.labels(
+                metrics.retries_total.labels(
                     namespace=payload.namespace,
                     retry_attempt=result['retry_count']
                 ).inc()
             
             # Track rollback metrics
             if result['action'] == 'rollback':
-                rollback_counter.labels(
+                metrics.rollbacks_total.labels(
                     namespace=payload.namespace,
                     reason=failure_type.value
                 ).inc()
@@ -304,7 +283,7 @@ async def manual_rollback(request: RollbackRequest):
         )
         
         if success:
-            rollback_counter.labels(
+            metrics.rollbacks_total.labels(
                 namespace=request.namespace,
                 reason='manual'
             ).inc()
@@ -340,12 +319,6 @@ async def check_health(request: HealthCheckRequest):
         )
         
         duration = time.time() - start_time
-        
-        # Record health check duration
-        health_check_duration.labels(
-            namespace=request.namespace,
-            deployment=request.deployment_name
-        ).observe(duration)
         
         return {
             "deployment_name": request.deployment_name,

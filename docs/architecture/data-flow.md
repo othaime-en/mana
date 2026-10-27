@@ -36,7 +36,7 @@ How the orchestrator reacts depends on `status`:
 
 | `status`                       | Orchestrator behaviour                                                                                                                     |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `in_progress`                  | Counts the event in `deployments_total`, stores the deployment as `in_progress` with its start time (a re-run reopens the existing state), returns `acknowledged`. A Redis error is logged and the event is still acknowledged |
+| `in_progress`                  | Stores the deployment as `in_progress` with its start time (a re-run reopens the existing state), returns `acknowledged`. A Redis error is logged and the event is still acknowledged |
 | `success`                      | Marks the state `success` and stamps `finished_at` (creating the state if none exists), records `version` as the new last-known-good for `<namespace>/<app_name>`, returns `success` |
 | `failed` (with `failure_type`) | Runs the failure-handling logic below                                                                                                      |
 | anything else                  | Counted and acknowledged                                                                                                                   |
@@ -155,12 +155,18 @@ Each stage above emits an audit event so the full story of a deployment can be r
 
 ## Metrics Emitted
 
-| Metric                                                | Updated when                                                      |
-| ----------------------------------------------------- | ----------------------------------------------------------------- |
-| `deployments_total{namespace,status}`                 | Every webhook                                                     |
-| `retries_total{namespace,retry_attempt}`              | A retry is scheduled                                              |
-| `rollbacks_total{namespace,reason}`                   | A rollback succeeds (`reason` is the `failure_type`, or `manual`) |
-| `health_check_duration_seconds{namespace,deployment}` | `POST /health-check` completes                                    |
+| Metric                                                      | Updated when                                                                  |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `deployments_total{namespace,status}`                       | A deployment moves into `success`, `failed` or `rolled_back`                  |
+| `deployment_duration_seconds{namespace,status}`             | Same moment, when the first `in_progress` event was seen                      |
+| `mana_recovery_duration_seconds{namespace,app,outcome}`     | A deployment that failed earlier succeeds, or a rollback is verified          |
+| `rollback_decision_duration_seconds`                        | The orchestrator has chosen retry, rollback, skip or alert                    |
+| `retries_total{namespace,retry_attempt}`                    | A retry is scheduled                                                          |
+| `rollbacks_total{namespace,reason}`                         | A rollback succeeds (`reason` is the `failure_type`, or `manual`)             |
+| `health_checks_total{namespace,result}` and `health_check_duration_seconds{namespace,deployment}` | A deployment health check finishes |
+| `webhook_requests_total`, `webhook_errors_total`            | A request to `/webhook/*` is answered                                         |
+| `redis_connection_errors_total`                             | A Redis call fails with a connection or timeout error                         |
+| `active_deployments{namespace}`                             | Read from Redis when Prometheus scrapes                                       |
 
 See [Monitoring](../usage/monitoring.md) for the complete list, including metrics that are declared but not yet populated.
 

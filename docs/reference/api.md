@@ -342,14 +342,22 @@ Prometheus text exposition format. A request to `/metrics` (without the trailing
 
 ### Application metrics
 
-| Metric                          | Type      | Labels                       | Updated                                                             |
-| ------------------------------- | --------- | ---------------------------- | ------------------------------------------------------------------- |
-| `deployments_total`             | counter   | `namespace`, `status`        | every webhook                                                       |
-| `retries_total`                 | counter   | `namespace`, `retry_attempt` | when a retry is scheduled                                           |
-| `rollbacks_total`               | counter   | `namespace`, `reason`        | on a successful rollback (`reason` is the failure type or `manual`) |
-| `health_check_duration_seconds` | histogram | `namespace`, `deployment`    | `POST /health-check`                                                |
-| `deployment_duration_seconds`   | histogram | `namespace`                  | declared, **never observed**                                        |
-| `active_deployments`            | gauge     | `namespace`                  | declared, **never set**                                             |
+| Metric                               | Type      | Labels                       | Updated                                                                                                      |
+| ------------------------------------ | --------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `deployments_total`                  | counter   | `namespace`, `status`        | Deployments reaching a final status (`success`, `failed`, `rolled_back`), once per transition; `in_progress` and retried attempts are not counted |
+| `deployment_duration_seconds`        | histogram | `namespace`, `status`        | First `in_progress` event to the final status, across all attempts                                           |
+| `mana_recovery_duration_seconds`     | histogram | `namespace`, `app`, `outcome` | First failure to a successful retry (`retry_succeeded`) or a verified rollback (`rolled_back`)               |
+| `rollback_decision_duration_seconds` | histogram |                              | Time to decide retry, rollback, skip or alert for a failure (excludes the rollback itself)                   |
+| `active_deployments`                 | gauge     | `namespace`                  | Deployments that are `in_progress`, `retry_scheduled` or `rolling_back`, read from Redis at scrape time. Every replica reports the same value: aggregate with `max by (namespace)`, not `sum` |
+| `retries_total`                      | counter   | `namespace`, `retry_attempt` | Retries scheduled                                                                                            |
+| `rollbacks_total`                    | counter   | `namespace`, `reason`        | Successful rollbacks (`reason` is the failure type, or `manual`)                                             |
+| `health_checks_total`                | counter   | `namespace`, `result`        | Deployment health checks (`success` or `failed`), including those run during a rollback                     |
+| `health_check_duration_seconds`      | histogram | `namespace`, `deployment`    | Duration of each deployment health check                                                                     |
+| `webhook_requests_total`             | counter   | `endpoint`, `code`           | Requests to `/webhook/*` by HTTP status                                                                      |
+| `webhook_errors_total`               | counter   | `endpoint`, `reason`         | Webhook requests answered with an error (`validation` for 422, `server_error` for 5xx, `client_error`)      |
+| `redis_connection_errors_total`      | counter   |                              | Redis calls that failed with a connection or timeout error                                                   |
+
+A failure for a deployment that is already `failed` (for example a fifth failure webhook) is not counted again, and a re-run that reopens a finished deployment and settles again is counted again. Build and test failures reported with `namespace: ci` are counted as `failed` in that namespace (CORE-14).
 
 The standard `python_*` and `process_*` collector metrics are also exported. See [Monitoring](../usage/monitoring.md) for queries and dashboards.
 

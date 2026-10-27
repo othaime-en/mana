@@ -15,6 +15,7 @@ import json
 from kubernetes import client, config as k8s_config
 from kubernetes.client.rest import ApiException
 
+from src import metrics
 from src.utils import get_audit_logger, AuditAction, split_image_reference, with_tag
 from src.config import get_config
 
@@ -153,13 +154,13 @@ class SelfHealingOrchestrator:
             cfg.validate()  # Validate configuration
             
             # Redis configuration
-            self.redis_client = redis.Redis(
+            self.redis_client = metrics.CountingRedis(redis.Redis(
                 host=cfg.redis_host,
                 port=cfg.redis_port,
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_timeout=5
-            )
+            ))
             
             # Validate Redis connection
             try:
@@ -185,11 +186,11 @@ class SelfHealingOrchestrator:
             
         else:
             # Fallback for testing or manual initialization
-            self.redis_client = redis.Redis(
+            self.redis_client = metrics.CountingRedis(redis.Redis(
                 host='localhost',
                 port=6379,
                 decode_responses=True
-            )
+            ))
             self.max_retries = 3
             self.initial_backoff = 10.0
             self.max_backoff = 300.0
@@ -378,10 +379,11 @@ class SelfHealingOrchestrator:
             state_dict['failure_type'] = state.failure_type.value  # Convert Enum to string
         
         try:
-            self.redis_client.setex(
+            previous = self.redis_client.set(
                 key,
-                STATE_TTL_SECONDS,
-                json.dumps(state_dict)
+                json.dumps(state_dict),
+                ex=STATE_TTL_SECONDS,
+                get=True
             )
             
             audit_logger.log_event(
@@ -404,6 +406,37 @@ class SelfHealingOrchestrator:
             raise
         
         self._update_active_index(state)
+        self._record_outcome(state, previous)
+    
+    @staticmethod
+    def _status_of(raw) -> Optional[DeploymentStatus]:
+        """Status stored in a saved state document, or None if unreadable"""
+        try:
+            return DeploymentStatus(json.loads(raw)['status'])
+        except (TypeError, ValueError, KeyError):
+            return None
+    
+    def _record_outcome(self, state: DeploymentState, previous_raw) -> None:
+        """
+        Count a deployment when it moves into a terminal status
+
+        SET ... GET hands back the document it replaced, so the transition is
+        detected in the same round trip as the write. A duplicate delivery
+        (terminal to the same terminal status) is not counted again, but a
+        re-run that reopens the deployment and settles again is.
+        """
+        if state.status not in TERMINAL_STATUSES:
+            return
+        if self._status_of(previous_raw) in TERMINAL_STATUSES:
+            return
+        metrics.record_outcome(
+            namespace=state.namespace,
+            app=state.app_name,
+            status=state.status.value,
+            started_at=state.started_at,
+            first_failure_at=state.first_failure_at,
+            finished_at=state.finished_at
+        )
     
     def _update_active_index(self, state: DeploymentState) -> None:
         """Track deployments that have not reached a terminal status"""
@@ -565,6 +598,34 @@ class SelfHealingOrchestrator:
         timeout: int = 300,
         deployment_id: Optional[str] = None,
         expected_generation: Optional[int] = None
+    ) -> bool:
+        """Run the health check and record its duration and result"""
+        started = time.perf_counter()
+        healthy = False
+        try:
+            healthy = self._wait_for_healthy_deployment(
+                namespace,
+                deployment_name,
+                timeout,
+                deployment_id,
+                expected_generation
+            )
+            return healthy
+        finally:
+            metrics.record_health_check(
+                namespace,
+                deployment_name,
+                healthy,
+                time.perf_counter() - started
+            )
+    
+    def _wait_for_healthy_deployment(
+        self,
+        namespace: str,
+        deployment_name: str,
+        timeout: int,
+        deployment_id: Optional[str],
+        expected_generation: Optional[int]
     ) -> bool:
         """
         Check if deployment is healthy (pods + application health)
@@ -1024,6 +1085,8 @@ class SelfHealingOrchestrator:
             metadata: Webhook metadata (e.g. workflow_run_id) merged into the
                 deployment state before the retry decision is made
         """
+        decision_started = time.perf_counter()
+        
         # Log failure detection
         audit_logger.log_failure_detected(
             deployment_id=deployment_id,
@@ -1077,6 +1140,8 @@ class SelfHealingOrchestrator:
                     "Ensure GitHub Actions webhook includes workflow_run_id."
                 )
                 
+                self._observe_decision(decision_started)
+                
                 # Fall back to alert
                 state.status = DeploymentStatus.FAILED
                 self.save_deployment_state(state)
@@ -1109,6 +1174,8 @@ class SelfHealingOrchestrator:
                 backoff_seconds=backoff_delay
             )
             
+            self._observe_decision(decision_started)
+            
             # Schedule and trigger the retry
             state.status = DeploymentStatus.RETRY_SCHEDULED
             self.save_deployment_state(state)
@@ -1138,10 +1205,12 @@ class SelfHealingOrchestrator:
                 f"{failure_type.value} happened before anything was deployed, "
                 f"so there is nothing to roll back"
             )
+            self._observe_decision(decision_started)
             return self._alert(state, version, reason)
         
         elif state.previous_version:
             blocked = await self._rollback_blocker(state, version)
+            self._observe_decision(decision_started)
             if blocked:
                 return blocked
             
@@ -1193,6 +1262,7 @@ class SelfHealingOrchestrator:
                 f"Cannot auto-recover deployment {deployment_id} - "
                 f"no previous version available"
             )
+            self._observe_decision(decision_started)
             state.status = DeploymentStatus.FAILED
             self.save_deployment_state(state)
             
@@ -1208,6 +1278,10 @@ class SelfHealingOrchestrator:
                 'action': 'alert',
                 'message': 'No previous version available - manual intervention required'
             }
+    
+    @staticmethod
+    def _observe_decision(started: float) -> None:
+        metrics.rollback_decision_duration_seconds.observe(time.perf_counter() - started)
     
     def _alert(self, state: DeploymentState, version: str, reason: str) -> Dict:
         """Mark the deployment failed and ask for manual intervention"""

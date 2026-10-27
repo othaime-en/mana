@@ -18,14 +18,22 @@ Configuration files are in `monitoring/` (see [Components](../architecture/compo
 
 ### Orchestrator
 
-| Metric                          | Type      | Labels                       | Meaning                                                           | Populated                |
-| ------------------------------- | --------- | ---------------------------- | ----------------------------------------------------------------- | ------------------------ |
-| `deployments_total`             | counter   | `namespace`, `status`        | Webhooks received, by status (`in_progress`, `success`, `failed`) | yes                      |
-| `retries_total`                 | counter   | `namespace`, `retry_attempt` | Retries scheduled                                                 | yes                      |
-| `rollbacks_total`               | counter   | `namespace`, `reason`        | Successful rollbacks (`reason` is the failure type, or `manual`)  | yes                      |
-| `health_check_duration_seconds` | histogram | `namespace`, `deployment`    | Duration of `POST /health-check` calls                            | yes                      |
-| `deployment_duration_seconds`   | histogram | `namespace`                  | Intended deployment duration                                      | declared, never observed |
-| `active_deployments`            | gauge     | `namespace`                  | Intended count of in-flight deployments                           | declared, never set      |
+| Metric                               | Type      | Labels                       | Meaning                                                                                                      |
+| ------------------------------------ | --------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `deployments_total`                  | counter   | `namespace`, `status`        | Deployments reaching a final status (`success`, `failed`, `rolled_back`), once per transition; `in_progress` and retried attempts are not counted |
+| `deployment_duration_seconds`        | histogram | `namespace`, `status`        | First `in_progress` event to the final status, across all attempts                                           |
+| `mana_recovery_duration_seconds`     | histogram | `namespace`, `app`, `outcome` | First failure to a successful retry (`retry_succeeded`) or a verified rollback (`rolled_back`)               |
+| `rollback_decision_duration_seconds` | histogram |                              | Time to decide retry, rollback, skip or alert for a failure (excludes the rollback itself)                   |
+| `active_deployments`                 | gauge     | `namespace`                  | Deployments that are `in_progress`, `retry_scheduled` or `rolling_back`, read from Redis at scrape time. Every replica reports the same value: aggregate with `max by (namespace)`, not `sum` |
+| `retries_total`                      | counter   | `namespace`, `retry_attempt` | Retries scheduled                                                                                            |
+| `rollbacks_total`                    | counter   | `namespace`, `reason`        | Successful rollbacks (`reason` is the failure type, or `manual`)                                             |
+| `health_checks_total`                | counter   | `namespace`, `result`        | Deployment health checks (`success` or `failed`), including those run during a rollback                     |
+| `health_check_duration_seconds`      | histogram | `namespace`, `deployment`    | Duration of each deployment health check                                                                     |
+| `webhook_requests_total`             | counter   | `endpoint`, `code`           | Requests to `/webhook/*` by HTTP status                                                                      |
+| `webhook_errors_total`               | counter   | `endpoint`, `reason`         | Webhook requests answered with an error (`validation` for 422, `server_error` for 5xx, `client_error`)      |
+| `redis_connection_errors_total`      | counter   |                              | Redis calls that failed with a connection or timeout error                                                   |
+
+A failure for a deployment that is already `failed` (for example a fifth failure webhook) is not counted again, and a re-run that reopens a finished deployment and settles again is counted again. Build and test failures reported with `namespace: ci` are counted as `failed` in that namespace (CORE-14).
 
 Standard `python_*` and `process_*` metrics are also exported. Use `curl -s $MANA/metrics/` to see the live output.
 
@@ -43,11 +51,11 @@ Provided by `prometheus-flask-exporter` at `GET /metrics`:
 ### Useful queries
 
 ```promql
-# Deployment events by status over the last hour
+# Deployment outcomes over the last hour
 sum(increase(deployments_total[1h])) by (status)
 
-# Failure ratio per namespace (5 min)
-sum(rate(deployments_total{status="failed"}[5m])) by (namespace)
+# Share of deployments that did not succeed, per namespace (5 min)
+sum(rate(deployments_total{status=~"failed|rolled_back"}[5m])) by (namespace)
   / sum(rate(deployments_total[5m])) by (namespace)
 
 # Rollbacks in the last 24 h, by reason
@@ -132,7 +140,7 @@ Four Grafana dashboards live in `monitoring/grafana/dashboards/`:
 | **Application Metrics**   | Request rate, error rate, latency percentiles, resource usage of the sample app                                                      |
 | **Infrastructure**        | Node CPU and memory, cluster capacity, quotas                                                                                        |
 
-Several panels use the recording rules above. Panels built on `active_deployments`, deployment duration and orchestrator rollback-decision series are empty until those metrics are emitted.
+Several panels use the recording rules above. 
 
 ### Access
 

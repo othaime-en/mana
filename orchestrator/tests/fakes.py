@@ -11,8 +11,10 @@ class FakeRedis:
     def get(self, key):
         return self.data.get(key)
 
-    def set(self, key, value, **_kwargs):
+    def set(self, key, value, get=False, **_kwargs):
+        previous = self.data.get(key)
         self.data[key] = value
+        return previous if get else None
 
     def setex(self, key, _ttl, value):
         self.data[key] = value

@@ -95,8 +95,8 @@ kubectl create secret generic github-token \
 
 | Variable               | Default | Description                       |
 | ---------------------- | ------- | --------------------------------- |
-| `LOG_LEVEL`            | `INFO`  | Intended application log level    |
-| `ENABLE_AUDIT_LOGGING` | `true`  | Intended switch for audit logging |
+| `LOG_LEVEL`            | `INFO`  | Application and uvicorn log level |
+| `ENABLE_AUDIT_LOGGING` | `true`  | `false` silences audit events     |
 
 !!! warning "Parsed but not yet enforced"
 Both values are loaded and validated into the config object, but the logging setup in `orchestrator.py` and `api.py` uses a fixed `INFO` level, and the audit logger is always on. Changing these variables currently has no effect on output.

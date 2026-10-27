@@ -91,7 +91,7 @@ Every significant orchestrator action produces an audit event (`deployment_recei
 kubectl -n orchestrator logs -l app=orchestrator | grep "AUDIT:"
 ```
 
-The orchestrator's default log format prints `AUDIT: <action>` and attaches the structured payload to the record as `audit_event`, which the plain text formatter does not print. To ship the complete JSON to Loki, configure a JSON formatter (for example `python-json-logger`, already used by the sample app) that includes extra fields. Until then, correlate by `deployment_id` in the surrounding log lines.
+Every orchestrator log line is a single JSON object with `timestamp`, `level`, `logger` and `message`. Audit events add their fields (`action`, `success`, `deployment_id`, `namespace`, `deployment_name`, `version`, `details`, `error`) to the same object, so the Loki query `{namespace="orchestrator"} | json | action != ""` selects them. Audit events are always emitted at `INFO`, whatever `LOG_LEVEL` is; set `ENABLE_AUDIT_LOGGING=false` to silence them.
 
 ### Sample app logs
 

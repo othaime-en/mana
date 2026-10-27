@@ -11,11 +11,14 @@ from src.orchestrator import (
     FailureType,
     DeploymentStatus
 )
+from src.config import get_config
+from src.logging_config import configure_logging
 from src.utils import get_audit_logger
 from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
 import logging
 
-logging.basicConfig(level=logging.INFO)
+_config = get_config()
+configure_logging(_config.log_level, _config.enable_audit_logging)
 logger = logging.getLogger(__name__)
 
 audit_logger = get_audit_logger()
@@ -429,5 +432,6 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_config=None,
+        log_level=_config.log_level.lower()
     )

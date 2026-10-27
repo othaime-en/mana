@@ -161,3 +161,18 @@ class TestOrchestratorConfig:
         config2 = get_config()
         
         assert config1 is config2
+    
+    def test_log_level_is_normalized_on_validate(self, monkeypatch):
+        monkeypatch.setenv('LOG_LEVEL', 'debug')
+        config = OrchestratorConfig.from_env()
+        
+        config.validate()
+        
+        assert config.log_level == 'DEBUG'
+    
+    def test_invalid_log_level_fails_validation(self, monkeypatch):
+        monkeypatch.setenv('LOG_LEVEL', 'LOUD')
+        config = OrchestratorConfig.from_env()
+        
+        with pytest.raises(ValueError, match="log_level must be one of"):
+            config.validate()

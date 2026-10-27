@@ -19,10 +19,6 @@ from src.utils import get_audit_logger, AuditAction, split_image_reference, with
 from src.config import get_config
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 audit_logger = get_audit_logger()

@@ -135,7 +135,7 @@ All workflows live in `.github/workflows/`. See [CI/CD Integration](../usage/cic
 | `sample-app`   | Deployment, Service, Ingress, HPA and related resources for the sample app                                                   |
 | `orchestrator` | ServiceAccount, ClusterRole/Binding, ConfigMap, Secret, Redis Deployment and Service, orchestrator Deployment                |
 | `security`     | NetworkPolicies, ResourceQuotas and LimitRanges                                                                              |
-| `monitoring`   | `kube-prometheus-stack` and `loki-stack` Helm releases, ServiceMonitors, PrometheusRules and the Grafana dashboard ConfigMap |
+| `monitoring`   | `kube-prometheus-stack` and `loki-stack` Helm releases, ServiceMonitors, one `PrometheusRule` built from `monitoring/prometheus/*.yml` and one dashboard ConfigMap per file in `monitoring/grafana/dashboards` |
 
 State is stored locally by default (`backend.tf` includes a commented S3 + DynamoDB example for production). Inputs are documented in the [Configuration Reference](../reference/configuration.md#terraform-variables).
 

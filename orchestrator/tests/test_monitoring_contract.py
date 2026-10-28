@@ -160,3 +160,24 @@ def test_rules_only_use_known_metrics(source, name, expression):
 @pytest.mark.parametrize("source,title,expression", panel_cases(), ids=lambda v: str(v)[:40])
 def test_panels_only_use_known_metrics(source, title, expression):
     assert missing_metrics(expression) == set(), f"{source}: {title}"
+
+
+def dashboard_files() -> List[Path]:
+    return sorted(DASHBOARD_DIR.glob("*.json"))
+
+
+@pytest.mark.parametrize("path", dashboard_files(), ids=lambda p: p.name)
+def test_datasource_placeholders_resolve_when_provisioned(path):
+    """
+    Grafana substitutes ${DS_*} from __inputs only in the import UI. A
+    provisioned dashboard needs a datasource template variable of the same name.
+    """
+    dashboard = json.loads(path.read_text())
+    used = set(re.findall(r"\$\{(DS_[A-Z]+)\}", path.read_text()))
+    declared = {
+        variable["name"]
+        for variable in dashboard["templating"]["list"]
+        if variable.get("type") == "datasource"
+    }
+
+    assert used <= declared, f"{path.name} uses {sorted(used - declared)} without a variable"

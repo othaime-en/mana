@@ -9,10 +9,26 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 ### Added
 
+- Orchestrator metrics that dashboards and alerts depend on: `deployment_duration_seconds` (now with a `status` label), `active_deployments` (read from Redis at scrape time), `rollback_decision_duration_seconds`, `health_checks_total`, `webhook_requests_total`, `webhook_errors_total` and `redis_connection_errors_total`, plus the new `mana_recovery_duration_seconds` (first failure to a successful retry or verified rollback). Dashboards gain panels for recovery time, health check results and webhook traffic (OBS-03, OBS-09).
+- Deployments are persisted from the `in_progress` webhook with `started_at`, `first_failure_at` and `finished_at`, which `GET /deployment/{id}` returns (CORE-12).
+- `tests/test_monitoring_contract.py` fails when an alert, recording rule or dashboard panel uses a metric nothing provides, or a dashboard uses a datasource placeholder it does not declare.
+- Workflow `validate-monitoring.yml` runs `promtool`, `amtool`, `alloy validate` and `actionlint`; `scripts/install-validators.sh` installs the same pinned, checksum-verified tools locally (CI-05, partly).
+- Grafana Alloy configuration in `monitoring/alloy/` for Kubernetes and for Docker Compose.
+
+### Changed
+
+- **`deployments_total` now counts final outcomes** (`success`, `failed`, `rolled_back`), once per transition, instead of every webhook. `in_progress` events and retried attempts are no longer counted, so success-rate rules are correct (OBS-02). Queries on `status="in_progress"` stop returning data.
+- `GET /metrics/deployment/{namespace}/{deployment_name}` moves to `GET /deployments/{namespace}/{deployment_name}/status`; the old path is gone. `GET /metrics` is served directly instead of redirecting (OBS-04, OBS-05).
+- Every log line is one JSON object, with audit fields merged in, and `LOG_LEVEL` and `ENABLE_AUDIT_LOGGING` are applied. An invalid `LOG_LEVEL` stops startup (OBS-01, OBS-08).
+- Because `in_progress` now stores webhook metadata, a failure webhook without `workflow_run_id` is retried when the deployment's `in_progress` event carried one, instead of alerting.
+- Promtail is replaced by Grafana Alloy in Compose and Terraform; Terraform builds one `PrometheusRule` and the dashboard ConfigMaps from the files in `monitoring/` instead of its own copies (OBS-07, OBS-10). Not validated or applied: no Terraform binary or cluster was available.
+- `actions/cache` and `codecov/codecov-action` are bumped to v6.1.0 and v7.1.1 (CI-04, partly).
+
 - Complete documentation set under `docs/` (published with MkDocs): architecture, configuration, usage, reference, contributing and about sections (PR #9).
 
 ### Fixed
 
+- `DeploymentFailureRate` and `HighWebhookFailureRate` divided series with different label sets and could never evaluate correctly; two quantile alerts lacked `sum by (le)`; `DeploymentReplicasMismatch` described a label that does not exist; the Compose Prometheus never loaded the recording rules; the standalone scrape jobs built invalid target addresses; `alertmanager.yml` did not load (invalid email `subject` field); provisioned dashboards could not resolve their datasource placeholders (OBS-02, OBS-07, OBS-11).
 - The first failure webhook for a deployment now returns `retry` instead of `alert`: the webhook's `metadata`, including `workflow_run_id`, is carried into the failure state (PR #31).
 - `deployment_id` is now `deploy-<run_id>-<namespace>` and the image version is `v<sha7>`, so a workflow re-run reports the same deployment and the retry counter accumulates (CORE-01). Webhook metadata now carries `run_attempt`.
 - `failure_type: smoke_test_failure` is accepted. `status` and `failure_type` are validated as enums, so unknown values return HTTP 422 instead of 500, an empty `failure_type` counts as absent, and `status: failed` requires a `failure_type` (CORE-13, TEST-04).
@@ -27,9 +43,8 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 These are confirmed by the current code and are tracked in [Data Flow: Known Behaviours](../architecture/data-flow.md#known-behaviours-and-limitations):
 
-- `GET /metrics/deployment/{namespace}/{deployment_name}` is shadowed by the Prometheus mount and returns Prometheus text.
-- Metrics `deployment_duration_seconds` and `active_deployments` are declared but never updated; several alerts reference metrics the orchestrator does not emit.
-- `LOG_LEVEL` and `ENABLE_AUDIT_LOGGING` are parsed but not applied.
+- Build and test failures reported with `namespace: ci` are counted as `failed` in `deployments_total{namespace="ci"}` and lower the aggregate success rate (CORE-14).
+- A counter's first increment is invisible to `rate()` (the series appears already at 1), so the first deployment of each new namespace and status is missed by rate-based panels.
 - No authentication on the webhook and API endpoints; Grafana ships with a default password.
 - Several Makefile targets reference scripts that are not in the repository.
 

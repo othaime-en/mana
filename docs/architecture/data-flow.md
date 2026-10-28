@@ -177,5 +177,8 @@ These were found by reading the code and exercising the webhook endpoint against
 !!! note "1. GitHub re-runs apply to finished runs"
 GitHub allows re-running a workflow run once it has completed. The webhook is sent from inside the running workflow, so the backoff delay must outlast the remaining steps or the re-run request may be rejected. Monitor the `retries_total` metric and orchestrator logs for `GitHub API permission denied` or non-201 responses.
 
+!!! note "A run ID seen earlier counts"
+`in_progress` webhooks store their `metadata`, so a `failed` webhook that omits `workflow_run_id` is still retried when the deployment's `in_progress` event carried it. The `alert` for a missing run ID only happens when no event for that deployment ever supplied one.
+
 !!! note "2. Build-stage failures have nothing to roll back"
 `build-and-test.yml` reports `build_failure`/`test_failure` with `namespace: ci` and no `workflow_run_id`. These produce an `alert` because no Deployment exists to retry or roll back. The orchestrator also never rolls back for these two types, even when a `workflow_run_id` is present and retries are exhausted.

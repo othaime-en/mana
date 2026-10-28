@@ -255,7 +255,8 @@ receivers:
     email_configs:
       - to: 'sre-team@example.com'
         from: 'alerts@mana-cicd.example.com'
-        subject: 'SLO Violation: {{ .CommonAnnotations.summary }}'
+        headers:
+          subject: 'SLO Violation: {{ .CommonAnnotations.summary }}'
         html: '{{ template "email.default.html" . }}'
         send_resolved: true
 

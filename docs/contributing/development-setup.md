@@ -55,6 +55,21 @@ CI runs both suites on every push and pull request, and fails when coverage drop
 !!! note "Test isolation"
 `orchestrator/src/api.py` creates the orchestrator at import time, which connects to Redis and loads a kubeconfig. Tests that import it must patch `redis.Redis` and the `kubernetes.config`/`client` calls (the `api` fixture in `orchestrator/tests/conftest.py` does this), or construct `SelfHealingOrchestrator(use_config=False)`.
 
+### Validate monitoring configuration and workflows
+
+CI runs `promtool`, `amtool` and `actionlint` (workflow `validate-monitoring.yml`) when files under `monitoring/` or `.github/workflows/` change. To run the same checks locally on Linux amd64:
+
+```bash
+scripts/install-validators.sh            # installs into ./.tools/bin, verifies SHA-256 checksums
+export PATH="$PWD/.tools/bin:$PATH"
+promtool check rules monitoring/prometheus/alerts.yml monitoring/prometheus/recording-rules.yml
+promtool check config --syntax-only monitoring/prometheus/prometheus.yml
+amtool check-config monitoring/alertmanager/alertmanager.yml
+actionlint
+```
+
+`--syntax-only` is needed because `prometheus.yml` points at in-cluster credential files that do not exist on a laptop.
+
 ## 3. Run Services Locally Without Containers
 
 ### Orchestrator

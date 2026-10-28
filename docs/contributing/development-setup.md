@@ -57,7 +57,7 @@ CI runs both suites on every push and pull request, and fails when coverage drop
 
 ### Validate monitoring configuration and workflows
 
-CI runs `promtool`, `amtool` and `actionlint` (workflow `validate-monitoring.yml`) when files under `monitoring/` or `.github/workflows/` change. To run the same checks locally on Linux amd64:
+CI runs `promtool`, `amtool`, `alloy validate` and `actionlint` (workflow `validate-monitoring.yml`) when files under `monitoring/` or `.github/workflows/` change. To run the same checks locally on Linux amd64:
 
 ```bash
 scripts/install-validators.sh            # installs into ./.tools/bin, verifies SHA-256 checksums
@@ -66,6 +66,7 @@ promtool check rules monitoring/prometheus/alerts.yml monitoring/prometheus/reco
 promtool check config --syntax-only monitoring/prometheus/prometheus.yml
 amtool check-config monitoring/alertmanager/alertmanager.yml
 actionlint
+for f in monitoring/alloy/*.alloy; do LOKI_URL=http://loki:3100/loki/api/v1/push alloy validate "$f"; done
 ```
 
 `--syntax-only` is needed because `prometheus.yml` points at in-cluster credential files that do not exist on a laptop.
@@ -102,7 +103,7 @@ make dev-logs
 make dev-stop
 ```
 
-This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, `admin` / `admin123`), Loki and Promtail.
+This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, `admin` / `admin123`), Loki and Alloy.
 
 !!! warning "Known Compose issues to be aware of" - The orchestrator service mounts `~/.kube/config` to `/root/.kube/config`, but the image runs as the non-root user `orchestrator`, which cannot read `/root`. Mount the file to `/home/orchestrator/.kube/config` instead. - A kubeconfig for Kind or Minikube points at `127.0.0.1`, which inside the container is the container itself. Use a kubeconfig whose server address is reachable from Docker (for Kind: `kind get kubeconfig --internal` with the Kind network attached). - The orchestrator service's healthcheck uses `curl`, which the orchestrator image does not install, so Compose reports it unhealthy. Use `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"` or add `curl` to the image. - Prometheus in Compose expects an Alertmanager at `alertmanager:9093`, which Compose does not define; alert delivery will not work locally.
 
@@ -175,7 +176,7 @@ orchestrator/   FastAPI service (src/, tests/, k8s/, Dockerfile)
 sample-app/     Flask target app (src/, tests/, k8s/, Dockerfile)
 terraform/      Modules: namespaces, sample-app, orchestrator, security, monitoring
 kubernetes/     Standalone security manifests
-monitoring/     Prometheus, Grafana, Loki, Promtail, Alertmanager configs
+monitoring/     Prometheus, Grafana, Loki, Alloy, Alertmanager configs
 scripts/        deploy.sh
 .github/        Workflows
 docs/           This documentation

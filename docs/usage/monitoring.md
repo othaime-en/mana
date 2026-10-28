@@ -9,7 +9,7 @@ MANA ships a complete observability setup (Prometheus, Grafana, Loki, Alertmanag
 | Orchestrator metrics              | `GET /metrics` on port 8000                   | Prometheus                         |
 | Sample app metrics                | `GET /metrics` on port 5000                   | Prometheus                         |
 | Kubernetes metrics                | kube-state-metrics, cAdvisor, node exporter   | Prometheus                         |
-| Audit events and application logs | stdout of each pod                            | Promtail to Loki                   |
+| Audit events and application logs | stdout of each pod                            | Alloy to Loki                      |
 | Health                            | `GET /health` on the orchestrator and the app | Kubernetes probes, Prometheus `up` |
 
 Configuration files are in `monitoring/` (see [Components](../architecture/components.md#monitoring-stack)).
@@ -107,7 +107,7 @@ With `ENVIRONMENT=production` the sample app logs JSON with a per-request correl
 
 ### Querying logs in Loki
 
-Promtail labels logs with `namespace`, `pod`, `container`, `app` and `version` (and `level`/`logger` when the line is JSON). In Grafana, **Explore**, choose the Loki data source:
+Grafana Alloy (`monitoring/alloy/`) collects logs from the `production`, `staging`, `canary` and `orchestrator` namespaces and from Kubernetes events, and labels them with `namespace`, `pod`, `container` and `app`. Everything else (`level`, `logger`, the audit fields, request IDs) stays in the JSON line and is read with `| json` at query time, which keeps label cardinality low. Under Compose, `config-compose.alloy` reads container logs from the Docker socket and maps the `sample-app` service to namespace `production` and `orchestrator` to `orchestrator`, so the same queries work. To collect another namespace, extend the `regex` in the `keep` rule of `config.alloy`. In Grafana, **Explore**, choose the Loki data source:
 
 ```logql
 {namespace="orchestrator", app="orchestrator"}
@@ -243,7 +243,7 @@ curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' \
 | Orchestrator target missing or `DOWN` | Pod annotations (manual install) or ServiceMonitor (Terraform); relabeling of `__address__`; port 8000 reachable; the path is `/metrics` |
 | Metrics exist but panels are empty    | The panel uses a recording rule or metric that is not emitted yet; run the underlying query in Prometheus                                                       |
 | No dashboards in Grafana              | Provisioning paths (see warning above) or import manually                                                                                                       |
-| No logs in Loki                       | Promtail running? Check `kubectl logs -n monitoring -l app=promtail`; query `{namespace="orchestrator"}` first                                                  |
+| No logs in Loki                       | Alloy running? Check `kubectl logs -n monitoring -l app.kubernetes.io/name=alloy`, or `docker compose logs alloy`; query `{namespace="orchestrator"}` first                                                  |
 | Alerts never fire                     | Rule loaded (`/rules` page)? Metric present? `for:` duration elapsed?                                                                                           |
 | Alerts fire but nothing arrives       | Alertmanager receivers and secrets; check `/#/status` on port 9093                                                                                              |
 | Prometheus out of disk                | Reduce retention or raise the volume size (`10Gi` by default)                                                                                                   |

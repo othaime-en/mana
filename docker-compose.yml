@@ -119,14 +119,19 @@ services:
     networks:
       - app_network
 
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
+  alloy:
+    image: grafana/alloy:v1.21.2
+    container_name: alloy
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    environment:
+      LOKI_URL: http://loki:3100/loki/api/v1/push
     volumes:
-      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-    command: -config.file=/etc/promtail/config.yml
+      - ./monitoring/alloy/config-compose.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - app_network
     depends_on:

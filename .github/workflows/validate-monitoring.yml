@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   validate:
-    name: promtool, amtool, actionlint
+    name: promtool, amtool, alloy, actionlint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -40,6 +40,15 @@ jobs:
 
       - name: Check Alertmanager configuration
         run: amtool check-config monitoring/alertmanager/alertmanager.yml
+
+      - name: Validate Alloy configuration
+        env:
+          LOKI_URL: http://loki:3100/loki/api/v1/push
+        run: |
+          for config in monitoring/alloy/*.alloy; do
+            alloy validate "$config"
+            alloy fmt "$config" | diff --unified - "$config"
+          done
 
       - name: Lint workflows
         run: actionlint

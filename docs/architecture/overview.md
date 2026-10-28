@@ -28,7 +28,7 @@ This page explains the design at a high level. Details are in [Components](compo
 | **GitHub integration**     | Asks GitHub to re-run a failed workflow run                                                     | [CI/CD Integration](../usage/cicd-integration.md)                  |
 | **Audit logger**           | One JSON audit event per action                                                                 | [Monitoring](../usage/monitoring.md#structured-logging)            |
 | **Sample app**             | Flask service used as a deployment target, with failure simulation                              | [Components: Sample Application](components.md#sample-application) |
-| **Monitoring stack**       | Prometheus, Grafana, Loki/Promtail, Alertmanager configuration                                  | [Monitoring](../usage/monitoring.md)                               |
+| **Monitoring stack**       | Prometheus, Grafana, Loki/Alloy, Alertmanager configuration                                  | [Monitoring](../usage/monitoring.md)                               |
 
 ## How a Deployment Is Handled
 

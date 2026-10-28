@@ -59,7 +59,7 @@ MANA depends on open-source packages and container images that carry their own l
 | redis-py, kubernetes (Python client), requests, prometheus-client | Orchestrator integrations | PyPI                                   |
 | Flask, Gunicorn, prometheus-flask-exporter, python-json-logger    | Sample app                | PyPI (`sample-app/requirements.txt`)   |
 | Redis                                                             | State store               | `redis:8-alpine` image                 |
-| Prometheus, Grafana, Loki, Promtail, Alertmanager                 | Monitoring                | Container images and Helm charts       |
+| Prometheus, Grafana, Loki, Alloy, Alertmanager                   | Monitoring                | Container images and Helm charts       |
 | Terraform providers (`kubernetes`, `helm`)                        | Infrastructure            | Terraform registry                     |
 
 To list the exact licences of the Python dependencies you have installed:

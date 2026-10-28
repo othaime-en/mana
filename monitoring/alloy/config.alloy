@@ -1,0 +1,55 @@
+logging {
+	level  = "info"
+	format = "logfmt"
+}
+
+discovery.kubernetes "pods" {
+	role = "pod"
+}
+
+discovery.relabel "mana_pods" {
+	targets = discovery.kubernetes.pods.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		regex         = "production|staging|canary|orchestrator"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		target_label  = "namespace"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_name"]
+		target_label  = "pod"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_container_name"]
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_app"]
+		target_label  = "app"
+	}
+}
+
+loki.source.kubernetes "pods" {
+	targets    = discovery.relabel.mana_pods.output
+	forward_to = [loki.write.default.receiver]
+}
+
+loki.source.kubernetes_events "cluster" {
+	job_name   = "kubernetes-events"
+	log_format = "json"
+	forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+	endpoint {
+		url = sys.env("LOKI_URL")
+	}
+}

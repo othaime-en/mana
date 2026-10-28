@@ -142,8 +142,10 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_pod_label_version]
         action: replace
         target_label: version
-      - target_label: __address__
-        replacement: __meta_kubernetes_pod_ip:5000
+      - source_labels: [__meta_kubernetes_pod_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: $1:5000
     metric_relabel_configs:
       - source_labels: [__name__]
         regex: 'flask_.*'
@@ -166,11 +168,13 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_pod_name]
         action: replace
         target_label: pod
-      - target_label: __address__
-        replacement: __meta_kubernetes_pod_ip:8000
+      - source_labels: [__meta_kubernetes_pod_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: $1:8000
     metric_relabel_configs:
       - source_labels: [__name__]
-        regex: '(deployments_total|rollbacks_total|deployment_duration_seconds.*|active_deployments|health_check_duration_seconds.*|retries_total)'
+        regex: '(deployments_total|rollbacks_total|retries_total|active_deployments|deployment_duration_seconds.*|mana_recovery_duration_seconds.*|rollback_decision_duration_seconds.*|health_check_duration_seconds.*|health_checks_total|webhook_requests_total|webhook_errors_total|redis_connection_errors_total)'
         action: keep
 
   # Redis (if exposed)
@@ -187,8 +191,10 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_pod_name]
         action: replace
         target_label: pod
-      - target_label: __address__
-        replacement: __meta_kubernetes_pod_ip:9121
+      - source_labels: [__meta_kubernetes_pod_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: $1:9121
 
   # Node Exporter
   - job_name: 'node-exporter'

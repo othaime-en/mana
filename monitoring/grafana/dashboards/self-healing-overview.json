@@ -155,7 +155,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum(active_deployments)",
+          "expr": "sum(deployment:active_count:namespace) or vector(0)",
           "instant": true,
           "legendFormat": "Active"
         }
@@ -228,12 +228,12 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "auto"
       },
-      "title": "Avg MTTR",
+      "title": "Mean Recovery Time (24h)",
       "type": "stat",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "mttr:rollback_duration:avg:24h",
+          "expr": "mttr:recovery_duration:avg:24h",
           "instant": true,
           "legendFormat": "MTTR"
         }

@@ -18,13 +18,13 @@ groups:
           component: deployment
         annotations:
           summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has mismatched replicas"
-          description: "Deployment {{ $labels.deployment }} in namespace {{ $labels.namespace }} has {{ $value }} replicas available but {{ $labels.spec_replicas }} specified. This indicates pods are not becoming ready."
+          description: "Deployment {{ $labels.deployment }} in namespace {{ $labels.namespace }} specifies {{ $value }} replicas but a different number is available. This indicates pods are not becoming ready."
           runbook_url: "https://docs.example.com/runbooks/deployment-replicas-mismatch"
 
       # Critical: High rollback rate
       - alert: HighRollbackRate
         expr: |
-          rate(rollbacks_total[5m]) > 0.1
+          sum by (namespace) (rate(rollbacks_total[5m])) > 0.1
         for: 2m
         labels:
           severity: critical
@@ -38,17 +38,17 @@ groups:
       - alert: DeploymentFailureRate
         expr: |
           (
-            rate(deployments_total{status="failed"}[10m]) 
-            / 
-            rate(deployments_total[10m])
+            sum by (namespace) (rate(deployments_total{status=~"failed|rolled_back"}[10m]))
+            /
+            sum by (namespace) (rate(deployments_total[10m]))
           ) > 0.2
         for: 5m
         labels:
           severity: warning
           component: cicd
         annotations:
-          summary: "High deployment failure rate detected"
-          description: "Deployment failure rate is {{ $value | humanizePercentage }} in the last 10 minutes. Current rate: {{ $value }} failures/sec."
+          summary: "High deployment failure rate in {{ $labels.namespace }}"
+          description: "{{ $value | humanizePercentage }} of deployments in namespace {{ $labels.namespace }} failed or were rolled back in the last 10 minutes."
           runbook_url: "https://docs.example.com/runbooks/deployment-failure-rate"
 
       # Critical: Deployment success rate below SLO
@@ -85,8 +85,8 @@ groups:
       # Critical: Deployment taking too long
       - alert: SlowDeployment
         expr: |
-          histogram_quantile(0.95, 
-            rate(deployment_duration_seconds_bucket[5m])
+          histogram_quantile(0.95,
+            sum by (namespace, le) (rate(deployment_duration_seconds_bucket{status="success"}[5m]))
           ) > 600
         for: 10m
         labels:
@@ -118,7 +118,7 @@ groups:
       - alert: SlowRollbackDecision
         expr: |
           histogram_quantile(0.95,
-            rate(rollback_decision_duration_seconds_bucket[5m])
+            sum by (le) (rate(rollback_decision_duration_seconds_bucket[5m]))
           ) > 1.0
         for: 5m
         labels:
@@ -133,9 +133,9 @@ groups:
       - alert: HighWebhookFailureRate
         expr: |
           (
-            rate(webhook_errors_total[5m])
+            sum by (endpoint) (rate(webhook_errors_total[5m]))
             /
-            rate(webhook_requests_total[5m])
+            sum by (endpoint) (rate(webhook_requests_total[5m]))
           ) > 0.05
         for: 5m
         labels:

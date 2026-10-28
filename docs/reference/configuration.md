@@ -132,14 +132,14 @@ Defined in `monitoring/prometheus/alerts.yml`. Severity drives Alertmanager rout
 | Alert                                                                               | Condition                                                         | For        | Severity |
 | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ---------- | -------- |
 | `DeploymentReplicasMismatch`                                                        | spec replicas differ from available (production, staging, canary) | 5 m        | warning  |
-| `HighRollbackRate`                                                                  | `rate(rollbacks_total[5m]) > 0.1`                                 | 2 m        | critical |
-| `DeploymentFailureRate`                                                             | failed / total deployments over 10 m `> 20%`                      | 5 m        | warning  |
+| `HighRollbackRate`                                                                  | `sum by (namespace) (rate(rollbacks_total[5m])) > 0.1` (per second) | 2 m        | critical |
+| `DeploymentFailureRate`                                                             | (failed + rolled back) / all outcomes per namespace over 10 m `> 20%` | 5 m        | warning  |
 | `DeploymentSuccessRateBelowSLO`                                                     | success rate over 1 h `< 95%`                                     | 10 m       | critical |
 | `PodCrashLooping`                                                                   | restart rate over 15 m `> 0.1`                                    | 5 m        | warning  |
-| `SlowDeployment`                                                                    | p95 `deployment_duration_seconds` `> 600`                         | 10 m       | warning  |
+| `SlowDeployment`                                                                    | p95 `deployment_duration_seconds` of successful deployments `> 600` | 10 m       | warning  |
 | `OrchestratorDown`                                                                  | `up{job="orchestrator"} == 0`                                     | 2 m        | critical |
 | `SlowRollbackDecision`                                                              | p95 `rollback_decision_duration_seconds > 1`                      | 5 m        | warning  |
-| `HighWebhookFailureRate`                                                            | `webhook_errors_total / webhook_requests_total > 5%`              | 5 m        | warning  |
+| `HighWebhookFailureRate`                                                            | `webhook_errors_total / webhook_requests_total > 5%` per endpoint | 5 m        | warning  |
 | `RedisConnectionFailures`                                                           | `rate(redis_connection_errors_total[5m]) > 0`                     | 2 m        | critical |
 | `HighHealthCheckFailureRate`                                                        | failed health checks `> 10%`                                      | 5 m        | warning  |
 | `HighErrorRate`                                                                     | 5xx ratio of `flask_http_request_total`                           | 5 m        | critical |
@@ -150,8 +150,7 @@ Defined in `monitoring/prometheus/alerts.yml`. Severity drives Alertmanager rout
 | `HighNodeCPU` (`> 80%`), `HighNodeMemory` (`> 85%`), `TooManyPodsPerNode` (`> 100`) | node pressure                                                     | 10 m       | warning  |
 | `PrometheusScrapeFailing`, `PrometheusStorageFull`, `GrafanaDown`, `LokiDown`       | monitoring health                                                 | 5 to 10 m  | warning  |
 
-!!! warning "Alerts that depend on metrics the orchestrator does not emit yet"
-`SlowRollbackDecision`, `HighWebhookFailureRate`, `RedisConnectionFailures`, `HighHealthCheckFailureRate` and `SlowDeployment` query `rollback_decision_duration_seconds`, `webhook_requests_total`/`webhook_errors_total`, `redis_connection_errors_total`, `health_checks_total` and `deployment_duration_seconds`. The orchestrator declares only some of these (`deployment_duration_seconds` is declared but never observed) and none of the others, so these alerts will not fire until the metrics are implemented. See [Monitoring](../usage/monitoring.md#prometheus-metrics).
+Every metric these alerts query is emitted by the orchestrator, and `tests/test_monitoring_contract.py` fails if a rule or dashboard panel starts referencing one that is not.
 
 ## Monitoring Settings
 

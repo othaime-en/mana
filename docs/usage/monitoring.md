@@ -77,7 +77,7 @@ sum(rate(kube_pod_container_status_restarts_total{namespace="production"}[15m]))
 
 ### Recording rules
 
-`monitoring/prometheus/recording-rules.yml` pre-computes success, failure, rollback and retry rates (`deployment:success_rate:5m`, `deployment:rollback_rate:1h`, and so on), HTTP rates and latency percentiles (`http:*`), node and pod resource usage, SLO and error-budget series (`slo:*`, `mttr:rollback_duration:avg:24h`), and some orchestrator series (`orchestrator:webhook_error_rate:5m`, `orchestrator:rollback_decision_seconds:p95:5m`). Rules that depend on metrics the orchestrator does not emit (webhook, rollback decision and deployment duration series) produce no data yet.
+`monitoring/prometheus/recording-rules.yml` pre-computes success, failure, rollback and retry rates (`deployment:success_rate:5m`, `deployment:rollback_rate:1h`, and so on), deployment duration percentiles (`deployment:duration_seconds:p50:5m` and p95/p99, successful deployments only), recovery time (`mttr:recovery_duration:avg:24h`, `recovery:duration_seconds:p50:1h` and `p95:1h` by outcome), HTTP rates and latency percentiles (`http:*`), node and pod resource usage, SLO and error-budget series (`slo:*`), and orchestrator series (`orchestrator:webhook_error_rate:5m`, `orchestrator:rollback_decision_seconds:p95:5m`). The failure rate counts `failed` and `rolled_back` outcomes, so success rate and failure rate add up to one.
 
 ### How Prometheus finds the targets
 
@@ -136,7 +136,7 @@ Four Grafana dashboards live in `monitoring/grafana/dashboards/`:
 | Dashboard                 | Shows                                                                                                                                |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | **Self-Healing Overview** | Success rate, rollback and retry activity, failed deployments, MTTR and error budget, orchestrator health, pod restarts, recent logs |
-| **Deployment Metrics**    | Per-namespace deployment and rollback statistics, durations, SLO and error budget                                                    |
+| **Deployment Metrics**    | Per-namespace deployment and rollback statistics, durations, SLO and error budget, recovery time, health check results and webhook traffic |
 | **Application Metrics**   | Request rate, error rate, latency percentiles, resource usage of the sample app                                                      |
 | **Infrastructure**        | Node CPU and memory, cluster capacity, quotas                                                                                        |
 

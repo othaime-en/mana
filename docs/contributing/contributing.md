@@ -7,7 +7,7 @@ By participating you agree to follow the [Code of Conduct](code-of-conduct.md). 
 ## Ways to Contribute
 
 - **Report a bug** or unexpected behaviour.
-- **Fix a known issue.** The [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) page lists confirmed problems that are good starting points: alerts and recording rules that reference metrics the orchestrator does not emit, and the `ci` namespace polluting deployment outcome counts.
+- **Fix a known issue.** The [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) page lists confirmed problems that are good starting points: the `ci` namespace polluting deployment outcome counts.
 - **Improve tests.** The orchestrator's API layer (`api.py`) has no tests and overall coverage is under 50%.
 - **Improve the docs.** Corrections, clearer examples and missing sections are all valuable.
 - **Propose a feature** such as webhook authentication, a Redis password option, or adapters for other CI systems.
@@ -75,6 +75,7 @@ Write the subject in the imperative mood, under about 72 characters, and explain
 - [ ] `make test` passes (apart from the two known failing orchestrator tests until they are fixed).
 - [ ] `black`, `flake8` and `isort` are clean for changed Python files.
 - [ ] Docs are updated: any change to endpoints, environment variables, defaults, metrics, or workflow behaviour updates the matching page under `docs/`.
+- [ ] Metrics, alerts and dashboards agree: a new orchestrator metric has a panel or an alert, and `tests/test_monitoring_contract.py` passes. It fails when an alert, recording rule or dashboard panel uses a metric that neither `src/metrics.py`, another recording rule nor its list of exporter metrics provides; add a new exporter metric to that list deliberately.
 - [ ] No secrets, tokens, kubeconfigs, `.env` files or Terraform state are committed.
 - [ ] Kubernetes manifests keep their security settings (non-root, dropped capabilities, resource limits).
 

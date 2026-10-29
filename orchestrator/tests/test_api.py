@@ -1,28 +1,16 @@
 import asyncio
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
+import redis
 
 from src.orchestrator import DeploymentState, DeploymentStatus, FailureType
+from tests.fakes import FakeRedis
 
 BLOCK_SECONDS = 1.0
 MAX_LOOP_STALL_SECONDS = 0.5
-
-
-class FakeRedis:
-    def __init__(self):
-        self.data = {}
-
-    def get(self, key):
-        return self.data.get(key)
-
-    def setex(self, key, _ttl, value):
-        self.data[key] = value
-
-    def ping(self):
-        return True
 
 
 def blocking(*_args, **_kwargs):
@@ -259,3 +247,122 @@ async def test_success_with_blank_failure_type_is_accepted(api, blank):
 
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_in_progress_webhook_persists_the_deployment(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()):
+            response = await client.post(
+                "/webhook/deployment", json=webhook_body("in_progress", {"commit": "abc"})
+            )
+            state = (await client.get("/deployment/deploy-first-failure")).json()
+
+    assert response.json()["status"] == "acknowledged"
+    assert state["status"] == "in_progress"
+    assert state["started_at"] is not None
+    assert state["finished_at"] is None
+    assert state["metadata"] == {"commit": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_in_progress_webhook_is_acknowledged_when_redis_is_down(api):
+    transport = httpx.ASGITransport(app=api.app)
+    broken = FakeRedis()
+    broken.setex = Mock(side_effect=redis.ConnectionError("down"))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", broken):
+            response = await client.post(
+                "/webhook/deployment", json=webhook_body("in_progress", {})
+            )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "acknowledged"
+
+
+@pytest.mark.asyncio
+async def test_success_webhook_closes_the_lifecycle(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()):
+            await client.post("/webhook/deployment", json=webhook_body("in_progress", {}))
+            response = await client.post("/webhook/deployment", json=webhook_body("success", {}))
+            state = (await client.get("/deployment/deploy-first-failure")).json()
+
+    assert response.json()["status"] == "success"
+    assert state["status"] == "success"
+    assert state["finished_at"] >= state["started_at"]
+
+
+@pytest.mark.asyncio
+async def test_metrics_is_served_directly_in_exposition_format(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "redis_client", FakeRedis()):
+            response = await client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "# TYPE deployments_total counter" in response.text
+
+
+@pytest.mark.asyncio
+async def test_metrics_scrape_runs_off_the_event_loop(api):
+    transport = httpx.ASGITransport(app=api.app)
+    stalls = []
+
+    async def heartbeat():
+        last = time.monotonic()
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            now = time.monotonic()
+            stalls.append(now - last)
+            last = now
+
+    slow_source = Mock(side_effect=lambda: time.sleep(BLOCK_SECONDS) or {})
+    with patch.object(api.orchestrator, "active_deployment_counts", slow_source), \
+         patch.object(api.metrics.ActiveDeploymentsCollector, "collect", lambda self: (slow_source(), iter(()))[1]):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await asyncio.gather(client.get("/metrics"), heartbeat())
+
+    assert max(stalls) < MAX_LOOP_STALL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_deployment_status_is_json_and_not_shadowed_by_metrics(api):
+    transport = httpx.ASGITransport(app=api.app)
+    replicas = {"replicas": 3, "ready_replicas": 3}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "get_deployment_metrics", return_value=replicas) as read:
+            response = await client.get("/deployments/production/sample-app/status")
+
+    assert response.status_code == 200
+    assert response.json() == replicas
+    read.assert_called_once_with("production", "sample-app")
+
+
+@pytest.mark.asyncio
+async def test_deployment_status_reports_kubernetes_errors(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "get_deployment_metrics", side_effect=RuntimeError("boom")):
+            response = await client.get("/deployments/production/sample-app/status")
+
+    assert response.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_old_deployment_metrics_path_is_gone(api):
+    transport = httpx.ASGITransport(app=api.app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/metrics/deployment/production/sample-app")
+
+    assert response.status_code == 404

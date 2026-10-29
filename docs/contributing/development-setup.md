@@ -48,12 +48,30 @@ Current baseline (at the time of writing):
 | Suite          | Result     | Coverage | CI gate |
 | -------------- | ---------- | -------- | ------- |
 | `sample-app`   | 46 passed  | 93%      | 80%     |
-| `orchestrator` | 125 passed | 75%      | 75%     |
+| `orchestrator` | 359 passed | 83%      | 75%     |
 
 CI runs both suites on every push and pull request, and fails when coverage drops below the gate. Raise the gate in `.github/workflows/build-and-test.yml` as coverage improves (the orchestrator target is 85%).
 
 !!! note "Test isolation"
 `orchestrator/src/api.py` creates the orchestrator at import time, which connects to Redis and loads a kubeconfig. Tests that import it must patch `redis.Redis` and the `kubernetes.config`/`client` calls (the `api` fixture in `orchestrator/tests/conftest.py` does this), or construct `SelfHealingOrchestrator(use_config=False)`.
+
+### Validate monitoring configuration and workflows
+
+CI runs `promtool`, `amtool`, `alloy validate` and `actionlint` (workflow `validate-monitoring.yml`) when files under `monitoring/` or `.github/workflows/` change. To run the same checks locally on Linux amd64:
+
+```bash
+scripts/install-validators.sh            # installs into ./.tools/bin, verifies SHA-256 checksums
+export PATH="$PWD/.tools/bin:$PATH"
+promtool check rules monitoring/prometheus/alerts.yml monitoring/prometheus/recording-rules.yml
+promtool check config --syntax-only monitoring/prometheus/prometheus.yml
+amtool check-config monitoring/alertmanager/alertmanager.yml
+actionlint
+for f in monitoring/alloy/*.alloy; do LOKI_URL=http://loki:3100/loki/api/v1/push alloy validate "$f"; done
+```
+
+Install `shellcheck` too (`sudo apt-get install shellcheck` or `brew install shellcheck`). `actionlint` runs it on every `run:` script and skips those checks when it is missing, so without it a local pass can hide findings that fail CI, where GitHub's runners have it installed.
+
+`--syntax-only` is needed because `prometheus.yml` points at in-cluster credential files that do not exist on a laptop.
 
 ## 3. Run Services Locally Without Containers
 
@@ -87,7 +105,7 @@ make dev-logs
 make dev-stop
 ```
 
-This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, `admin` / `admin123`), Loki and Promtail.
+This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, `admin` / `admin123`), Loki and Alloy.
 
 !!! warning "Known Compose issues to be aware of" - The orchestrator service mounts `~/.kube/config` to `/root/.kube/config`, but the image runs as the non-root user `orchestrator`, which cannot read `/root`. Mount the file to `/home/orchestrator/.kube/config` instead. - A kubeconfig for Kind or Minikube points at `127.0.0.1`, which inside the container is the container itself. Use a kubeconfig whose server address is reachable from Docker (for Kind: `kind get kubeconfig --internal` with the Kind network attached). - The orchestrator service's healthcheck uses `curl`, which the orchestrator image does not install, so Compose reports it unhealthy. Use `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"` or add `curl` to the image. - Prometheus in Compose expects an Alertmanager at `alertmanager:9093`, which Compose does not define; alert delivery will not work locally.
 
@@ -160,7 +178,7 @@ orchestrator/   FastAPI service (src/, tests/, k8s/, Dockerfile)
 sample-app/     Flask target app (src/, tests/, k8s/, Dockerfile)
 terraform/      Modules: namespaces, sample-app, orchestrator, security, monitoring
 kubernetes/     Standalone security manifests
-monitoring/     Prometheus, Grafana, Loki, Promtail, Alertmanager configs
+monitoring/     Prometheus, Grafana, Loki, Alloy, Alertmanager configs
 scripts/        deploy.sh
 .github/        Workflows
 docs/           This documentation

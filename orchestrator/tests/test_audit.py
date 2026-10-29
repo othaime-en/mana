@@ -160,7 +160,7 @@ class TestAuditLogger:
             audit_logger.log_event(action=AuditAction.STATE_SAVED)
         after = datetime.now(timezone.utc)
         
-        timestamp = json.loads(caplog.records[-1].audit_event)['timestamp']
+        timestamp = caplog.records[-1].audit_event['timestamp']
         
         assert timestamp.endswith('Z')
         assert '+00:00' not in timestamp

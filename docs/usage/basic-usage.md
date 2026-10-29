@@ -82,7 +82,7 @@ kubectl -n production get pods -l app=sample-app -o wide
 ```
 
 !!! note
-`GET /metrics/deployment/{namespace}/{name}` is documented in the [API Reference](../reference/api.md#get-metricsdeploymentnamespacedeployment_name) but is currently shadowed by the Prometheus endpoint, so use `kubectl` for this.
+`GET /deployments/{namespace}/{name}/status` returns live replica counts and conditions; see the [API Reference](../reference/api.md#get-deploymentsnamespacedeployment_namestatus).
 
 ## Manual Operations
 

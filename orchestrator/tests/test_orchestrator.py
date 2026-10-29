@@ -775,6 +775,10 @@ class TestSaveAndRetrieveState:
             metadata={}
         )
         
-        orchestrator.redis_client.setex = Mock()
+        orchestrator.redis_client.set = Mock(return_value=None)
         orchestrator.save_deployment_state(state)
-        orchestrator.redis_client.setex.assert_called_once()
+        orchestrator.redis_client.set.assert_called_once()
+        args, kwargs = orchestrator.redis_client.set.call_args
+        assert args[0] == 'deployment:test-123'
+        assert kwargs['ex'] == 86400
+        assert kwargs['get'] is True

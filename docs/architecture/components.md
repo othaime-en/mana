@@ -4,7 +4,7 @@ This page describes every moving part of MANA, what it is responsible for, and w
 
 ## Component Map
 
-![MANA component map: GitHub Actions, Orchestrator, Kubernetes, Redis and the monitoring stack (Prometheus, Grafana, Loki, Promtail, Alertmanager)](../assets/diagrams/component-map.svg)
+![MANA component map: GitHub Actions, Orchestrator, Kubernetes, Redis and the monitoring stack (Prometheus, Grafana, Loki, Alloy, Alertmanager)](../assets/diagrams/component-map.svg)
 
 | Component       | Path                          | Runtime                                           | Role                                                                        |
 | --------------- | ----------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -13,7 +13,7 @@ This page describes every moving part of MANA, what it is responsible for, and w
 | Sample app      | `sample-app/`                 | Python 3.12, Flask, Gunicorn                      | Deployment target with health probes, metrics and failure simulation        |
 | CI/CD workflows | `.github/workflows/`          | GitHub Actions                                    | Build, test, deploy, and notify the orchestrator                            |
 | Terraform       | `terraform/`                  | Terraform ≥ 1.5                                   | Provisions namespaces, apps, orchestrator, security and monitoring          |
-| Monitoring      | `monitoring/`                 | Prometheus, Grafana, Loki, Promtail, Alertmanager | Metrics, dashboards, logs and alert routing                                 |
+| Monitoring      | `monitoring/`                 | Prometheus, Grafana, Loki, Alloy, Alertmanager    | Metrics, dashboards, logs and alert routing                                 |
 | Scripts         | `scripts/`, `Makefile`        | Bash, Make                                        | Deployment automation and developer shortcuts                               |
 
 ---
@@ -49,7 +49,7 @@ See the [API Reference](../reference/api.md) for every endpoint.
 
 The module also defines the domain types:
 
-- `DeploymentStatus`: `pending`, `in_progress`, `success`, `failed`, `rolling_back`, `rolled_back`, `retry_scheduled`
+- `DeploymentStatus`: `pending` (never persisted), `in_progress`, `success`, `failed`, `rolling_back`, `rolled_back`, `retry_scheduled`
 - `FailureType`: `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure`, `smoke_test_failure`, `timeout`
 - `DeploymentState`: the record stored in Redis (see [Data Flow](data-flow.md#state-model))
 
@@ -135,7 +135,7 @@ All workflows live in `.github/workflows/`. See [CI/CD Integration](../usage/cic
 | `sample-app`   | Deployment, Service, Ingress, HPA and related resources for the sample app                                                   |
 | `orchestrator` | ServiceAccount, ClusterRole/Binding, ConfigMap, Secret, Redis Deployment and Service, orchestrator Deployment                |
 | `security`     | NetworkPolicies, ResourceQuotas and LimitRanges                                                                              |
-| `monitoring`   | `kube-prometheus-stack` and `loki-stack` Helm releases, ServiceMonitors, PrometheusRules and the Grafana dashboard ConfigMap |
+| `monitoring`   | `kube-prometheus-stack` and `loki-stack` Helm releases, ServiceMonitors, one `PrometheusRule` built from `monitoring/prometheus/*.yml` and one dashboard ConfigMap per file in `monitoring/grafana/dashboards` |
 
 State is stored locally by default (`backend.tf` includes a commented S3 + DynamoDB example for production). Inputs are documented in the [Configuration Reference](../reference/configuration.md#terraform-variables).
 
@@ -149,7 +149,7 @@ Configuration lives in `monitoring/` and is consumed either by Docker Compose (l
 | --------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | Prometheus      | `prometheus/prometheus.yml`, `alerts.yml`, `recording-rules.yml` | 15 s scrape interval; pod discovery via `prometheus.io/*` annotations                           |
 | Grafana         | `grafana/datasources.yml`, `dashboards.yml`, `dashboards/*.json` | Four dashboards: Self-Healing Overview, Deployment Metrics, Application Metrics, Infrastructure |
-| Loki / Promtail | `loki/loki-config.yml`, `promtail/promtail-config.yml`           | Log aggregation from pods or containers                                                         |
+| Loki / Alloy    | `loki/loki-config.yml`, `alloy/config.alloy`, `alloy/config-compose.alloy` | Log aggregation from pods or containers                                                         |
 | Alertmanager    | `alertmanager/alertmanager.yml`, `templates/`                    | Severity-based routing to PagerDuty, Slack and email                                            |
 
 See [Monitoring](../usage/monitoring.md) for metrics, queries and dashboard usage.
@@ -161,6 +161,6 @@ See [Monitoring](../usage/monitoring.md) for metrics, queries and dashboard usag
 - `scripts/deploy.sh`: end-to-end deployment (Terraform, images, Redis, orchestrator, sample app, monitoring, smoke tests)
 - `terraform/validate-terraform.sh`: validates the Terraform modules
 - `Makefile`: shortcuts for build, test, deploy, port-forwarding, logs and cleanup
-- `docker-compose.yml`: local stack with Redis, sample app, orchestrator, Prometheus, Grafana, Loki and Promtail
+- `docker-compose.yml`: local stack with Redis, sample app, orchestrator, Prometheus, Grafana, Loki and Alloy
 
 See the [CLI Reference](../reference/cli.md).

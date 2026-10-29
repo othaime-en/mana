@@ -1,0 +1,54 @@
+name: Validate monitoring and workflows
+
+on:
+  pull_request:
+    paths:
+      - "monitoring/**"
+      - ".github/workflows/**"
+      - "scripts/install-validators.sh"
+  push:
+    branches: [main]
+    paths:
+      - "monitoring/**"
+      - ".github/workflows/**"
+      - "scripts/install-validators.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: promtool, amtool, alloy, actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install validators
+        run: scripts/install-validators.sh "$RUNNER_TEMP/bin"
+
+      - name: Add validators to PATH
+        run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Check Prometheus rules
+        run: promtool check rules monitoring/prometheus/alerts.yml monitoring/prometheus/recording-rules.yml
+
+      - name: Check Prometheus configuration
+        run: promtool check config --syntax-only monitoring/prometheus/prometheus.yml
+
+      - name: Check Alertmanager configuration
+        run: amtool check-config monitoring/alertmanager/alertmanager.yml
+
+      - name: Validate Alloy configuration
+        env:
+          LOKI_URL: http://loki:3100/loki/api/v1/push
+        run: |
+          for config in monitoring/alloy/*.alloy; do
+            alloy validate "$config"
+            alloy fmt "$config" | diff --unified - "$config"
+          done
+
+      - name: Lint workflows
+        run: actionlint

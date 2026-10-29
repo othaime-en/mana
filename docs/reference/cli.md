@@ -179,7 +179,7 @@ terraform destroy
 ## Docker Compose
 
 ```bash
-docker compose up -d                    # redis, sample-app, orchestrator, prometheus, grafana, loki, promtail
+docker compose up -d                    # redis, sample-app, orchestrator, prometheus, grafana, loki, alloy
 docker compose ps
 docker compose logs -f orchestrator
 docker compose up -d --build sample-app # rebuild one service

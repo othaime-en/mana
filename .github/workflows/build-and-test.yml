@@ -63,7 +63,7 @@ jobs:
         id: version
         run: |
           VERSION="v${GITHUB_SHA::7}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Derived version: $VERSION"
 
       # Python testing and linting
@@ -73,7 +73,7 @@ jobs:
           python-version: "3.12"
 
       - name: Cache Python dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -98,7 +98,7 @@ jobs:
           pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing --cov-fail-under=80
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./sample-app/coverage.xml
           flags: unittests

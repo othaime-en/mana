@@ -1,21 +1,25 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 from typing import Optional, Dict, List
 import asyncio
 import uvicorn
 import os
+import redis
 from src.orchestrator import (
     SelfHealingOrchestrator,
-    FailureType,
-    DeploymentStatus
+    FailureType
 )
+from src.config import get_config
+from src.logging_config import configure_logging
 from src.utils import get_audit_logger
-from prometheus_client import Counter, Histogram, Gauge, make_asgi_app
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
+from src import metrics
 import logging
 
-logging.basicConfig(level=logging.INFO)
+_config = get_config()
+configure_logging(_config.log_level, _config.enable_audit_logging)
 logger = logging.getLogger(__name__)
 
 audit_logger = get_audit_logger()
@@ -26,44 +30,24 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Prometheus metrics
-deployment_counter = Counter(
-    'deployments_total',
-    'Total number of deployments',
-    ['namespace', 'status']
-)
-rollback_counter = Counter(
-    'rollbacks_total',
-    'Total number of rollbacks',
-    ['namespace', 'reason']
-)
-deployment_duration = Histogram(
-    'deployment_duration_seconds',
-    'Deployment duration in seconds',
-    ['namespace']
-)
-active_deployments = Gauge(
-    'active_deployments',
-    'Number of active deployments',
-    ['namespace']
-)
-health_check_duration = Histogram(
-    'health_check_duration_seconds',
-    'Health check duration in seconds',
-    ['namespace', 'deployment']
-)
-retry_counter = Counter(
-    'retries_total',
-    'Total number of deployment retries',
-    ['namespace', 'retry_attempt']
-)
-
-# Mount Prometheus metrics endpoint
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
-
 # Initialize orchestrator with configuration from config.py
 orchestrator = SelfHealingOrchestrator(use_config=True)
+REGISTRY.register(metrics.ActiveDeploymentsCollector(orchestrator.active_deployment_counts))
+
+
+@app.middleware("http")
+async def count_webhook_requests(request, call_next):
+    """Count webhook requests and their error responses, including 422s"""
+    if not request.url.path.startswith("/webhook/"):
+        return await call_next(request)
+    
+    try:
+        response = await call_next(request)
+    except Exception:
+        metrics.record_webhook(request.url.path, 500)
+        raise
+    metrics.record_webhook(request.url.path, response.status_code)
+    return response
 
 
 # Request models
@@ -194,12 +178,6 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
     )
     
     try:
-        # Update metrics
-        deployment_counter.labels(
-            namespace=payload.namespace,
-            status=payload.status.value
-        ).inc()
-        
         if payload.status is WebhookStatus.FAILED:
             failure_type = payload.failure_type
             
@@ -214,14 +192,14 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             
             # Track retry metrics
             if result['action'] == 'retry':
-                retry_counter.labels(
+                metrics.retries_total.labels(
                     namespace=payload.namespace,
                     retry_attempt=result['retry_count']
                 ).inc()
             
             # Track rollback metrics
             if result['action'] == 'rollback':
-                rollback_counter.labels(
+                metrics.rollbacks_total.labels(
                     namespace=payload.namespace,
                     reason=failure_type.value
                 ).inc()
@@ -236,17 +214,12 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             )
         
         elif payload.status is WebhookStatus.SUCCESS:
-            # Track successful deployment for rollback reference
-            state = orchestrator.get_deployment_state(payload.deployment_id)
-            if state:
-                state.status = DeploymentStatus.SUCCESS
-                orchestrator.save_deployment_state(state)
-            
-            # Store as rollback candidate
-            orchestrator.save_successful_deployment_version(
+            orchestrator.record_deployment_succeeded(
+                deployment_id=payload.deployment_id,
                 namespace=payload.namespace,
                 deployment_name=payload.app_name,
-                version=payload.version
+                version=payload.version,
+                metadata=metadata
             )
             
             return JSONResponse(
@@ -256,6 +229,21 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
                     "deployment_id": payload.deployment_id,
                     "message": "Deployment successful - version saved for future rollbacks"
                 }
+            )
+        
+        try:
+            orchestrator.record_deployment_started(
+                deployment_id=payload.deployment_id,
+                namespace=payload.namespace,
+                deployment_name=payload.app_name,
+                version=payload.version,
+                metadata=metadata
+            )
+        except redis.RedisError:
+            logger.error(
+                "Could not persist in_progress state for %s",
+                payload.deployment_id,
+                exc_info=True
             )
         
         return JSONResponse(
@@ -291,7 +279,7 @@ async def manual_rollback(request: RollbackRequest):
         )
         
         if success:
-            rollback_counter.labels(
+            metrics.rollbacks_total.labels(
                 namespace=request.namespace,
                 reason='manual'
             ).inc()
@@ -328,12 +316,6 @@ async def check_health(request: HealthCheckRequest):
         
         duration = time.time() - start_time
         
-        # Record health check duration
-        health_check_duration.labels(
-            namespace=request.namespace,
-            deployment=request.deployment_name
-        ).observe(duration)
-        
         return {
             "deployment_name": request.deployment_name,
             "namespace": request.namespace,
@@ -364,6 +346,9 @@ async def get_deployment(deployment_id: str):
         "failure_type": state.failure_type.value if state.failure_type else None,
         "previous_version": state.previous_version,
         "timestamp": state.timestamp,
+        "started_at": state.started_at,
+        "first_failure_at": state.first_failure_at,
+        "finished_at": state.finished_at,
         "metadata": state.metadata
     }
 
@@ -396,14 +381,22 @@ async def get_recent_deployments(namespace: Optional[str] = None, limit: int = 1
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/metrics/deployment/{namespace}/{deployment_name}")
-async def get_metrics(namespace: str, deployment_name: str):
-    """Get deployment metrics"""
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus exposition; rendered in a thread because collectors read Redis"""
+    body = await asyncio.to_thread(generate_latest)
+    return Response(body, media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/deployments/{namespace}/{deployment_name}/status")
+async def get_deployment_status(namespace: str, deployment_name: str):
+    """Replica status of a Kubernetes Deployment"""
     try:
-        metrics = orchestrator.get_deployment_metrics(namespace, deployment_name)
-        return metrics
+        return await asyncio.to_thread(
+            orchestrator.get_deployment_metrics, namespace, deployment_name
+        )
     except Exception as e:
-        logger.error(f"Error getting metrics: {e}")
+        logger.error(f"Error getting deployment status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -429,5 +422,6 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_config=None,
+        log_level=_config.log_level.lower()
     )

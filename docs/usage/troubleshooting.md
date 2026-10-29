@@ -87,7 +87,7 @@ Empty endpoints mean no Ready pod matches the selector `app=orchestrator`. From 
 - Validation errors crash the pod at startup (table above). The accepted ranges are in [Configuration Guide](../configuration/overview.md#validation-rules).
 - Settings are read only at startup. After a change, `kubectl rollout restart deployment/orchestrator -n orchestrator` and confirm with `curl $MANA/config`.
 - `kubectl set env` changes are overwritten by the next `kubectl apply` or `terraform apply`. Update the manifest or Terraform too.
-- Only variables listed in [Environment Variables](../configuration/environment-variables.md) exist. `LOG_LEVEL` and `ENABLE_AUDIT_LOGGING` are read but not applied.
+- Only variables listed in [Environment Variables](../configuration/environment-variables.md) exist. `LOG_LEVEL` and `ENABLE_AUDIT_LOGGING` are applied at startup.
 - With Terraform, `GITHUB_TOKEN` and `GITHUB_REPO` are not set on the orchestrator; `github_integration` in `/health` will be `false`.
 
 ## Connectivity
@@ -365,4 +365,3 @@ They depend on metrics the orchestrator does not emit yet; see [Monitoring](moni
 | 404  | `GET /deployment/<id>` for an unknown or expired ID                     |
 | 422  | Invalid request body                                                    |
 | 500  | Rollback failed, Redis or Kubernetes errors |
-| 307  | `/metrics` redirecting to `/metrics/`                                   |

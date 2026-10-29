@@ -36,8 +36,8 @@ How the orchestrator reacts depends on `status`:
 
 | `status`                       | Orchestrator behaviour                                                                                                                     |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `in_progress`                  | Counts the event in `deployments_total` and returns `acknowledged`. Nothing is stored                                                      |
-| `success`                      | Marks the stored state (if any) as `success`, records `version` as the new last-known-good for `<namespace>/<app_name>`, returns `success` |
+| `in_progress`                  | Stores the deployment as `in_progress` with its start time (a re-run reopens the existing state), returns `acknowledged`. A Redis error is logged and the event is still acknowledged |
+| `success`                      | Marks the state `success` and stamps `finished_at` (creating the state if none exists), records `version` as the new last-known-good for `<namespace>/<app_name>`, returns `success` |
 | `failed` (with `failure_type`) | Runs the failure-handling logic below                                                                                                      |
 | anything else                  | Counted and acknowledged                                                                                                                   |
 
@@ -145,7 +145,7 @@ TTL is 24 hours and is refreshed every time the state is saved.
 
 ![Deployment status lifecycle: from no state, a failed webhook leads to retry_scheduled, which repeats, reaches success on a success webhook, or moves to rolling_back when retries are exhausted; rolling_back ends in rolled_back or failed, and alert paths end in failed](../assets/diagrams/state-status-lifecycle.svg)
 
-`pending` and `in_progress` exist in the enum but are not currently written by the webhook handler.
+`in_progress` is written when the `in_progress` webhook arrives and `pending` is never written. A state carries `started_at` (first `in_progress`), `first_failure_at` (first failed attempt) and `finished_at` (first save in a terminal status: `success`, `failed` or `rolled_back`; cleared when a re-run reopens the deployment). States saved before these fields existed still load, with the fields empty. Deployments that are `in_progress`, `retry_scheduled` or `rolling_back` are tracked in the Redis sorted set `mana:active`, scored by start time; entries older than the 24 h state TTL are dropped when it is read.
 
 ## Audit Trail
 
@@ -155,12 +155,18 @@ Each stage above emits an audit event so the full story of a deployment can be r
 
 ## Metrics Emitted
 
-| Metric                                                | Updated when                                                      |
-| ----------------------------------------------------- | ----------------------------------------------------------------- |
-| `deployments_total{namespace,status}`                 | Every webhook                                                     |
-| `retries_total{namespace,retry_attempt}`              | A retry is scheduled                                              |
-| `rollbacks_total{namespace,reason}`                   | A rollback succeeds (`reason` is the `failure_type`, or `manual`) |
-| `health_check_duration_seconds{namespace,deployment}` | `POST /health-check` completes                                    |
+| Metric                                                      | Updated when                                                                  |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `deployments_total{namespace,status}`                       | A deployment moves into `success`, `failed` or `rolled_back`                  |
+| `deployment_duration_seconds{namespace,status}`             | Same moment, when the first `in_progress` event was seen                      |
+| `mana_recovery_duration_seconds{namespace,app,outcome}`     | A deployment that failed earlier succeeds, or a rollback is verified          |
+| `rollback_decision_duration_seconds`                        | The orchestrator has chosen retry, rollback, skip or alert                    |
+| `retries_total{namespace,retry_attempt}`                    | A retry is scheduled                                                          |
+| `rollbacks_total{namespace,reason}`                         | A rollback succeeds (`reason` is the `failure_type`, or `manual`)             |
+| `health_checks_total{namespace,result}` and `health_check_duration_seconds{namespace,deployment}` | A deployment health check finishes |
+| `webhook_requests_total`, `webhook_errors_total`            | A request to `/webhook/*` is answered                                         |
+| `redis_connection_errors_total`                             | A Redis call fails with a connection or timeout error                         |
+| `active_deployments{namespace}`                             | Read from Redis when Prometheus scrapes                                       |
 
 See [Monitoring](../usage/monitoring.md) for the complete list, including metrics that are declared but not yet populated.
 
@@ -170,6 +176,9 @@ These were found by reading the code and exercising the webhook endpoint against
 
 !!! note "1. GitHub re-runs apply to finished runs"
 GitHub allows re-running a workflow run once it has completed. The webhook is sent from inside the running workflow, so the backoff delay must outlast the remaining steps or the re-run request may be rejected. Monitor the `retries_total` metric and orchestrator logs for `GitHub API permission denied` or non-201 responses.
+
+!!! note "A run ID seen earlier counts"
+`in_progress` webhooks store their `metadata`, so a `failed` webhook that omits `workflow_run_id` is still retried when the deployment's `in_progress` event carried it. The `alert` for a missing run ID only happens when no event for that deployment ever supplied one.
 
 !!! note "2. Build-stage failures have nothing to roll back"
 `build-and-test.yml` reports `build_failure`/`test_failure` with `namespace: ci` and no `workflow_run_id`. These produce an `alert` because no Deployment exists to retry or roll back. The orchestrator also never rolls back for these two types, even when a `workflow_run_id` is present and retries are exhausted.

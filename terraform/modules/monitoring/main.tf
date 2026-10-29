@@ -52,13 +52,54 @@ resource "helm_release" "loki" {
   
   set {
     name  = "promtail.enabled"
-    value = "true"
+    value = "false" # Promtail is end-of-life; Alloy ships the logs
   }
   
   set {
     name  = "grafana.enabled"
     value = "false"  # Using Grafana from prometheus stack
   }
+}
+
+# Alloy ships pod logs and cluster events to Loki. loki.source.kubernetes reads
+# logs through the API server, so a single replica is right: a DaemonSet would
+# send every pod's logs once per node.
+resource "helm_release" "alloy" {
+  count = var.enabled ? 1 : 0
+
+  name       = "alloy"
+  repository = "https://grafana.github.io/helm-charts"
+  chart      = "alloy"
+  namespace  = "monitoring"
+  version    = "1.13.1"
+
+  values = [yamlencode({
+    image = {
+      tag = "v1.21.2"
+    }
+    controller = {
+      type     = "deployment"
+      replicas = 1
+    }
+    alloy = {
+      configMap = {
+        content = file("${local.monitoring_dir}/alloy/config.alloy")
+      }
+      extraEnv = [{
+        name  = "LOKI_URL"
+        value = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+      }]
+    }
+    rbac = {
+      rules = [{
+        apiGroups = [""]
+        resources = ["pods", "pods/log", "namespaces", "events"]
+        verbs     = ["get", "list", "watch"]
+      }]
+    }
+  })]
+
+  depends_on = [helm_release.loki]
 }
 
 # ServiceMonitor for sample app
@@ -125,82 +166,49 @@ resource "kubernetes_manifest" "orchestrator_service_monitor" {
   }
 }
 
-# PrometheusRule for alerts
-resource "kubernetes_manifest" "deployment_alerts" {
+# Rules and dashboards come from monitoring/, the same files Compose mounts
+locals {
+  monitoring_dir = "${path.module}/../../../monitoring"
+  rule_files     = ["alerts.yml", "recording-rules.yml"]
+  rule_groups = flatten([
+    for file in local.rule_files :
+    yamldecode(file("${local.monitoring_dir}/prometheus/${file}")).groups
+  ])
+  dashboard_files = fileset("${local.monitoring_dir}/grafana/dashboards", "*.json")
+}
+
+resource "kubernetes_manifest" "mana_rules" {
   count = var.enabled ? 1 : 0
-  
+
   manifest = {
     apiVersion = "monitoring.coreos.com/v1"
     kind       = "PrometheusRule"
     metadata = {
-      name      = "deployment-alerts"
+      name      = "mana-rules"
       namespace = "monitoring"
       labels = {
         release = "prometheus"
       }
     }
     spec = {
-      groups = [
-        {
-          name = "deployment"
-          rules = [
-            {
-              alert = "DeploymentReplicasMismatch"
-              expr  = "kube_deployment_spec_replicas != kube_deployment_status_replicas_available"
-              for   = "5m"
-              labels = {
-                severity = "warning"
-              }
-              annotations = {
-                summary     = "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has mismatched replicas"
-                description = "Deployment {{ $labels.deployment }} has {{ $value }} replicas available but {{ $labels.spec_replicas }} specified"
-              }
-            },
-            {
-              alert = "HighRollbackRate"
-              expr  = "rate(rollbacks_total[5m]) > 0.1"
-              for   = "2m"
-              labels = {
-                severity = "critical"
-              }
-              annotations = {
-                summary     = "High rollback rate detected"
-                description = "Rollback rate is {{ $value }} per second in namespace {{ $labels.namespace }}"
-              }
-            },
-            {
-              alert = "DeploymentFailureRate"
-              expr  = "rate(deployments_total{status=\"failed\"}[10m]) > 0.2"
-              for   = "5m"
-              labels = {
-                severity = "warning"
-              }
-              annotations = {
-                summary     = "High deployment failure rate"
-                description = "Deployment failure rate is {{ $value }} per second"
-              }
-            }
-          ]
-        }
-      ]
+      groups = local.rule_groups
     }
   }
 }
 
-# Grafana dashboard ConfigMap
-resource "kubernetes_config_map" "grafana_dashboard" {
-  count = var.enabled ? 1 : 0
-  
+resource "kubernetes_config_map" "grafana_dashboards" {
+  for_each = var.enabled ? local.dashboard_files : toset([])
+
   metadata {
-    name      = "self-healing-dashboard"
+    name      = "mana-dashboard-${trimsuffix(each.value, ".json")}"
     namespace = "monitoring"
     labels = {
       grafana_dashboard = "1"
     }
   }
-  
+
   data = {
-    "self-healing-dashboard.json" = file("${path.module}/dashboards/self-healing.json")
+    (each.value) = file("${local.monitoring_dir}/grafana/dashboards/${each.value}")
   }
 }
 

@@ -162,17 +162,17 @@ jobs:
           if [ "${{ steps.deploy.outcome }}" == "success" ] && \
              [ "${{ steps.health.outcome }}" == "success" ] && \
              [ "${{ steps.smoke.outcome }}" != "failure" ]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "failure_type=" >> $GITHUB_OUTPUT
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "failure_type=" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.health.outcome }}" == "failure" ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "failure_type=health_check_failure" >> $GITHUB_OUTPUT
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "failure_type=health_check_failure" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.deploy.outcome }}" == "failure" ]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "failure_type=deployment_failure" >> $GITHUB_OUTPUT
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "failure_type=deployment_failure" >> "$GITHUB_OUTPUT"
           else
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "failure_type=smoke_test_failure" >> $GITHUB_OUTPUT
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "failure_type=smoke_test_failure" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Notify deployment result

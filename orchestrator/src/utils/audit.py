@@ -4,7 +4,6 @@ Provides structured, searchable audit trail for compliance and debugging.
 """
 
 import logging
-import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from enum import Enum
@@ -91,10 +90,9 @@ class AuditLogger:
         if error:
             audit_event["error"] = error
         
-        # Log as structured JSON
         self.logger.info(
             f"AUDIT: {action.value}",
-            extra={"audit_event": json.dumps(audit_event)}
+            extra={"audit_event": audit_event}
         )
     
     def log_deployment_received(

@@ -49,23 +49,23 @@ groups:
         expr: |
           sum(rate(rollbacks_total[5m])) by (reason)
 
-      # Average deployment duration
-      - record: deployment:duration_seconds:avg:5m
+      # Time to a successful deployment (failed and rolled-back runs are excluded)
+      - record: deployment:duration_seconds:p50:5m
         expr: |
           histogram_quantile(0.50,
-            sum(rate(deployment_duration_seconds_bucket[5m])) by (namespace, le)
+            sum(rate(deployment_duration_seconds_bucket{status="success"}[5m])) by (namespace, le)
           )
 
       - record: deployment:duration_seconds:p95:5m
         expr: |
           histogram_quantile(0.95,
-            sum(rate(deployment_duration_seconds_bucket[5m])) by (namespace, le)
+            sum(rate(deployment_duration_seconds_bucket{status="success"}[5m])) by (namespace, le)
           )
 
       - record: deployment:duration_seconds:p99:5m
         expr: |
           histogram_quantile(0.99,
-            sum(rate(deployment_duration_seconds_bucket[5m])) by (namespace, le)
+            sum(rate(deployment_duration_seconds_bucket{status="success"}[5m])) by (namespace, le)
           )
 
       # Retry metrics
@@ -80,18 +80,18 @@ groups:
       # Active deployments by namespace
       - record: deployment:active_count:namespace
         expr: |
-          sum(active_deployments) by (namespace)
+          max(active_deployments) by (namespace)
 
       # Failed deployments rate
       - record: deployment:failure_rate:5m
         expr: |
-          sum(rate(deployments_total{status="failed"}[5m]))
+          sum(rate(deployments_total{status=~"failed|rolled_back"}[5m]))
           /
           sum(rate(deployments_total[5m]))
 
       - record: deployment:failure_rate_by_namespace:5m
         expr: |
-          sum(rate(deployments_total{status="failed"}[5m])) by (namespace)
+          sum(rate(deployments_total{status=~"failed|rolled_back"}[5m])) by (namespace)
           /
           sum(rate(deployments_total[5m])) by (namespace)
 
@@ -313,12 +313,24 @@ groups:
             sum(rate(flask_http_request_duration_seconds_count[28d])) by (namespace)
           )
 
-      # MTTR (Mean Time To Recovery)
-      - record: mttr:rollback_duration:avg:24h
+      # MTTR: first failure to a successful retry or a verified rollback
+      - record: mttr:recovery_duration:avg:24h
         expr: |
-          avg(rate(deployment_duration_seconds_sum{status="rolled_back"}[24h]))
+          sum(rate(mana_recovery_duration_seconds_sum[24h]))
           /
-          avg(rate(deployment_duration_seconds_count{status="rolled_back"}[24h]))
+          sum(rate(mana_recovery_duration_seconds_count[24h]))
+
+      - record: recovery:duration_seconds:p50:1h
+        expr: |
+          histogram_quantile(0.50,
+            sum(rate(mana_recovery_duration_seconds_bucket[1h])) by (outcome, le)
+          )
+
+      - record: recovery:duration_seconds:p95:1h
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(mana_recovery_duration_seconds_bucket[1h])) by (outcome, le)
+          )
 
       # Error budget remaining (for 99.9% SLO)
       - record: slo:error_budget_remaining:percent

@@ -22,8 +22,8 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | `HEALTH_CHECK_TIMEOUT` | int    | `5`         | no             | Per-request HTTP timeout (seconds) when probing a pod. Must be `> 0`        |
 | `HEALTH_CHECK_PORT`    | int    | `5000`      | no             | Application port inside the pod. `1` to `65535`                             |
 | `HEALTH_CHECK_PATH`    | string | `/health`   | no             | Application health path                                                     |
-| `LOG_LEVEL`            | string | `INFO`      | no             | Parsed; logging currently runs at `INFO` regardless                         |
-| `ENABLE_AUDIT_LOGGING` | bool   | `true`      | no             | Parsed; audit logging is currently always on                                |
+| `LOG_LEVEL`            | string | `INFO`      | no             | `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG` (any case); invalid values stop startup |
+| `ENABLE_AUDIT_LOGGING` | bool   | `true`      | no             | `false` silences audit events; they are otherwise independent of `LOG_LEVEL` |
 | `GITHUB_TOKEN`         | secret | unset       | for retries    | Token with permission to re-run workflows                                   |
 | `GITHUB_REPO`          | string | unset       | for retries    | `owner/repo` that owns the workflow                                         |
 | `PORT`                 | int    | `8000`      | no             | Listen port for `python -m src.api` only; the container uses a fixed `8000` |

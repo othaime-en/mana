@@ -34,3 +34,4 @@ tests/test-results/
 
 # Doc site
 site/
+.tools/

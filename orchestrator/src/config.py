@@ -7,6 +7,8 @@ import os
 from typing import Optional
 from dataclasses import dataclass
 
+from src.logging_config import normalize_level
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,6 +83,8 @@ class OrchestratorConfig:
         
         if self.health_check_port < 1 or self.health_check_port > 65535:
             raise ValueError("health_check_port must be between 1-65535")
+        
+        self.log_level = normalize_level(self.log_level)
 
 
 # Global config instance

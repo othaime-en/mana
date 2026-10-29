@@ -40,7 +40,7 @@ Changes made with `kubectl set env` are overwritten the next time you `kubectl a
 | Backoff            | `INITIAL_BACKOFF`, `BACKOFF_MULTIPLIER`, `MAX_BACKOFF`           | Delay before each retry                                                             |
 | Health checks      | `HEALTH_CHECK_PORT`, `HEALTH_CHECK_PATH`, `HEALTH_CHECK_TIMEOUT` | How the application's health endpoint is called                                     |
 | GitHub             | `GITHUB_TOKEN`, `GITHUB_REPO`                                    | Whether retries can trigger workflow re-runs                                        |
-| Logging            | `LOG_LEVEL`, `ENABLE_AUDIT_LOGGING`                              | Parsed but not yet applied (logging is fixed at `INFO`; audit logging is always on) |
+| Logging            | `LOG_LEVEL`, `ENABLE_AUDIT_LOGGING`                              | Applied at startup; every log line is one JSON object                               |
 | Service            | `PORT`                                                           | Listen port when run with `python -m src.api`                                       |
 
 ### Fixed behaviours (not configurable today)
@@ -181,7 +181,7 @@ MAX_RETRIES=0 python -c "from src.config import OrchestratorConfig as C; C.from_
 | Change has no effect                          | Pods not restarted, or the manifest was re-applied over a `kubectl set env`                                                           | `curl $MANA/config`; `kubectl get deploy orchestrator -n orchestrator -o yaml`                                                            |
 | `github_integration: false`                   | `GITHUB_TOKEN` or `GITHUB_REPO` missing (common with Terraform)                                                                       | `curl $MANA/health`; add the variables                                                                                                    |
 | Every health check fails                      | Wrong `HEALTH_CHECK_PORT`/`PATH`, app returns something other than `{"status":"healthy"}`, or a NetworkPolicy blocks the orchestrator | `kubectl exec -n orchestrator deploy/orchestrator -- python -c "import requests;print(requests.get('http://<pod-ip>:5000/health').text)"` |
-| `LOG_LEVEL=DEBUG` shows nothing extra         | Logging level is not applied yet                                                                                                      | Known limitation                                                                                                                          |
+| `LOG_LEVEL=DEBUG` shows nothing extra         | The variable is read once at startup                                                                                                  | Restart the orchestrator after changing it                                                                                                |
 | A variable from another document does nothing | It is not implemented                                                                                                                 | See below                                                                                                                                 |
 
 ### Settings you may see mentioned elsewhere

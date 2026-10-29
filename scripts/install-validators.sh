@@ -18,7 +18,9 @@ Install promtool ${PROMETHEUS_VERSION}, amtool ${ALERTMANAGER_VERSION},
 actionlint ${ACTIONLINT_VERSION} and alloy ${ALLOY_VERSION} (linux amd64) into INSTALL_DIR, verifying each
 download against a pinned SHA-256. Safe to run again.
 
-INSTALL_DIR defaults to ./.tools/bin. Put it on PATH, then run:
+INSTALL_DIR defaults to ./.tools/bin. Install shellcheck separately: actionlint
+uses it on every "run:" script and skips those checks without it, which CI does
+not. Put the tools on PATH, then run:
   promtool check rules monitoring/prometheus/alerts.yml monitoring/prometheus/recording-rules.yml
   promtool check config --syntax-only monitoring/prometheus/prometheus.yml
   amtool check-config monitoring/alertmanager/alertmanager.yml
@@ -87,3 +89,13 @@ install_tool actionlint \
   "$release/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
   "$ACTIONLINT_SHA256" "actionlint" 0
 install_alloy
+
+if ! command -v shellcheck >/dev/null; then
+  cat >&2 <<'WARNING'
+Warning: shellcheck is not installed. actionlint runs it on every "run:" script
+in CI (GitHub's runners have it) and skips those checks when it is missing, so
+a local actionlint pass can hide findings that fail CI. Install it, for example:
+  sudo apt-get install shellcheck    (Debian, Ubuntu)
+  brew install shellcheck            (macOS)
+WARNING
+fi

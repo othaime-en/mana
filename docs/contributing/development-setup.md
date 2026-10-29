@@ -69,6 +69,8 @@ actionlint
 for f in monitoring/alloy/*.alloy; do LOKI_URL=http://loki:3100/loki/api/v1/push alloy validate "$f"; done
 ```
 
+Install `shellcheck` too (`sudo apt-get install shellcheck` or `brew install shellcheck`). `actionlint` runs it on every `run:` script and skips those checks when it is missing, so without it a local pass can hide findings that fail CI, where GitHub's runners have it installed.
+
 `--syntax-only` is needed because `prometheus.yml` points at in-cluster credential files that do not exist on a laptop.
 
 ## 3. Run Services Locally Without Containers

@@ -63,7 +63,7 @@ jobs:
         id: version
         run: |
           VERSION="v${GITHUB_SHA::7}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Derived version: $VERSION"
 
       # Python testing and linting

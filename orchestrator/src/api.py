@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
@@ -11,6 +11,7 @@ from src.orchestrator import (
     SelfHealingOrchestrator,
     FailureType
 )
+from src.auth import require_api_key, require_signed_webhook, warn_if_disabled
 from src.config import get_config
 from src.logging_config import configure_logging
 from src.utils import get_audit_logger
@@ -23,6 +24,7 @@ configure_logging(_config.log_level, _config.enable_audit_logging)
 logger = logging.getLogger(__name__)
 
 audit_logger = get_audit_logger()
+warn_if_disabled(_config)
 
 app = FastAPI(
     title="Self-Healing Orchestrator API",
@@ -151,7 +153,7 @@ def health():
     }
 
 
-@app.post("/webhook/deployment")
+@app.post("/webhook/deployment", dependencies=[Depends(require_signed_webhook)])
 async def deployment_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
     """
     Webhook endpoint for deployment events from GitHub Actions
@@ -259,7 +261,7 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/rollback")
+@app.post("/rollback", dependencies=[Depends(require_api_key)])
 async def manual_rollback(request: RollbackRequest):
     """Manual rollback endpoint with audit logging"""
     logger.info(f"Manual rollback requested for {request.deployment_name}")
@@ -300,7 +302,7 @@ async def manual_rollback(request: RollbackRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/health-check")
+@app.post("/health-check", dependencies=[Depends(require_api_key)])
 async def check_health(request: HealthCheckRequest):
     """Check deployment health endpoint"""
     import time
@@ -328,7 +330,7 @@ async def check_health(request: HealthCheckRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/deployment/{deployment_id}")
+@app.get("/deployment/{deployment_id}", dependencies=[Depends(require_api_key)])
 async def get_deployment(deployment_id: str):
     """Get deployment state"""
     state = orchestrator.get_deployment_state(deployment_id)
@@ -353,7 +355,7 @@ async def get_deployment(deployment_id: str):
     }
 
 
-@app.get("/deployments/recent")
+@app.get("/deployments/recent", dependencies=[Depends(require_api_key)])
 async def get_recent_deployments(namespace: Optional[str] = None, limit: int = 10):
     """
     Get recent deployment states
@@ -388,7 +390,7 @@ async def prometheus_metrics():
     return Response(body, media_type=CONTENT_TYPE_LATEST)
 
 
-@app.get("/deployments/{namespace}/{deployment_name}/status")
+@app.get("/deployments/{namespace}/{deployment_name}/status", dependencies=[Depends(require_api_key)])
 async def get_deployment_status(namespace: str, deployment_name: str):
     """Replica status of a Kubernetes Deployment"""
     try:
@@ -400,7 +402,7 @@ async def get_deployment_status(namespace: str, deployment_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/config")
+@app.get("/config", dependencies=[Depends(require_api_key)])
 async def get_config():
     """Get orchestrator configuration"""
     return {

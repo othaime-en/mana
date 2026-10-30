@@ -38,6 +38,16 @@ spec:
             secretKeyRef:
               name: orchestrator-secrets
               key: redis-password
+        - name: WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: orchestrator-secrets
+              key: webhook-secret
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: orchestrator-secrets
+              key: api-key
         - name: MAX_RETRIES
           value: "3"
         - name: INITIAL_BACKOFF

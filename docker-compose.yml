@@ -57,6 +57,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${MANA_REDIS_PASSWORD}
+      - WEBHOOK_SECRET=${MANA_WEBHOOK_SECRET:?run scripts/create-secrets.sh --compose}
+      - API_KEY=${MANA_API_KEY:?run scripts/create-secrets.sh --compose}
       - MAX_RETRIES=3
       - LOG_LEVEL=INFO
     volumes:

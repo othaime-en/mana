@@ -322,6 +322,26 @@ resource "kubernetes_deployment" "orchestrator" {
           }
 
           env {
+            name = "WEBHOOK_SECRET"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "webhook-secret"
+              }
+            }
+          }
+
+          env {
+            name = "API_KEY"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "api-key"
+              }
+            }
+          }
+
+          env {
             name = "MAX_RETRIES"
             value_from {
               config_map_key_ref {

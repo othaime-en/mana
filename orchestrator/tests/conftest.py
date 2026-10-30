@@ -1,6 +1,9 @@
+import os
 from unittest.mock import patch
 
 import pytest
+
+os.environ.setdefault("AUTH_DISABLED", "true")
 
 
 @pytest.fixture(scope="module")

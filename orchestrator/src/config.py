@@ -4,12 +4,19 @@ Configuration management for orchestrator
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 
 from src.logging_config import normalize_level
 
 logger = logging.getLogger(__name__)
+
+MIN_SECRET_LENGTH = 32
+
+
+def split_secrets(raw: str) -> Tuple[str, ...]:
+    """Parse a comma-separated list of secrets; several values allow rotation"""
+    return tuple(item.strip() for item in raw.split(',') if item.strip())
 
 
 @dataclass
@@ -35,6 +42,10 @@ class OrchestratorConfig:
     redis_password: str = field(default='', repr=False)
     redis_tls: bool = False
     redis_tls_ca_file: str = ''
+    
+    webhook_secrets: Tuple[str, ...] = field(default=(), repr=False)
+    api_keys: Tuple[str, ...] = field(default=(), repr=False)
+    auth_disabled: bool = False
     
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
@@ -70,7 +81,12 @@ class OrchestratorConfig:
             # Redis authentication and transport security
             redis_password=os.getenv('REDIS_PASSWORD', ''),
             redis_tls=os.getenv('REDIS_TLS', 'false').lower() == 'true',
-            redis_tls_ca_file=os.getenv('REDIS_TLS_CA_FILE', '')
+            redis_tls_ca_file=os.getenv('REDIS_TLS_CA_FILE', ''),
+            
+            # Authentication
+            webhook_secrets=split_secrets(os.getenv('WEBHOOK_SECRET', '')),
+            api_keys=split_secrets(os.getenv('API_KEY', '')),
+            auth_disabled=os.getenv('AUTH_DISABLED', 'false').lower() == 'true'
         )
     
     def redis_client_kwargs(self) -> Dict[str, Any]:
@@ -118,6 +134,19 @@ class OrchestratorConfig:
             raise ValueError(f"REDIS_TLS_CA_FILE not found: {self.redis_tls_ca_file}")
         
         self.log_level = normalize_level(self.log_level)
+    
+    def validate_auth(self) -> None:
+        """Refuse to start without credentials unless authentication is disabled"""
+        if self.auth_disabled:
+            return
+        
+        for name, values in (('WEBHOOK_SECRET', self.webhook_secrets), ('API_KEY', self.api_keys)):
+            if not values:
+                raise ValueError(
+                    f"{name} is required; set AUTH_DISABLED=true only for local development"
+                )
+            if any(len(value) < MIN_SECRET_LENGTH for value in values):
+                raise ValueError(f"{name} values must be at least {MIN_SECRET_LENGTH} characters")
 
 
 # Global config instance
@@ -130,4 +159,5 @@ def get_config() -> OrchestratorConfig:
     if _config is None:
         _config = OrchestratorConfig.from_env()
         _config.validate()
+        _config.validate_auth()
     return _config

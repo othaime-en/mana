@@ -7,7 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 ORCHESTRATOR = ROOT / "orchestrator" / "requirements-dev.txt"
-SAMPLE_APP = ROOT / "sample-app" / "requirements.txt"
+SAMPLE_APP = ROOT / "sample-app" / "requirements-dev.txt"
 COMBINED = ROOT / "requirements-dev.txt"
 
 pytestmark = pytest.mark.skipif(

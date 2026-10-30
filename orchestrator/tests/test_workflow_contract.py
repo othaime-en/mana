@@ -36,20 +36,22 @@ def test_deploy_workflow_no_longer_accepts_a_caller_supplied_deployment_id():
     assert "deployment-id" not in workflow_text("main-pipeline.yml")
 
 
-@pytest.mark.parametrize("name", ["deploy-environment.yml", "build-and-test.yml"])
-def test_webhook_payloads_report_run_attempt(name):
-    assert "run_attempt" in workflow_text(name)
+NOTIFY_SCRIPT = WORKFLOWS_DIR.parents[1] / "scripts" / "notify-orchestrator.sh"
+
+
+def test_webhook_payloads_report_run_attempt():
+    assert "GITHUB_RUN_ATTEMPT" in NOTIFY_SCRIPT.read_text()
 
 
 STEP_OUTPUT = r'echo "{name}=([a-z_]+)"'
-PAYLOAD_FIELD = r'\\"{name}\\": \\"([a-z_]+)\\"'
+PAYLOAD_FIELD = r"MANA_{name}: ([a-z_]+)[ \t]*$"
 
 
 def emitted(pattern: str, *file_names: str) -> set[str]:
     return {
         match
         for name in file_names
-        for match in re.findall(pattern, workflow_text(name))
+        for match in re.findall(pattern, workflow_text(name), re.MULTILINE)
     }
 
 
@@ -63,7 +65,7 @@ def emitted_statuses() -> set[str]:
     return emitted(
         STEP_OUTPUT.format(name="status"), "deploy-environment.yml"
     ) | emitted(
-        PAYLOAD_FIELD.format(name="status"), "deploy-environment.yml", "build-and-test.yml"
+        PAYLOAD_FIELD.format(name="STATUS"), "deploy-environment.yml", "build-and-test.yml"
     )
 
 
@@ -102,3 +104,45 @@ def test_orchestrator_is_the_only_rollback_owner():
         name for name, text in all_workflow_texts().items() if "rollout undo" in text
     ]
     assert offenders == []
+
+
+def workflow_run_blocks() -> list[tuple[str, str]]:
+    import yaml
+
+    blocks = []
+    for name, text in all_workflow_texts().items():
+        for job in (yaml.safe_load(text).get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                if "run" in step:
+                    blocks.append((name, step["run"]))
+    return blocks
+
+
+def test_no_run_block_expands_a_secret_inline():
+    offenders = [name for name, run in workflow_run_blocks() if "secrets." in run]
+    assert offenders == []
+
+
+def test_workflows_reach_the_orchestrator_only_through_the_signing_script():
+    offenders = [name for name, run in workflow_run_blocks() if "webhook/deployment" in run]
+    assert offenders == []
+
+
+@pytest.mark.parametrize("name", ["deploy-environment.yml", "build-and-test.yml"])
+def test_every_notify_step_passes_the_signing_secret(name):
+    import yaml
+
+    steps = [
+        step
+        for job in yaml.safe_load(workflow_text(name))["jobs"].values()
+        for step in job.get("steps") or []
+        if "notify-orchestrator.sh" in step.get("run", "")
+    ]
+    assert steps
+    for step in steps:
+        assert step["env"]["MANA_WEBHOOK_SECRET"] == "${{ secrets.MANA_WEBHOOK_SECRET }}"
+
+
+def test_kubeconfig_is_written_outside_the_workspace():
+    text = workflow_text("deploy-environment.yml")
+    assert "> kubeconfig" not in text and "KUBECONFIG=./kubeconfig" not in text

@@ -141,6 +141,18 @@ resource "kubernetes_deployment" "redis" {
       }
 
       spec {
+        automount_service_account_token = false
+
+        security_context {
+          run_as_non_root = true
+          run_as_user     = 999
+          run_as_group    = 999
+          fs_group        = 999
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
         container {
           name  = "redis"
           image = "redis:8-alpine"
@@ -202,6 +214,14 @@ resource "kubernetes_deployment" "redis" {
           volume_mount {
             name       = "redis-data"
             mount_path = "/data"
+          }
+
+          security_context {
+            allow_privilege_escalation = false
+            read_only_root_filesystem  = true
+            capabilities {
+              drop = ["ALL"]
+            }
           }
         }
 
@@ -279,6 +299,12 @@ resource "kubernetes_deployment" "orchestrator" {
 
       spec {
         service_account_name = kubernetes_service_account.orchestrator.metadata[0].name
+
+        security_context {
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
 
         container {
           name              = local.app_name
@@ -407,6 +433,18 @@ resource "kubernetes_deployment" "orchestrator" {
             capabilities {
               drop = ["ALL"]
             }
+          }
+
+          volume_mount {
+            name       = "tmp"
+            mount_path = "/tmp"
+          }
+        }
+
+        volume {
+          name = "tmp"
+          empty_dir {
+            size_limit = "64Mi"
           }
         }
       }

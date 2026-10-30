@@ -190,3 +190,88 @@ def test_terraform_roles_match_the_manifest_rules():
         assert verbs in text
     for forbidden in ('"update"', '"watch"', '"*"', '"create"', '"delete"'):
         assert forbidden not in text.split('resource "kubernetes_role" "orchestrator"')[1].split("resource \"kubernetes_config_map\"")[0]
+
+
+WORKLOADS = {
+    "orchestrator": ROOT / "orchestrator" / "k8s" / "deployment.yaml",
+    "redis": ROOT / "orchestrator" / "k8s" / "redis.yaml",
+    "sample-app": ROOT / "sample-app" / "k8s" / "deployment.yaml",
+}
+ALLOWED_VOLUME_TYPES = {
+    "emptyDir", "secret", "configMap", "projected", "downwardAPI", "persistentVolumeClaim", "ephemeral",
+}
+
+
+def pod_spec(name: str) -> dict:
+    deployment = next(
+        doc for doc in documents(WORKLOADS[name])
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == name
+    )
+    return deployment["spec"]["template"]["spec"]
+
+
+@pytest.mark.parametrize("name", WORKLOADS)
+def test_workload_satisfies_the_restricted_pod_security_standard(name):
+    spec = pod_spec(name)
+    pod_context = spec.get("securityContext", {})
+    assert pod_context.get("seccompProfile", {}).get("type") == "RuntimeDefault"
+    for container in spec["containers"] + spec.get("initContainers", []):
+        context = container["securityContext"]
+        assert context["allowPrivilegeEscalation"] is False
+        assert context["readOnlyRootFilesystem"] is True
+        assert context["capabilities"]["drop"] == ["ALL"]
+        assert pod_context.get("runAsNonRoot") or context.get("runAsNonRoot")
+        assert not context.get("privileged")
+        assert container["resources"]["limits"] and container["resources"]["requests"]
+        assert container.get("livenessProbe") or container.get("readinessProbe")
+    for volume in spec.get("volumes", []):
+        assert set(volume) - {"name"} <= ALLOWED_VOLUME_TYPES
+    for flag in ("hostNetwork", "hostPID", "hostIPC"):
+        assert not spec.get(flag)
+
+
+@pytest.mark.parametrize("name", ["orchestrator", "sample-app"])
+def test_python_workloads_get_a_writable_tmp(name):
+    spec = pod_spec(name)
+    mounts = {m["mountPath"]: m["name"] for c in spec["containers"] for m in c.get("volumeMounts", [])}
+    volume = next(v for v in spec["volumes"] if v["name"] == mounts["/tmp"])
+    assert "emptyDir" in volume
+
+
+@pytest.mark.parametrize("name,expected", [("sample-app", False), ("redis", False)])
+def test_workloads_that_do_not_call_the_api_server_get_no_token(name, expected):
+    assert pod_spec(name)["automountServiceAccountToken"] is expected
+
+
+def test_orchestrator_keeps_its_service_account_token():
+    spec = pod_spec("orchestrator")
+    assert spec["serviceAccountName"] == "orchestrator-sa"
+    assert spec.get("automountServiceAccountToken", True) is True
+
+
+def test_redis_runs_as_its_own_non_root_user():
+    context = pod_spec("redis")["securityContext"]
+    assert context["runAsUser"] == context["runAsGroup"] == context["fsGroup"] == 999
+
+
+def test_namespaces_enforce_the_restricted_standard():
+    labelled = {}
+    for path in (SECURITY_DIR / "namespaces.yaml", WORKLOADS["orchestrator"]):
+        for doc in documents(path):
+            if doc["kind"] == "Namespace":
+                labelled[doc["metadata"]["name"]] = doc["metadata"].get("labels", {})
+    assert set(labelled) == {"production", "staging", "canary", "orchestrator"}
+    for labels in labelled.values():
+        assert labels["pod-security.kubernetes.io/enforce"] == "restricted"
+
+
+def test_terraform_mirrors_the_pod_hardening():
+    modules = ROOT / "terraform" / "modules"
+    for module in ("orchestrator", "sample-app"):
+        text = (modules / module / "main.tf").read_text()
+        assert 'type = "RuntimeDefault"' in text
+        assert 'mount_path = "/tmp"' in text
+        assert "read_only_root_filesystem  = true" in text
+    assert "automount_service_account_token = false" in (modules / "sample-app" / "main.tf").read_text()
+    namespaces = (modules / "namespaces" / "main.tf").read_text()
+    assert namespaces.count("local.restricted") == 4

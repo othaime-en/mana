@@ -157,19 +157,6 @@ spec:
   readOnlyRootFilesystem: true
 
 ---
-# Secret Management
-apiVersion: v1
-kind: Secret
-metadata:
-  name: orchestrator-secrets
-  namespace: orchestrator
-type: Opaque
-stringData:
-  redis-password: ""  # Empty for development, use sealed-secrets in production
-  webhook-token: "change-me-in-production"
-  api-key: "change-me-in-production"
-
----
 # Resource Quotas
 apiVersion: v1
 kind: ResourceQuota

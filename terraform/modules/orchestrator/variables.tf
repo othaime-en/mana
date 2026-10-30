@@ -28,13 +28,6 @@ variable "redis_enabled" {
   default     = true
 }
 
-variable "redis_password" {
-  description = "Redis password (leave empty for no auth)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
 variable "max_retries" {
   description = "Maximum deployment retry attempts"
   type        = number

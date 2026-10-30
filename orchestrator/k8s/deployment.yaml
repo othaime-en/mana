@@ -33,6 +33,11 @@ spec:
           value: "redis-service"
         - name: REDIS_PORT
           value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: orchestrator-secrets
+              key: redis-password
         - name: MAX_RETRIES
           value: "3"
         - name: INITIAL_BACKOFF

@@ -76,7 +76,22 @@ resource "kubernetes_config_map" "orchestrator" {
   }
 }
 
-# Secret for sensitive data
+resource "random_password" "redis" {
+  length  = 48
+  special = false
+}
+
+resource "random_password" "webhook" {
+  length  = 48
+  special = false
+}
+
+resource "random_password" "api_key" {
+  length  = 48
+  special = false
+}
+
+# Secret for sensitive data (the provider base64-encodes data itself)
 resource "kubernetes_secret" "orchestrator" {
   metadata {
     name      = "${local.app_name}-secrets"
@@ -84,9 +99,9 @@ resource "kubernetes_secret" "orchestrator" {
   }
 
   data = {
-    redis-password = base64encode(var.redis_password)
-    webhook-token  = base64encode("change-me-in-production")
-    api-key        = base64encode("change-me-in-production")
+    redis-password = random_password.redis.result
+    webhook-secret = random_password.webhook.result
+    api-key        = random_password.api_key.result
   }
 
   type = "Opaque"
@@ -130,8 +145,27 @@ resource "kubernetes_deployment" "redis" {
             name           = "redis"
           }
 
-          command = ["redis-server"]
-          args    = var.redis_password != "" ? ["--requirepass", var.redis_password] : []
+          command = ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$REDIS_PASSWORD\""]
+
+          env {
+            name = "REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+
+          env {
+            name = "REDISCLI_AUTH"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
 
           resources {
             requests = {
@@ -273,6 +307,16 @@ resource "kubernetes_deployment" "orchestrator" {
               config_map_key_ref {
                 name = kubernetes_config_map.orchestrator.metadata[0].name
                 key  = "REDIS_PORT"
+              }
+            }
+          }
+
+          env {
+            name = "REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "redis-password"
               }
             }
           }

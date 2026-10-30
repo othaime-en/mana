@@ -154,13 +154,9 @@ class SelfHealingOrchestrator:
             cfg.validate()  # Validate configuration
             
             # Redis configuration
-            self.redis_client = metrics.CountingRedis(redis.Redis(
-                host=cfg.redis_host,
-                port=cfg.redis_port,
-                decode_responses=True,
-                socket_connect_timeout=5,
-                socket_timeout=5
-            ))
+            self.redis_client = metrics.CountingRedis(
+                redis.Redis(**cfg.redis_client_kwargs())
+            )
             
             # Validate Redis connection
             try:

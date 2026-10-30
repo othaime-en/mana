@@ -176,3 +176,62 @@ class TestOrchestratorConfig:
         
         with pytest.raises(ValueError, match="log_level must be one of"):
             config.validate()
+
+
+class TestRedisSecurityConfig:
+    """Redis password and TLS settings"""
+
+    @pytest.fixture(autouse=True)
+    def clean_env(self, monkeypatch):
+        for name in ('REDIS_PASSWORD', 'REDIS_TLS', 'REDIS_TLS_CA_FILE'):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_defaults_send_no_credentials(self):
+        kwargs = OrchestratorConfig.from_env().redis_client_kwargs()
+        assert 'password' not in kwargs
+        assert 'ssl' not in kwargs
+
+    def test_password_is_passed_to_the_client(self, monkeypatch):
+        monkeypatch.setenv('REDIS_PASSWORD', 's3cret')
+        kwargs = OrchestratorConfig.from_env().redis_client_kwargs()
+        assert kwargs['password'] == 's3cret'
+
+    def test_password_is_not_in_repr(self, monkeypatch):
+        monkeypatch.setenv('REDIS_PASSWORD', 's3cret')
+        assert 's3cret' not in repr(OrchestratorConfig.from_env())
+
+    def test_tls_requires_certificates_and_uses_the_ca_file(self, monkeypatch, tmp_path):
+        ca = tmp_path / 'ca.pem'
+        ca.write_text('pem')
+        monkeypatch.setenv('REDIS_TLS', 'true')
+        monkeypatch.setenv('REDIS_TLS_CA_FILE', str(ca))
+        config = OrchestratorConfig.from_env()
+        config.validate()
+        kwargs = config.redis_client_kwargs()
+        assert kwargs['ssl'] is True
+        assert kwargs['ssl_cert_reqs'] == 'required'
+        assert kwargs['ssl_ca_certs'] == str(ca)
+
+    def test_ca_file_without_tls_is_rejected(self, monkeypatch):
+        monkeypatch.setenv('REDIS_TLS_CA_FILE', '/etc/ca.pem')
+        with pytest.raises(ValueError, match='REDIS_TLS=true'):
+            OrchestratorConfig.from_env().validate()
+
+    def test_missing_ca_file_is_rejected(self, monkeypatch, tmp_path):
+        monkeypatch.setenv('REDIS_TLS', 'true')
+        monkeypatch.setenv('REDIS_TLS_CA_FILE', str(tmp_path / 'absent.pem'))
+        with pytest.raises(ValueError, match='not found'):
+            OrchestratorConfig.from_env().validate()
+
+    def test_orchestrator_builds_its_client_from_the_kwargs(self, monkeypatch):
+        from unittest.mock import patch
+        from src.orchestrator import SelfHealingOrchestrator
+        monkeypatch.setenv('REDIS_PASSWORD', 's3cret')
+        config = OrchestratorConfig.from_env()
+        with patch('src.orchestrator.get_config', return_value=config), \
+             patch('src.orchestrator.redis.Redis') as redis_cls, \
+             patch('src.orchestrator.k8s_config.load_incluster_config'), \
+             patch('src.orchestrator.client.AppsV1Api'), \
+             patch('src.orchestrator.client.CoreV1Api'):
+            SelfHealingOrchestrator(use_config=True)
+        assert redis_cls.call_args.kwargs['password'] == 's3cret'

@@ -4,8 +4,8 @@ Configuration management for orchestrator
 
 import logging
 import os
-from typing import Optional
-from dataclasses import dataclass
+from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
 
 from src.logging_config import normalize_level
 
@@ -31,6 +31,10 @@ class OrchestratorConfig:
     
     log_level: str
     enable_audit_logging: bool
+    
+    redis_password: str = field(default='', repr=False)
+    redis_tls: bool = False
+    redis_tls_ca_file: str = ''
     
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
@@ -61,8 +65,31 @@ class OrchestratorConfig:
             
             # Logging
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
-            enable_audit_logging=os.getenv('ENABLE_AUDIT_LOGGING', 'true').lower() == 'true'
+            enable_audit_logging=os.getenv('ENABLE_AUDIT_LOGGING', 'true').lower() == 'true',
+            
+            # Redis authentication and transport security
+            redis_password=os.getenv('REDIS_PASSWORD', ''),
+            redis_tls=os.getenv('REDIS_TLS', 'false').lower() == 'true',
+            redis_tls_ca_file=os.getenv('REDIS_TLS_CA_FILE', '')
         )
+    
+    def redis_client_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments for redis.Redis, including auth and TLS when configured"""
+        kwargs: Dict[str, Any] = {
+            'host': self.redis_host,
+            'port': self.redis_port,
+            'decode_responses': True,
+            'socket_connect_timeout': 5,
+            'socket_timeout': 5,
+        }
+        if self.redis_password:
+            kwargs['password'] = self.redis_password
+        if self.redis_tls:
+            kwargs['ssl'] = True
+            kwargs['ssl_cert_reqs'] = 'required'
+            if self.redis_tls_ca_file:
+                kwargs['ssl_ca_certs'] = self.redis_tls_ca_file
+        return kwargs
     
     def validate(self) -> None:
         """Validate configuration values"""
@@ -83,6 +110,12 @@ class OrchestratorConfig:
         
         if self.health_check_port < 1 or self.health_check_port > 65535:
             raise ValueError("health_check_port must be between 1-65535")
+        
+        if self.redis_tls_ca_file and not self.redis_tls:
+            raise ValueError("redis_tls_ca_file requires REDIS_TLS=true")
+        
+        if self.redis_tls_ca_file and not os.path.isfile(self.redis_tls_ca_file):
+            raise ValueError(f"REDIS_TLS_CA_FILE not found: {self.redis_tls_ca_file}")
         
         self.log_level = normalize_level(self.log_level)
 

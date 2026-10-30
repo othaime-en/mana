@@ -1,0 +1,91 @@
+# Identity for the deploy workflow, replacing an admin kubeconfig in KUBE_CONFIG.
+# It can set the image of Deployments and read what `kubectl rollout status`, the
+# health check and the smoke tests read, in production and staging only.
+# Create the namespaces first (kubernetes/security/namespaces.yaml). Then issue a
+# kubeconfig from a short-lived token, see docs/about/security.md.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ci-deployer
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: ci-deployer
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mana-ci-deployer
+  namespace: production
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mana-ci-deployer
+  namespace: production
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: ci-deployer
+roleRef:
+  kind: Role
+  name: mana-ci-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mana-ci-deployer
+  namespace: staging
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mana-ci-deployer
+  namespace: staging
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: ci-deployer
+roleRef:
+  kind: Role
+  name: mana-ci-deployer
+  apiGroup: rbac.authorization.k8s.io

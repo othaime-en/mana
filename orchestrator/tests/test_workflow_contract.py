@@ -146,3 +146,42 @@ def test_every_notify_step_passes_the_signing_secret(name):
 def test_kubeconfig_is_written_outside_the_workspace():
     text = workflow_text("deploy-environment.yml")
     assert "> kubeconfig" not in text and "KUBECONFIG=./kubeconfig" not in text
+
+
+USES = re.compile(r"^\s*(?:-\s+)?uses:\s+(\S+)", re.MULTILINE)
+
+
+def test_every_third_party_action_is_pinned_to_a_commit_sha():
+    unpinned = [
+        f"{name}: {ref}"
+        for name, text in all_workflow_texts().items()
+        for ref in USES.findall(text)
+        if not ref.startswith("./") and not re.fullmatch(r".+@[0-9a-f]{40}", ref)
+    ]
+    assert unpinned == []
+
+
+def test_every_workflow_declares_least_privilege_permissions():
+    import yaml
+
+    missing = []
+    for name, text in all_workflow_texts().items():
+        workflow = yaml.safe_load(text)
+        jobs = workflow.get("jobs", {}).values()
+        if "permissions" not in workflow and not all("permissions" in job for job in jobs):
+            missing.append(name)
+    assert missing == []
+
+
+def test_scanners_that_gate_changes_are_not_advisory():
+    import yaml
+
+    workflow = yaml.safe_load(workflow_text("security-scan.yml"))
+    for job_name in ("dependency-audit", "container-scan", "code-scan"):
+        for step in workflow["jobs"][job_name]["steps"]:
+            assert not step.get("continue-on-error"), f"{job_name}: {step.get('name')}"
+    gate = [
+        step for step in workflow["jobs"]["container-scan"]["steps"]
+        if step.get("with", {}).get("exit-code") == "1"
+    ]
+    assert gate and gate[0]["with"]["severity"] == "CRITICAL"

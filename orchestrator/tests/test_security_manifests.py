@@ -275,3 +275,22 @@ def test_terraform_mirrors_the_pod_hardening():
     assert "automount_service_account_token = false" in (modules / "sample-app" / "main.tf").read_text()
     namespaces = (modules / "namespaces" / "main.tf").read_text()
     assert namespaces.count("local.restricted") == 4
+
+
+def test_ci_deployer_is_namespaced_and_cannot_create_or_delete_workloads():
+    docs = documents(SECURITY_DIR / "ci-deployer-rbac.yaml")
+    roles = [doc for doc in docs if doc["kind"] == "Role"]
+    assert {role["metadata"]["namespace"] for role in roles} == {"production", "staging"}
+    assert not [doc for doc in docs if doc["kind"].startswith("Cluster")]
+    for role in roles:
+        for rule in role["rules"]:
+            assert "*" not in rule["verbs"] + rule["resources"] + rule["apiGroups"]
+            if "deployments" in rule["resources"]:
+                assert not {"create", "delete", "update"} & set(rule["verbs"])
+            assert not {"secrets", "configmaps"} & set(rule["resources"])
+
+
+def test_workflows_do_not_use_a_personal_access_token_for_the_registry():
+    text = (ROOT / ".github" / "workflows" / "build-and-test.yml").read_text()
+    assert "GHCR_PAT" not in text
+    assert "secrets.GITHUB_TOKEN" in text

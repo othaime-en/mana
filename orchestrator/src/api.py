@@ -422,7 +422,8 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        # The container must listen on all interfaces; NetworkPolicy limits callers
+        host="0.0.0.0",  # nosec B104
         port=port,
         log_config=None,
         log_level=_config.log_level.lower()

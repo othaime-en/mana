@@ -44,7 +44,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Derive deployment identity
         id: identity
@@ -54,7 +54,7 @@ jobs:
           echo "deployment_id=deploy-${GITHUB_RUN_ID}-${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
+        uses: azure/setup-kubectl@901a10e89ea615cf61f57ac05cecdf23e7de06d8 # v3.2
         with:
           version: "v1.28.0"
 

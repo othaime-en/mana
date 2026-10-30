@@ -1,0 +1,36 @@
+name: Network policy enforcement
+
+on:
+  pull_request:
+    paths:
+      - "kubernetes/security/**"
+      - "scripts/test-network-policies.sh"
+      - ".github/workflows/network-policy-test.yml"
+  push:
+    branches: [main]
+    paths:
+      - "kubernetes/security/**"
+      - "scripts/test-network-policies.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  enforce:
+    name: Calico on Kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create a Kind cluster without a CNI
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          cluster_name: mana-netpol
+          config: kubernetes/security/tests/kind-calico.yaml
+
+      - name: Install Calico and verify the policies
+        run: scripts/test-network-policies.sh --install-calico

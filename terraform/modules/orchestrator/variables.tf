@@ -57,3 +57,9 @@ variable "resources" {
     }
   }
 }
+
+variable "managed_namespaces" {
+  description = "Namespaces whose Deployments the orchestrator may read and patch"
+  type        = list(string)
+  default     = ["production", "staging", "canary"]
+}

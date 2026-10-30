@@ -17,41 +17,46 @@ resource "kubernetes_service_account" "orchestrator" {
   }
 }
 
-# ClusterRole for Orchestrator
-resource "kubernetes_cluster_role" "orchestrator" {
+# Namespaced access: only the managed namespaces, only the verbs the code uses
+resource "kubernetes_role" "orchestrator" {
+  for_each = toset(var.managed_namespaces)
+
   metadata {
-    name = "${local.app_name}-role"
+    name      = "mana-orchestrator"
+    namespace = each.value
   }
 
   rule {
     api_groups = ["apps"]
-    resources  = ["deployments", "replicasets"]
-    verbs      = ["get", "list", "watch", "update", "patch"]
+    resources  = ["deployments"]
+    verbs      = ["get", "patch"]
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources  = ["replicasets"]
+    verbs      = ["list"]
   }
 
   rule {
     api_groups = [""]
-    resources  = ["pods", "services"]
-    verbs      = ["get", "list", "watch"]
-  }
-
-  rule {
-    api_groups = [""]
-    resources  = ["events"]
-    verbs      = ["create", "patch"]
+    resources  = ["pods"]
+    verbs      = ["list"]
   }
 }
 
-# ClusterRoleBinding
-resource "kubernetes_cluster_role_binding" "orchestrator" {
+resource "kubernetes_role_binding" "orchestrator" {
+  for_each = toset(var.managed_namespaces)
+
   metadata {
-    name = "${local.app_name}-binding"
+    name      = "mana-orchestrator"
+    namespace = each.value
   }
 
   role_ref {
     api_group = "rbac.authorization.k8s.io"
-    kind      = "ClusterRole"
-    name      = kubernetes_cluster_role.orchestrator.metadata[0].name
+    kind      = "Role"
+    name      = kubernetes_role.orchestrator[each.value].metadata[0].name
   }
 
   subject {
@@ -409,7 +414,7 @@ resource "kubernetes_deployment" "orchestrator" {
   }
 
   depends_on = [
-    kubernetes_cluster_role_binding.orchestrator
+    kubernetes_role_binding.orchestrator
   ]
 }
 

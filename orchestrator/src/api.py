@@ -131,14 +131,14 @@ def health():
         # Check Redis connectivity
         orchestrator.redis_client.ping()
         redis_healthy = True
-    except:
+    except Exception:
         redis_healthy = False
     
     try:
-        # Check Kubernetes connectivity
-        orchestrator.k8s_core.list_namespace(limit=1)
+        # The version endpoint needs no cluster-scoped permission
+        orchestrator.k8s_version.get_code()
         k8s_healthy = True
-    except:
+    except Exception:
         k8s_healthy = False
     
     overall_healthy = redis_healthy and k8s_healthy

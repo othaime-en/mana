@@ -226,6 +226,7 @@ class SelfHealingOrchestrator:
         
         self.k8s_apps = client.AppsV1Api()
         self.k8s_core = client.CoreV1Api()
+        self.k8s_version = client.VersionApi()
         
         logger.info(
             "Self-Healing Orchestrator initialized successfully",

@@ -54,7 +54,7 @@ jobs:
           echo "deployment_id=deploy-${GITHUB_RUN_ID}-${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@901a10e89ea615cf61f57ac05cecdf23e7de06d8 # v3.2
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
         with:
           version: "v1.28.0"
 

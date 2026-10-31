@@ -6,3 +6,4 @@ kubernetes==31.0.0
 pydantic==2.9.2
 prometheus-client==0.24.0
 requests==2.34.2
+oauthlib>=4.0.0 # not directly required, pinned by Snyk to avoid a vulnerability

@@ -100,12 +100,13 @@ curl localhost:5000/health
 ## 4. Docker Compose Stack
 
 ```bash
+scripts/create-secrets.sh --compose   # once: writes .env with random MANA_* and Grafana values
 make dev-start        # docker compose up -d
 make dev-logs
 make dev-stop
 ```
 
-This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, `admin` / `admin123`), Loki and Alloy.
+This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`), Loki and Alloy.
 
 !!! warning "Known Compose issues to be aware of" - The orchestrator service mounts `~/.kube/config` to `/root/.kube/config`, but the image runs as the non-root user `orchestrator`, which cannot read `/root`. Mount the file to `/home/orchestrator/.kube/config` instead. - A kubeconfig for Kind or Minikube points at `127.0.0.1`, which inside the container is the container itself. Use a kubeconfig whose server address is reachable from Docker (for Kind: `kind get kubeconfig --internal` with the Kind network attached). - The orchestrator service's healthcheck uses `curl`, which the orchestrator image does not install, so Compose reports it unhealthy. Use `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"` or add `curl` to the image. - Prometheus in Compose expects an Alertmanager at `alertmanager:9093`, which Compose does not define; alert delivery will not work locally.
 

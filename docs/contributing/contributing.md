@@ -10,7 +10,7 @@ By participating you agree to follow the [Code of Conduct](code-of-conduct.md). 
 - **Fix a known issue.** The [Data Flow](../architecture/data-flow.md#known-behaviours-and-limitations) page lists confirmed problems that are good starting points: the `ci` namespace polluting deployment outcome counts.
 - **Improve tests.** The orchestrator's API layer (`api.py`) has no tests and overall coverage is under 50%.
 - **Improve the docs.** Corrections, clearer examples and missing sections are all valuable.
-- **Propose a feature** such as webhook authentication, a Redis password option, or adapters for other CI systems.
+- **Propose a feature** such as idempotency keys for replayed webhooks, OIDC for the deploy workflow, or adapters for other CI systems.
 
 ## Before You Start
 

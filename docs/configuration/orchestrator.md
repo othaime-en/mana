@@ -3,7 +3,7 @@
 The orchestrator is configured entirely through environment variables, read once at startup by `orchestrator/src/config.py`. This page explains what each setting does, how the settings interact, and how to set them in each deployment method. For a flat list of every variable see [Environment Variables](environment-variables.md); for the cross-component defaults table see the [Configuration Reference](../reference/configuration.md).
 
 !!! info "Source of truth"
-This page documents the variables that the code actually reads. The broader [Configuration Guide](overview.md) describes some additional options (leader election, webhook authentication, Redis TLS, and so on) that are not implemented in the current code. If a variable is not listed here or in [Environment Variables](environment-variables.md), the orchestrator ignores it.
+This page documents the variables that the code actually reads. The broader [Configuration Guide](overview.md) describes some additional options (leader election, and so on) that are not implemented in the current code. If a variable is not listed here or in [Environment Variables](environment-variables.md), the orchestrator ignores it.
 
 ## How Configuration Is Loaded
 
@@ -21,8 +21,21 @@ Changing a variable requires restarting the orchestrator pods. `GET /config` sho
 | ------------ | ----------- | ---------------------------------------------------------------- |
 | `REDIS_HOST` | `localhost` | Hostname of the Redis server. In-cluster this is `redis-service` |
 | `REDIS_PORT` | `6379`      | Redis port                                                       |
+| `REDIS_PASSWORD` | empty   | Password sent to Redis. The manifests, Terraform and Compose start Redis with `--requirepass` from the `redis-password` secret |
+| `REDIS_TLS` | `false`      | Use TLS and require a valid server certificate                   |
+| `REDIS_TLS_CA_FILE` | empty | CA bundle for that certificate; needs `REDIS_TLS=true` and a file that exists |
 
-The client uses a 5-second connect and socket timeout. There is no password or TLS option in the current code, so use a network-isolated Redis (see [Security](../about/security.md)).
+The client uses a 5-second connect and socket timeout. The in-cluster Redis serves plain TCP behind a NetworkPolicy that admits only orchestrator pods; set `REDIS_TLS` when you point the orchestrator at a managed Redis that terminates TLS (see [Security](../about/security.md)).
+
+### Authentication
+
+| Variable         | Default | Description                                                                                          |
+| ---------------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `WEBHOOK_SECRET` | unset   | HMAC key for webhooks. At least 32 characters; a comma-separated list accepts several keys for rotation |
+| `API_KEY`        | unset   | Key for the operator endpoints (`X-API-Key`). Same rules                                              |
+| `AUTH_DISABLED`  | `false` | `true` disables every check and logs at CRITICAL. Local development only                              |
+
+Without the first two (and without `AUTH_DISABLED=true`) the process exits at startup. Details of what each endpoint requires are in the [API Reference](../reference/api.md).
 
 ### Retry and rollback policy
 
@@ -181,8 +194,8 @@ Non-numeric values for numeric variables fail earlier with Python's own `ValueEr
 | Replicas          | 2                                                                                                                             | `orchestrator/k8s/deployment.yaml` (the Terraform module's `replicas` variable also defaults to 2) |
 | Requests / limits | 100m CPU, 256Mi / 500m CPU, 512Mi                                                                                             | `orchestrator/k8s/deployment.yaml`                                                                 |
 | Probes            | `GET /health` on 8000, 60 s initial delay, 20 s period                                                                        | `orchestrator/k8s/deployment.yaml`                                                                 |
-| Security context  | `runAsNonRoot`, UID 1000, no privilege escalation, all capabilities dropped                                                   | `orchestrator/k8s/deployment.yaml`                                                                 |
-| RBAC              | cluster-wide `get/list/watch/update/patch` on Deployments and ReplicaSets; `get/list/watch` on Pods; `create/patch` on Events | `orchestrator/k8s/deployment.yaml`                                                                 |
+| Security context  | `runAsNonRoot`, UID 1000, no privilege escalation, all capabilities dropped, `seccomp` `RuntimeDefault`, read-only root filesystem with an `emptyDir` at `/tmp` | `orchestrator/k8s/deployment.yaml` |
+| RBAC              | per managed namespace (`production`, `staging`, `canary`): `get`, `patch` on Deployments; `list` on ReplicaSets and Pods. No cluster-wide permissions | `orchestrator/k8s/rbac.yaml` |
 
 !!! note "Running two replicas"
 Both replicas serve webhooks and share state through Redis. There is no leader election, so two replicas can both act on the same deployment ID if the CI system delivers a webhook twice. Use a single replica if you need strict single-actor behaviour.

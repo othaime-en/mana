@@ -19,92 +19,66 @@ MANA is a learning and portfolio project. It has not been security audited. Trea
 
 ## What Is Implemented
 
-| Area                               | Implementation                                                                                                      | Where                                                                    |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Non-root containers                | Images create UID 1000 users; manifests set `runAsNonRoot: true` and `runAsUser: 1000`                              | Dockerfiles, `*/k8s/deployment.yaml`                                     |
-| Reduced privileges                 | `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]` on app and orchestrator pods                       | `*/k8s/deployment.yaml`                                                  |
-| Resource limits                    | Requests and limits on every workload; production namespace quota and LimitRange                                    | manifests, Terraform `security` module                                   |
-| Least-privilege API access         | The orchestrator role is limited to Deployments, ReplicaSets, Pods and Events; it cannot read Secrets or ConfigMaps | `orchestrator-role`                                                      |
-| Network segmentation               | NetworkPolicies for the sample app and orchestrator namespaces                                                      | `kubernetes/security/network-policies.yaml`, Terraform `security` module |
-| Secret handling                    | GitHub token read from a Kubernetes Secret (`github-token`); CI secrets stored in GitHub Actions secrets            | `orchestrator/k8s/deployment.yaml`, workflows                            |
-| Input validation                   | Pydantic models validate webhook and API payloads; configuration is range-checked at startup                        | `api.py`, `config.py`                                                    |
-| Auditability                       | Structured audit events for every recovery action                                                                   | `utils/audit.py`                                                         |
-| Supply-chain scanning              | Weekly and per-PR Snyk (dependencies), Trivy (container image) and Bandit (Python code) scans                       | `security-scan.yml`                                                      |
-| Minimal blast radius of CI deploys | Environments (`staging`, `production`) so approvals can be required                                                 | `deploy-environment.yml`                                                 |
+| Area | Implementation | Where |
+| ---- | -------------- | ----- |
+| Webhook authentication | HMAC-SHA256 over `<timestamp>.<body>`, 300 s window, constant-time comparison, several secrets accepted for rotation; unsigned requests get `401` and increment `webhook_errors_total{reason="unauthorized"}` | `orchestrator/src/auth.py`, `scripts/notify-orchestrator.sh` |
+| Operator endpoints | `X-API-Key` on `/rollback`, `/health-check`, `/config` and the state endpoints; a test fails if a route is neither guarded nor on the public list | `orchestrator/src/api.py` |
+| Fail-closed start | The orchestrator exits without `WEBHOOK_SECRET` and `API_KEY` (32 characters or more) unless `AUTH_DISABLED=true`, which logs at CRITICAL | `orchestrator/src/config.py` |
+| Generated secrets | `scripts/create-secrets.sh` writes `orchestrator-secrets` with random values and never prints them; Terraform uses `random_password`; no credential is committed | `scripts/`, Terraform |
+| Redis | `--requirepass` from the Secret, client password and optional TLS (`REDIS_TLS`), reachable only from orchestrator pods | `orchestrator/k8s/redis.yaml`, `config.py` |
+| Network segmentation | Default deny in `production`, `staging` and `orchestrator`; explicit allow rules selected with `kubernetes.io/metadata.name`; orchestrator ingress only from `monitoring` and `ci-runners` | `kubernetes/security/network-policies.yaml`, Terraform `security` module |
+| Namespaced RBAC | The orchestrator has `get`/`patch` on Deployments and `list` on ReplicaSets and Pods in `production`, `staging` and `canary` only; a test ties the Role to the Kubernetes calls in the code | `orchestrator/k8s/rbac.yaml`, Terraform `orchestrator` module |
+| Pod hardening | Pod Security `restricted` enforced on `production`, `staging`, `canary`, `orchestrator`; `seccomp` `RuntimeDefault`, read-only root filesystem with an `emptyDir` at `/tmp`, no privilege escalation, all capabilities dropped; no service-account token for the sample app and Redis | manifests, Terraform |
+| CI supply chain | Every action pinned to a commit SHA, Dependabot, least-privilege `permissions`, `GITHUB_TOKEN` for the registry, secrets passed through `env:`, blocking `pip-audit`, Trivy (fixable CRITICAL) and Bandit | `.github/` |
+| CI deploy identity | A namespaced `ci-deployer` ServiceAccount and Roles for the deploy workflow | `kubernetes/security/ci-deployer-rbac.yaml` |
+| Resource limits | Requests and limits on every workload; production quota and LimitRange | manifests, `resource-quotas.yaml` |
+| Auditability | Structured audit events for every recovery action | `utils/audit.py` |
+
+## Rotating secrets
+
+```bash
+scripts/create-secrets.sh --rotate                 # new redis-password, webhook-secret, api-key
+kubectl -n orchestrator rollout restart deployment/redis deployment/orchestrator
+kubectl -n orchestrator get secret orchestrator-secrets -o jsonpath='{.data.webhook-secret}' \
+  | base64 -d | gh secret set MANA_WEBHOOK_SECRET
+```
+
+For a rotation without rejected webhooks, set `WEBHOOK_SECRET` to `<new>,<old>` first, update the GitHub secret, then drop the old value. Rotating the Redis password requires restarting Redis and the orchestrator together.
 
 ## Known Gaps
 
-### 1. No authentication or authorization on the API
-
-`/webhook/deployment`, `/rollback`, `/health-check` and the read endpoints accept any request. There is no shared secret, signature check or token. The Terraform module creates `webhook-token` and `api-key` entries in a Secret, but both hold the placeholder `change-me-in-production` and nothing reads them.
-
-**Mitigations until built in:**
-
-- Keep the Service as `ClusterIP`; reach it from CI through a self-hosted runner inside the network, or through an authenticating reverse proxy.
-- Restrict ingress to the orchestrator pods with a NetworkPolicy that allows only the proxy or runner namespace. The shipped policy allows ingress on port 8000 from **all namespaces** (`namespaceSelector: {}`); tighten it.
-- Do not publish the orchestrator URL publicly.
-
-### 2. Redis has no authentication or TLS
-
-The orchestrator connects with host and port only. Redis in the manifests has no password, and the Terraform `redis_password` variable only sets `--requirepass` on the server; the client cannot supply it. Isolate Redis with a NetworkPolicy so only orchestrator pods can reach it, or extend the client to read a password and TLS settings.
-
-Redis in `orchestrator/k8s/redis.yaml` uses an `emptyDir`, so state is lost on rescheduling.
-
-### 3. Cluster-wide write access
-
-`orchestrator-role` is a `ClusterRole` bound cluster-wide, with `update` and `patch` on Deployments in every namespace. Limit it by replacing the ClusterRoleBinding with RoleBindings in only the namespaces MANA manages (`production`, `staging`, `canary`).
-
-### 4. Default credentials
-
-- Grafana's admin password is `admin123` in `terraform/modules/monitoring/main.tf`, the Helm values, `docker-compose.yml`, and `scripts/deploy.sh` output. Grafana's service type is `LoadBalancer`, which may expose it externally.
-- Replace these with a Secret-backed password (`grafana.admin.existingSecret`) and SSO before exposing Grafana.
-
-### 5. Security manifests that do not apply on vanilla Kubernetes
-
-`kubernetes/security/network-policies.yaml` also contains a `PodSecurityPolicy` (removed from Kubernetes in 1.25) and an OpenShift `SecurityContextConstraints`. Applying the whole file to a current cluster fails on those objects. Use Pod Security Admission labels instead (`pod-security.kubernetes.io/enforce: restricted` on the application namespaces), and apply only the NetworkPolicy, quota and LimitRange objects. The file's example Secret also holds placeholder values; do not apply it as is.
-
-### 6. NetworkPolicies may block MANA's own traffic
-
-Before enabling the policies, verify that they allow what the orchestrator needs:
-
-- The orchestrator calls pod IPs in the application namespace directly for health checks. The sample-app policy admits ingress only from `ingress-nginx` and `monitoring` namespaces, so the orchestrator's calls would be dropped.
-- The orchestrator policy allows egress only to Redis and to `kube-system` on 443. It does not allow the Kubernetes API server address or `api.github.com:443`, which the orchestrator needs.
-- Policies select namespaces by the label `name=<namespace>`, which Terraform sets. Namespaces created otherwise need the label.
-
-Test with `kubectl exec` into the orchestrator pod (`curl` to a pod IP and to `https://api.github.com`) after applying policies.
-
-### 7. Weak default container posture
-
-`readOnlyRootFilesystem` is `false` on the sample app (set deliberately for startup behaviour) and unset on the orchestrator. Images are referenced by mutable tags (`latest`, `1.0.0`) rather than digests, and CI actions such as Trivy and Snyk are pinned to `@master`. For production pin images by digest and actions by version or commit SHA.
-
-### 8. Secrets in CI
-
-`KUBE_CONFIG` is typically an admin kubeconfig. Create a dedicated ServiceAccount limited to `get/patch` on Deployments (and `get/list` on Pods) in the target namespaces, and generate the kubeconfig from it. Prefer short-lived credentials (OIDC federation to your cloud) over long-lived kubeconfigs, and scope `GHCR_PAT` to `write:packages` only.
-
-### 9. Forgery and replay
-
-Without signatures, a captured webhook can be replayed and the same event delivered twice acts twice. Two orchestrator replicas have no leader election. Add HMAC signing (for example `X-Hub-Signature-256`-style) and idempotency keys when authentication is implemented.
+1. **Replay.** A valid webhook can be replayed for 300 seconds, and two replicas can both act on one event. Idempotency keys and locks are planned (CORE-06, FEAT-04).
+2. **Open read endpoints.** `/`, `/health`, `/metrics` and the OpenAPI routes carry no credential, because probes and Prometheus use them. The NetworkPolicy is the control.
+3. **NetworkPolicy enforcement is not proven on a cluster.** `scripts/test-network-policies.sh` and `network-policy-test.yml` check five allowed and six denied paths on Kind with Calico, but they have not been run. Egress to the API server and `api.github.com` is `0.0.0.0/0` on 443 and 6443; narrow it to the API server address.
+4. **Redis is plain TCP in the cluster and not durable.** The password and the policy protect it; it still stores data on an `emptyDir` (INFRA-04). Use `REDIS_TLS` with a managed Redis.
+5. **Terraform state holds the generated secrets.** Use an encrypted remote backend (INFRA-09) or an external secret store (Sealed Secrets, External Secrets Operator).
+6. **CI credentials are long-lived.** `KUBE_CONFIG` can come from the `ci-deployer` ServiceAccount, but OIDC federation is not implemented, and the self-hosted runner namespace `ci-runners` is an assumption.
+7. **Images are deployed by tag**, there is no SBOM or signature (FEAT-14), and several action majors are old (CI-04).
+8. **`monitoring` has no Pod Security labels** because its charts need privileged pods, and Alertmanager is not deployed (OBS-06).
+9. **Not verified outside the repository's tests:** the read-only root filesystem under gunicorn, Pod Security admission, the Trivy gate, and the first GitHub run of the workflows.
 
 ## Hardening Checklist
 
-- [ ] Orchestrator reachable only from your CI runners or an authenticating proxy
-- [ ] NetworkPolicy on the orchestrator ingress limited to those sources; egress verified for Redis, the Kubernetes API and `api.github.com`
-- [ ] Redis isolated by NetworkPolicy, persistent volume configured, authentication added if you extend the client
-- [ ] `orchestrator-role` bound per namespace instead of cluster-wide
+- [x] Webhook signature and operator API key (`WEBHOOK_SECRET`, `API_KEY`)
+- [x] Orchestrator ingress limited to `monitoring` and the CI runner namespace; Redis ingress limited to orchestrator pods
+- [x] Redis password; NetworkPolicy isolation
+- [x] Orchestrator Role bound per namespace instead of cluster-wide
+- [x] Pod Security `restricted` on `production`, `staging`, `canary` and `orchestrator`
+- [x] No `admin123` or committed secrets; Terraform passwords are generated
+- [x] Third-party GitHub Actions pinned by SHA; Dependabot configured; `pip-audit`, Trivy and Bandit block
+- [ ] Run `scripts/test-network-policies.sh` on your cluster (Calico or Cilium) and narrow the API server egress
 - [ ] `GITHUB_TOKEN` is a fine-grained token, scoped to one repository, Actions read/write only, rotated regularly
-- [ ] `KUBE_CONFIG` belongs to a least-privilege ServiceAccount
-- [ ] Grafana admin password changed; Grafana not publicly exposed; Alertmanager secrets mounted from Kubernetes Secrets
-- [ ] Pod Security Admission set to `restricted` on `production`, `staging` and `orchestrator`
-- [ ] Images pinned by digest; Dependabot or Renovate enabled; Trivy fails the build on `CRITICAL`
-- [ ] Third-party GitHub Actions pinned to versions or SHAs
-- [ ] Secrets managed with Sealed Secrets, External Secrets Operator or Vault rather than committed manifests
-- [ ] Audit logs shipped to Loki or your SIEM with an access policy and retention that fits your compliance needs
-- [ ] Webhook authentication implemented (see [Known Gaps](#1-no-authentication-or-authorization-on-the-api))
+- [ ] `KUBE_CONFIG` is built from the `ci-deployer` ServiceAccount, not an admin kubeconfig
+- [ ] Persistent volume for Redis, or a managed Redis with `REDIS_TLS=true`
+- [ ] Terraform state in an encrypted backend
+- [ ] Images pinned by digest, signed, with an SBOM (FEAT-14)
+- [ ] Audit logs shipped to Loki or your SIEM with an access policy and retention that fits your needs
+- [ ] Alertmanager wired to a receiver; runbooks written for `WebhookAuthenticationFailures`
 
 ## Secure Operation
 
-- **Never commit** `.env` files, kubeconfigs, `terraform.tfstate`, or tokens. `orchestrator/.env.example` contains placeholders only.
-- **Rotate** the GitHub token and any webhook secrets on a schedule and after any suspected exposure:
+- **Never commit** `.env` files, kubeconfigs, `terraform.tfstate`, or tokens. `scripts/create-secrets.sh --compose` writes a `0600` `.env` that `.gitignore` already excludes.
+- **Rotate** the GitHub token and the secrets above on a schedule and after any suspected exposure:
 
   ```bash
   kubectl create secret generic github-token --from-literal=token="$NEW_TOKEN" \
@@ -112,8 +86,8 @@ Without signatures, a captured webhook can be replayed and the same event delive
   kubectl rollout restart deployment/orchestrator -n orchestrator
   ```
 
-- **Review** audit events regularly, especially `rollback_initiated` and `manual_intervention_required` (see [Monitoring](../usage/monitoring.md)). Unexpected `POST /rollback` activity warrants investigation.
-- **Scan locally** before opening a PR: `bandit -r orchestrator/src sample-app/src` and `trivy image sample-app:<tag>`.
+- **Watch** `WebhookAuthenticationFailures` and the audit events `rollback_initiated` and `manual_intervention_required` (see [Monitoring](../usage/monitoring.md)). A burst of rejected webhooks after a rotation means the pipeline still holds the old secret; unexpected `POST /rollback` activity warrants investigation.
+- **Scan locally** before opening a PR: `bandit -r orchestrator/src sample-app/src`, `pip-audit -r orchestrator/requirements.txt`, and `trivy image sample-app:<tag>`.
 
 ## Reporting a Vulnerability
 

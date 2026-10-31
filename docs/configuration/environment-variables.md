@@ -15,6 +15,12 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | ---------------------- | ------ | ----------- | -------------- | --------------------------------------------------------------------------- |
 | `REDIS_HOST`           | string | `localhost` | yes in cluster | Redis hostname (`redis-service` in Kubernetes, `redis` in Compose)          |
 | `REDIS_PORT`           | int    | `6379`      | no             | Redis port                                                                  |
+| `REDIS_PASSWORD`       | secret | empty       | in shared environments | Password sent to Redis; empty sends none                             |
+| `REDIS_TLS`            | bool   | `false`     | no             | Connect to Redis over TLS and require a valid certificate                   |
+| `REDIS_TLS_CA_FILE`    | path   | empty       | no             | CA bundle for the Redis certificate; needs `REDIS_TLS=true` and must exist  |
+| `WEBHOOK_SECRET`       | secret | unset       | yes            | HMAC key for `POST /webhook/deployment`; 32 characters or more. Comma-separated values are all accepted, which allows rotation |
+| `API_KEY`              | secret | unset       | yes            | Key for the operator endpoints, sent as `X-API-Key`; 32 characters or more. Comma-separated values are all accepted |
+| `AUTH_DISABLED`        | bool   | `false`     | no             | `true` turns every authentication check off and logs at CRITICAL. Local development only |
 | `MAX_RETRIES`          | int    | `3`         | no             | Failures answered with a retry before rolling back. Must be `>= 1`          |
 | `INITIAL_BACKOFF`      | float  | `10.0`      | no             | Seconds before the first retry. Must be `> 0`                               |
 | `MAX_BACKOFF`          | float  | `300.0`     | no             | Cap on any retry delay. Must be `> INITIAL_BACKOFF`                         |
@@ -28,7 +34,7 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | `GITHUB_REPO`          | string | unset       | for retries    | `owner/repo` that owns the workflow                                         |
 | `PORT`                 | int    | `8000`      | no             | Listen port for `python -m src.api` only; the container uses a fixed `8000` |
 
-Kubernetes also needs a Secret named `github-token` with key `token` if you use `orchestrator/k8s/deployment.yaml` as written.
+The orchestrator refuses to start without `WEBHOOK_SECRET` and `API_KEY` unless `AUTH_DISABLED=true`. In Kubernetes, `scripts/create-secrets.sh` creates the Secret `orchestrator-secrets` (keys `redis-password`, `webhook-secret`, `api-key`), which `orchestrator/k8s/deployment.yaml` and `redis.yaml` read. The manifest also needs a Secret named `github-token` with key `token`.
 
 ## Sample Application
 
@@ -56,8 +62,10 @@ Configure in **Settings, Secrets and variables, Actions**.
 | ------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ORCHESTRATOR_URL` | all deploy and build workflows | Base URL of the orchestrator (for example `https://mana.example.com`). Must be reachable from GitHub-hosted runners. If empty, notifications are skipped |
 | `KUBE_CONFIG`      | `deploy-environment.yml`       | Base64-encoded kubeconfig for the target cluster (`base64 -w0 kubeconfig`). The job fails if it is missing                                               |
-| `GHCR_PAT`         | `build-and-test.yml`           | Personal access token with `write:packages` used to push to `ghcr.io`                                                                                    |
-| `SNYK_TOKEN`       | `security-scan.yml`            | Snyk API token (the step is `continue-on-error`)                                                                                                         |
+| `MANA_WEBHOOK_SECRET` | `build-and-test.yml`, `deploy-environment.yml` | Signs every webhook. Must equal the orchestrator's `webhook-secret`. `scripts/notify-orchestrator.sh` fails with a warning annotation when it is missing |
+| `SNYK_TOKEN`       | `security-scan.yml`            | Snyk API token; the advisory Snyk job runs only when it exists                                                                                           |
+
+Images are pushed with the workflow's own `GITHUB_TOKEN` (`packages: write`); no personal access token is needed.
 
 Workflow-level values set in YAML rather than as secrets: `REGISTRY=ghcr.io`, `IMAGE_NAME=<owner>/<repo>/sample-app`. `main-pipeline.yml` also defines `ENABLE_STAGING_DEPLOY` and `ENABLE_PRODUCTION_DEPLOY` (both `false`); the deploy jobs are currently gated by the manual `deploy_target` input rather than these flags.
 
@@ -122,11 +130,15 @@ Details and defaults: [Configuration Reference](../reference/configuration.md#te
     ENABLE_AUDIT_LOGGING=true
     GITHUB_TOKEN=ghp_xxx        # never commit a real token
     GITHUB_REPO=yourname/mana
+    WEBHOOK_SECRET=<openssl rand -hex 32>
+    API_KEY=<openssl rand -hex 32>
+    # or, for local development only: AUTH_DISABLED=true
     ```
 
 === "Kubernetes secret and env"
 
     ```bash
+    scripts/create-secrets.sh                      # orchestrator-secrets with random values
     kubectl create secret generic github-token --from-literal=token="$GITHUB_TOKEN" -n orchestrator
     kubectl set env deployment/orchestrator MAX_RETRIES=2 INITIAL_BACKOFF=5 -n orchestrator
     ```
@@ -140,8 +152,8 @@ Details and defaults: [Configuration Reference](../reference/configuration.md#te
 
 ## Variables That Have No Effect
 
-The [Configuration Guide](overview.md) mentions options such as `ENABLE_LEADER_ELECTION`, `WEBHOOK_AUTH_ENABLED`, `WEBHOOK_SECRET`, `REDIS_PASSWORD`, `REDIS_SSL`, `STATE_TTL_SECONDS`, `MAX_APP_HEALTH_FAILURES`, `HEALTH_CHECK_INTERVAL`, `JITTER_ENABLED`, `AUDIT_LOG_RETENTION_DAYS`, `CLEANUP_OLD_STATES_INTERVAL`, `LOG_FORMAT` and the `GITHUB_*` tuning variables. These are not read by the current code, so setting them changes nothing. Treat them as a roadmap rather than a feature list. In particular:
+The [Configuration Guide](overview.md) mentions options such as `ENABLE_LEADER_ELECTION`, `WEBHOOK_AUTH_ENABLED`, `REDIS_SSL`, `STATE_TTL_SECONDS`, `MAX_APP_HEALTH_FAILURES`, `HEALTH_CHECK_INTERVAL`, `JITTER_ENABLED`, `AUDIT_LOG_RETENTION_DAYS`, `CLEANUP_OLD_STATES_INTERVAL`, `LOG_FORMAT` and the `GITHUB_*` tuning variables. These are not read by the current code, so setting them changes nothing. Treat them as a roadmap rather than a feature list. In particular:
 
 - The state TTL is fixed at 24 hours.
 - The tolerated number of consecutive application-health failures is fixed at 3.
-- There is no webhook authentication; protect the endpoint at the network layer (see [Security](../about/security.md)).
+- Authentication is configured with `WEBHOOK_SECRET`, `API_KEY` and `AUTH_DISABLED` (above); there is no `WEBHOOK_AUTH_ENABLED`. Redis TLS uses `REDIS_TLS`, not `REDIS_SSL`.

@@ -11,13 +11,13 @@ Most problems can be narrowed down with four commands:
 curl -s $MANA/health | jq
 
 # 2. Which settings is it really using?
-curl -s $MANA/config | jq
+curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/config | jq
 
 # 3. What does it say?
 kubectl -n orchestrator logs -l app=orchestrator --tail=200
 
 # 4. What happened to the deployment in question?
-curl -s $MANA/deployment/<deployment-id> | jq
+curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/<deployment-id> | jq
 ```
 
 (`$MANA` is your orchestrator URL; for example `kubectl -n orchestrator port-forward svc/orchestrator-service 8000:8000 &` then `export MANA=http://localhost:8000`.)
@@ -50,6 +50,7 @@ kubectl -n orchestrator describe pod <pod>
 
 | Log line or event                                                                  | Cause                                   | Fix                                                                                                            |
 | ---------------------------------------------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `WEBHOOK_SECRET is required; set AUTH_DISABLED=true only for local development` | `orchestrator-secrets` missing or lacks a key | `scripts/create-secrets.sh`, then restart the pod |
 | `Cannot connect to Redis: ...`                                                     | Redis down or wrong `REDIS_HOST`        | See [Redis](#cannot-connect-to-redis)                                                                          |
 | `Cannot load Kubernetes config: ...`                                               | No in-cluster config or kubeconfig      | Run in the cluster with a ServiceAccount, or provide a kubeconfig locally                                      |
 | `ValueError: max_backoff must be > initial_backoff` (or another `... must be ...`) | Invalid configuration                   | Correct the variable; see [validation errors](../configuration/orchestrator.md#validation-errors)              |
@@ -101,10 +102,10 @@ kubectl -n orchestrator get pods,svc -l app=redis
 kubectl -n orchestrator exec deploy/redis -- redis-cli ping           # PONG
 kubectl -n orchestrator exec deploy/orchestrator -- env | grep REDIS
 kubectl -n orchestrator exec deploy/orchestrator -- python -c \
-  "import redis,os;print(redis.Redis(host=os.getenv('REDIS_HOST'),port=6379,socket_timeout=3).ping())"
+  "import redis,os;print(redis.Redis(host=os.getenv('REDIS_HOST'),port=6379,password=os.getenv('REDIS_PASSWORD') or None,socket_timeout=3).ping())"
 ```
 
-Checks: the host must be `redis-service` in-cluster (`redis` in Compose, `localhost` locally); the Redis pod must be Ready; a NetworkPolicy must allow the orchestrator to reach port 6379; the client has no password support, so a Redis started with `--requirepass` (Terraform `redis_password`) will refuse it.
+Checks: the host must be `redis-service` in-cluster (`redis` in Compose, `localhost` locally); the Redis pod must be Ready; a NetworkPolicy must allow the orchestrator to reach port 6379; a Redis started with `--requirepass` needs the orchestrator's `REDIS_PASSWORD` to match (both come from `orchestrator-secrets`, key `redis-password`; an `AuthenticationError` in the logs means they differ, for example after rotating only one side). With NetworkPolicies enforced, only pods labelled `app=orchestrator` may reach Redis.
 
 Data safety: the bundled Redis uses an `emptyDir`, so rescheduling it loses all state, including `last_successful:*` rollback targets. Send a fresh `success` webhook (or deploy once) to repopulate.
 
@@ -136,7 +137,7 @@ The orchestrator calls pod IPs directly. Check:
 1. Pods carry the label `app=<deployment name>` (otherwise: `No pods found`).
 2. `HEALTH_CHECK_PORT` and `HEALTH_CHECK_PATH` match the application.
 3. The response is HTTP 200 with JSON containing `"status": "healthy"`.
-4. **NetworkPolicies** allow the orchestrator namespace to reach the application pods. The shipped sample-app policy admits only `ingress-nginx` and `monitoring`, so you must add `orchestrator`.
+4. **NetworkPolicies** allow the orchestrator namespace to reach the application pods. The shipped sample-app policy admits `orchestrator` pods, `monitoring` and `ingress-nginx` on port 5000; if you changed `HEALTH_CHECK_PORT`, change the policy too.
 
 ### GitHub API problems
 
@@ -176,6 +177,7 @@ The role needs `get/list/watch/update/patch` on Deployments and ReplicaSets and 
 
 | Response                                      | Cause                                                         | Fix                                                                                            |
 | --------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `401`                                         | Missing, stale or wrong `X-Mana-Timestamp` / `X-Mana-Signature` (webhook), or missing `X-API-Key` (operator endpoints) | Sign `<timestamp>.<body>` with `WEBHOOK_SECRET` (`scripts/notify-orchestrator.sh` does); check the clock is within 300 s; compare `MANA_WEBHOOK_SECRET` with the Secret |
 | `422`                                         | A required field is missing or has the wrong type             | Include `deployment_id`, `namespace`, `app_name`, `version`, `status`; build JSON with `jq`    |
 | `422` mentioning `failure_type`               | Unknown `failure_type`, or `status: failed` without one      | Use `build_failure`, `test_failure`, `deployment_failure`, `health_check_failure`, `smoke_test_failure` or `timeout` |
 | `500` with a Redis error                      | State could not be saved                                      | [Redis](#cannot-connect-to-redis)                                                              |
@@ -208,8 +210,8 @@ Each of these also writes a `manual_intervention_required` audit event.
 A rollback needs: the failure count to exceed `MAX_RETRIES`, a known previous version, and the failed version to be the one running.
 
 ```bash
-curl -s $MANA/config | jq '{max_retries}'
-curl -s $MANA/deployment/<id> | jq '{status, retry_count, previous_version}'
+curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/config | jq '{max_retries}'
+curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/<id> | jq '{status, retry_count, previous_version}'
 kubectl -n orchestrator exec deploy/redis -- redis-cli get last_successful:<ns>:<app>
 ```
 
@@ -235,7 +237,7 @@ kubectl -n production get deploy sample-app -o jsonpath='{.spec.template.spec.co
 
 ### Health checks always failing
 
-1. Run the manual check: `curl -s -X POST $MANA/health-check -H 'Content-Type: application/json' -d '{"namespace":"production","deployment_name":"sample-app","timeout":30}'`.
+1. Run the manual check: `curl -s -X POST $MANA/health-check -H "X-API-Key: $MANA_API_KEY" -H 'Content-Type: application/json' -d '{"namespace":"production","deployment_name":"sample-app","timeout":30}'`.
 2. If `ready_replicas` never equals `replicas`, Kubernetes itself is not Ready; check probes and events.
 3. If replicas are Ready but the check fails, test the endpoint from the orchestrator pod ([steps above](#cannot-reach-application-health-endpoints)). After three consecutive application failures the check gives up.
 4. Mind the payload: the endpoint must return `{"status": "healthy"}`, not just 200.

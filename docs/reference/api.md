@@ -9,8 +9,25 @@ kubectl port-forward -n orchestrator svc/orchestrator-service 8000:8000
 export MANA=http://localhost:8000
 ```
 
-!!! danger "No authentication"
-The API has **no authentication or authorization**. Anyone who can reach it can trigger rollbacks (`POST /rollback`) and submit forged webhooks. Keep it on a private network, restrict access with NetworkPolicies, or put it behind an authenticating proxy. See [Security](../about/security.md).
+## Authentication
+
+| Endpoints | Credential |
+| --------- | ---------- |
+| `POST /webhook/deployment` | `X-Mana-Timestamp` (Unix seconds) and `X-Mana-Signature`: `sha256=` followed by the hex HMAC-SHA256 of `<timestamp>.<raw body>` with `WEBHOOK_SECRET`. The timestamp must be within 300 seconds of the server clock |
+| `POST /rollback`, `POST /health-check`, `GET /deployment/{id}`, `GET /deployments/recent`, `GET /deployments/{ns}/{name}/status`, `GET /config` | `X-API-Key` equal to one of the configured `API_KEY` values |
+| `GET /`, `GET /health`, `GET /metrics`, `/docs`, `/redoc`, `/openapi.json` | none (probes and Prometheus; restrict them with the NetworkPolicy) |
+
+A missing or wrong credential returns `401` with a generic body. The signature is checked before the payload, so a forged request never reaches validation. `WEBHOOK_SECRET` and `API_KEY` accept comma-separated lists: add the new value, update the clients, then remove the old one. A captured, valid webhook can be replayed for up to five minutes; idempotency keys are planned (CORE-06).
+
+`scripts/notify-orchestrator.sh` builds, signs and sends a webhook from environment variables, and is what the workflows use:
+
+```bash
+export ORCHESTRATOR_URL=$MANA
+export MANA_WEBHOOK_SECRET=$(kubectl -n orchestrator get secret orchestrator-secrets -o jsonpath='{.data.webhook-secret}' | base64 -d)
+export MANA_API_KEY=$(kubectl -n orchestrator get secret orchestrator-secrets -o jsonpath='{.data.api-key}' | base64 -d)
+```
+
+The examples below use `$MANA_API_KEY` for operator endpoints and show the webhook payload; send it with the script (`MANA_DEPLOYMENT_ID`, `MANA_NAMESPACE`, `MANA_VERSION`, `MANA_STATUS`, `MANA_FAILURE_TYPE`, `MANA_WORKFLOW_RUN_ID`). With `AUTH_DISABLED=true` (local development only) no credentials are needed.
 
 ## Conventions
 
@@ -97,8 +114,10 @@ The entry point for CI/CD events. See [Data Flow](../architecture/data-flow.md) 
 | `metadata`      | object | no                   | Free-form. Include `workflow_run_id` (string) for retries. Typical keys: `commit`, `author`, `branch` |
 
 ```bash
+# Unsigned example of the body; sign it as described under Authentication
 curl -s -X POST $MANA/webhook/deployment \
   -H 'Content-Type: application/json' \
+  -H "X-Mana-Timestamp: $TS" -H "X-Mana-Signature: $SIGNATURE" \
   -d '{
     "deployment_id": "deploy-123",
     "namespace": "production",
@@ -194,7 +213,7 @@ Rolls a Deployment back to a specific version without any retry logic. The image
 
 ```bash
 curl -s -X POST $MANA/rollback \
-  -H 'Content-Type: application/json' \
+  -H "X-API-Key: $MANA_API_KEY" -H 'Content-Type: application/json' \
   -d '{"namespace":"production","deployment_name":"sample-app","target_version":"v0f9e8d7-1759990000"}'
 ```
 
@@ -219,7 +238,7 @@ Runs the deployment health check (all replicas ready plus application health) an
 | `timeout`         | integer | no       | `300`   | Maximum seconds to wait |
 
 ```bash
-curl -s -X POST $MANA/health-check \
+curl -s -X POST $MANA/health-check -H "X-API-Key: $MANA_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"namespace":"production","deployment_name":"sample-app","timeout":60}'
 ```
@@ -242,7 +261,7 @@ The call blocks until the check passes, fails or times out.
 Returns the stored state for one deployment, or `404` (`{"detail": "Deployment not found"}`) if there is none or it has expired (24 h TTL).
 
 ```bash
-curl -s $MANA/deployment/deploy-123
+curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/deploy-123
 ```
 
 ```json
@@ -275,7 +294,7 @@ curl -s $MANA/deployment/deploy-123
 | `limit`         | integer | `10`    | Maximum results                    |
 
 ```bash
-curl -s "$MANA/deployments/recent?namespace=production&limit=5"
+curl -s -H "X-API-Key: $MANA_API_KEY" "$MANA/deployments/recent?namespace=production&limit=5"
 ```
 
 ```json
@@ -362,21 +381,21 @@ The standard `python_*` and `process_*` collector metrics are also exported. See
 
 ## Using the API from GitHub Actions
 
-The shipped workflows send webhooks with `curl`. A minimal reusable step:
+The shipped workflows call `scripts/notify-orchestrator.sh` with everything in `env:`, so no secret or input is spliced into a shell script:
 
 ```yaml
 - name: Notify MANA
   if: always() && env.ORCHESTRATOR_URL != ''
-  run: |
-    curl -sS --fail-with-body --max-time 330 -X POST "$ORCHESTRATOR_URL/webhook/deployment" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n \
-        --arg id  "$DEPLOYMENT_ID" --arg ns "production" --arg app "sample-app" \
-        --arg ver "$VERSION" --arg st "${{ job.status == 'success' && 'success' || 'failed' }}" \
-        --arg run "${{ github.run_id }}" \
-        '{deployment_id:$id, namespace:$ns, app_name:$app, version:$ver, status:$st,
-          failure_type:(if $st=="failed" then "deployment_failure" else null end),
-          metadata:{workflow_run_id:$run}}')"
+  continue-on-error: true
+  env:
+    MANA_WEBHOOK_SECRET: ${{ secrets.MANA_WEBHOOK_SECRET }}
+    MANA_DEPLOYMENT_ID: ${{ steps.identity.outputs.deployment_id }}
+    MANA_NAMESPACE: production
+    MANA_VERSION: ${{ inputs.version }}
+    MANA_STATUS: ${{ steps.status.outputs.status }}
+    MANA_FAILURE_TYPE: ${{ steps.status.outputs.failure_type }}
+    MANA_WORKFLOW_RUN_ID: ${{ github.run_id }}
+  run: scripts/notify-orchestrator.sh
 ```
 
-Using `jq` to build the JSON avoids quoting bugs when values contain special characters. See [CI/CD Integration](../usage/cicd-integration.md) for the full setup.
+The script builds the JSON with `jq`, signs it, validates `status` and `failure_type`, and sets a timeout longer than the rollback health wait. See [CI/CD Integration](../usage/cicd-integration.md) for the full setup.

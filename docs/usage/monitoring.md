@@ -149,7 +149,7 @@ make port-forward-grafana          # http://localhost:3000
 make port-forward-prometheus       # http://localhost:9090
 ```
 
-Default Grafana login is `admin` / `admin123`. **Change it** before exposing Grafana anywhere ([Security](../about/security.md)).
+Grafana's admin password is generated (Terraform stores it in the `prometheus-grafana` secret; Compose reads `GRAFANA_ADMIN_PASSWORD` from `.env`, created by `scripts/create-secrets.sh --compose`). Do not expose Grafana without access control ([Security](../about/security.md)).
 
 !!! warning "Dashboard provisioning"
 Terraform loads the four dashboards in `monitoring/grafana/dashboards` into ConfigMaps (one per file, label `grafana_dashboard=1`), and the alert and recording rules in `monitoring/prometheus` into a single `PrometheusRule` named `mana-rules`, so Compose and Terraform use the same files. These Terraform changes have not been validated (no Terraform binary was available) or applied to a cluster. The dashboards declare hidden datasource variables `DS_PROMETHEUS` and `DS_LOKI`, so they bind to the Prometheus and Loki datasources when provisioned from files, not only when imported. The Compose setup mounts `monitoring/grafana/dashboards` at `/var/lib/grafana/dashboards`, but `dashboards.yml` expects the files under `/etc/grafana/dashboards/{self-healing,deployments,application,infrastructure}`, and the Compose datasource URL points at the in-cluster Prometheus service. If Grafana in Compose shows no dashboards or no data, align those paths and URLs or import the JSON files manually (**Dashboards, New, Import**).

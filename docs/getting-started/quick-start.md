@@ -37,13 +37,19 @@ Everything else in this guide is the same.
 ## 2. Install MANA and the Sample App
 
 ```bash
+# Namespaces carry the Pod Security "restricted" labels; staging and canary exist
+# because the orchestrator's Role is created in all three managed namespaces
+kubectl apply -f kubernetes/security/namespaces.yaml
 kubectl create namespace orchestrator
-kubectl create namespace production
+
+# Random redis-password, webhook-secret and api-key; nothing is printed
+scripts/create-secrets.sh
 
 # MANA needs this secret to start. The value only matters for real GitHub retries.
 kubectl create secret generic github-token \
   --from-literal=token=placeholder -n orchestrator
 
+kubectl apply -f orchestrator/k8s/rbac.yaml
 kubectl apply -f orchestrator/k8s/redis.yaml
 kubectl apply -f orchestrator/k8s/deployment.yaml
 kubectl apply -f sample-app/k8s/ -n production
@@ -61,7 +67,14 @@ kubectl -n orchestrator port-forward svc/orchestrator-service 8000:8000 &
 export MANA=http://localhost:8000
 
 curl -s $MANA/health | jq
+
+# Credentials for the commands below (they stay in this shell)
+export ORCHESTRATOR_URL=$MANA
+export MANA_WEBHOOK_SECRET=$(kubectl -n orchestrator get secret orchestrator-secrets -o jsonpath='{.data.webhook-secret}' | base64 -d)
+export MANA_API_KEY=$(kubectl -n orchestrator get secret orchestrator-secrets -o jsonpath='{.data.api-key}' | base64 -d)
 ```
+
+Webhooks must be signed and operator endpoints need the API key, see [Authentication](../reference/api.md#authentication). `scripts/notify-orchestrator.sh` signs and sends a webhook from environment variables. Kind's default network plugin ignores NetworkPolicy; to see them enforced, run `scripts/test-network-policies.sh` on a Calico cluster.
 
 ```json
 {
@@ -74,7 +87,7 @@ curl -s $MANA/health | jq
 
 (`github_integration` is `true` because the manifest sets both `GITHUB_TOKEN` and `GITHUB_REPO`. The token is a placeholder, so any real re-run request to GitHub will be rejected; that is expected in this demo. See [Orchestrator Configuration](../configuration/orchestrator.md#github-integration).)
 
-Open <http://localhost:8000/docs> for interactive API docs, and check the sample app:
+Open <http://localhost:8000/docs> for the API schema (the endpoints it lists still need the credentials above), and check the sample app:
 
 ```bash
 kubectl -n production get pods -l app=sample-app
@@ -87,13 +100,8 @@ curl -s localhost:8080/health | jq
 MANA rolls back to the **last version that reported success**. In a real pipeline the deploy workflow sends this webhook for you; here you send it by hand:
 
 ```bash
-curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' -d '{
-  "deployment_id": "demo-good",
-  "namespace": "production",
-  "app_name": "sample-app",
-  "version": "1.0.0",
-  "status": "success"
-}' | jq
+MANA_DEPLOYMENT_ID=demo-good MANA_NAMESPACE=production MANA_VERSION=1.0.0 \
+MANA_STATUS=success scripts/notify-orchestrator.sh | jq
 ```
 
 ```json
@@ -133,15 +141,9 @@ kubectl -n orchestrator logs -l app=orchestrator -f --tail=5
 ```bash
 for i in 1 2 3 4; do
   echo "--- failure #$i"
-  curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' -d '{
-    "deployment_id": "demo-bad",
-    "namespace": "production",
-    "app_name": "sample-app",
-    "version": "1.1.0-broken",
-    "status": "failed",
-    "failure_type": "deployment_failure",
-    "metadata": {"workflow_run_id": "1"}
-  }' | jq -c .action_taken
+  MANA_DEPLOYMENT_ID=demo-bad MANA_NAMESPACE=production MANA_VERSION=1.1.0-broken \
+  MANA_STATUS=failed MANA_FAILURE_TYPE=deployment_failure MANA_WORKFLOW_RUN_ID=1 \
+    scripts/notify-orchestrator.sh | jq -c .action_taken
   sleep 3
 done
 ```
@@ -206,7 +208,7 @@ You should see `deployment_received`, `failure_detected`, `retry_initiated`, `ro
 You can also trigger the same rollback yourself at any time:
 
 ```bash
-curl -s -X POST $MANA/rollback -H 'Content-Type: application/json' \
+curl -s -X POST $MANA/rollback -H "X-API-Key: $MANA_API_KEY" -H 'Content-Type: application/json' \
   -d '{"namespace":"production","deployment_name":"sample-app","target_version":"1.0.0"}' | jq
 ```
 

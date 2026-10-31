@@ -10,8 +10,10 @@ For a guided local walkthrough see the [Quick Start](quick-start.md).
 | ------------------------------------------------------------------------------------------------------------ | -------------- | ---------------------------------- |
 | Namespace `orchestrator`                                                                                     |                | `orchestrator/k8s/deployment.yaml` |
 | Deployment `orchestrator` (2 replicas) and Service `orchestrator-service` (8000)                             | `orchestrator` | `orchestrator/k8s/deployment.yaml` |
-| ServiceAccount `orchestrator-sa`, ClusterRole `orchestrator-role`, ClusterRoleBinding `orchestrator-binding` | cluster-wide   | `orchestrator/k8s/deployment.yaml` |
+| ServiceAccount `orchestrator-sa` | `orchestrator` | `orchestrator/k8s/deployment.yaml` |
+| Role and RoleBinding `mana-orchestrator` | `production`, `staging`, `canary` | `orchestrator/k8s/rbac.yaml` |
 | Deployment `redis` (1 replica) and Service `redis-service` (6379)                                            | `orchestrator` | `orchestrator/k8s/redis.yaml`      |
+| Secret `orchestrator-secrets` (`redis-password`, `webhook-secret`, `api-key`)                                | `orchestrator` | `scripts/create-secrets.sh`        |
 | Secret `github-token`                                                                                        | `orchestrator` | **you create it**                  |
 
 ## Prerequisites
@@ -53,7 +55,10 @@ The manifest uses `image: orchestrator:latest` with `imagePullPolicy: IfNotPrese
 ### 2. Create namespaces and the GitHub secret
 
 ```bash
+kubectl apply -f kubernetes/security/namespaces.yaml     # production, staging, canary with Pod Security labels
 kubectl create namespace orchestrator
+
+scripts/create-secrets.sh                                # random redis-password, webhook-secret, api-key
 
 kubectl create secret generic github-token \
   --from-literal=token="$GITHUB_TOKEN" \
@@ -76,6 +81,7 @@ Review the other values in the same `env:` block (see [Configuration](../configu
 ### 4. Apply
 
 ```bash
+kubectl apply -f orchestrator/k8s/rbac.yaml
 kubectl apply -f orchestrator/k8s/redis.yaml
 kubectl apply -f orchestrator/k8s/deployment.yaml
 kubectl rollout status deployment/orchestrator -n orchestrator --timeout=180s
@@ -89,7 +95,6 @@ For a first test deploy the bundled sample app:
 
 ```bash
 docker build -t sample-app:1.0.0 sample-app/       # and load it as in step 1
-kubectl create namespace production
 kubectl apply -f sample-app/k8s/ -n production
 ```
 
@@ -148,7 +153,7 @@ Then:
 
 1. Make sure your applications follow the [conventions](index.md#conventions-for-target-applications).
 2. Set up [CI/CD integration](../usage/cicd-integration.md) so the pipeline sends webhooks.
-3. Restrict who can reach the orchestrator (it has no authentication); see [Security](../about/security.md).
+3. Copy the webhook secret into the `MANA_WEBHOOK_SECRET` repository secret and apply the NetworkPolicies after testing them; see [Security](../about/security.md).
 
 ## Upgrading
 
@@ -167,23 +172,24 @@ Restart the pods after any configuration change; settings are read only at start
 ```bash
 kubectl delete -f orchestrator/k8s/redis.yaml
 kubectl delete -f orchestrator/k8s/deployment.yaml
-kubectl delete clusterrole orchestrator-role --ignore-not-found
+kubectl delete -f orchestrator/k8s/rbac.yaml --ignore-not-found
+kubectl delete clusterrole orchestrator-role --ignore-not-found     # only from versions before namespaced RBAC
 kubectl delete clusterrolebinding orchestrator-binding --ignore-not-found
 ```
 
-Delete `redis.yaml` first: `deployment.yaml` also defines the `orchestrator` namespace, so removing it deletes everything inside, including the `github-token` secret. It also removes the ServiceAccount, ClusterRole and ClusterRoleBinding it defines; the explicit `clusterrole` commands are a safety net. With Terraform, run `terraform destroy` (this removes **all** modules, including your sample apps and monitoring).
+Delete `redis.yaml` first: `deployment.yaml` also defines the `orchestrator` namespace, so removing it deletes everything inside, including the `github-token` secret. It also removes the ServiceAccount it defines; the explicit `clusterrole` commands only matter for installs made before namespaced RBAC. With Terraform, run `terraform destroy` (this removes **all** modules, including your sample apps and monitoring).
 
 ## Troubleshooting Installation
 
 | Symptom                                                                                      | Cause                                     | Fix                                                                                         |
 | -------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `ImagePullBackOff` / `ErrImagePull`                                                          | `orchestrator:latest` is not on the nodes | Load the image (Kind/Minikube) or push to a registry and edit the image name                |
-| `CreateContainerConfigError`                                                                 | Secret `github-token` missing             | `kubectl create secret generic github-token ... -n orchestrator`                            |
+| `CreateContainerConfigError`                                                                 | Secret `github-token` or `orchestrator-secrets` missing | `kubectl create secret generic github-token ... -n orchestrator`; `scripts/create-secrets.sh` |
 | `CrashLoopBackOff`, logs show `Cannot connect to Redis`                                      | Redis not running or wrong `REDIS_HOST`   | `kubectl get pods -n orchestrator -l app=redis`; host must be `redis-service` in-cluster    |
 | `CrashLoopBackOff`, logs show a `ValueError` such as `max_backoff must be > initial_backoff` | Invalid configuration                     | Fix the value (see [validation errors](../configuration/orchestrator.md#validation-errors)) |
 | Pods `Running` but not Ready for about a minute                                              | Probes have a 60 s initial delay          | Wait                                                                                        |
 | `/health` returns `degraded`                                                                 | Redis or the Kubernetes API unreachable   | Check Redis pod, ServiceAccount and NetworkPolicies                                         |
-| `kubectl auth can-i` returns `no`                                                            | ClusterRole or binding not applied        | Re-apply `deployment.yaml`                                                                  |
+| `kubectl auth can-i` returns `no`                                                            | Role or binding not applied in that namespace | `kubectl apply -f orchestrator/k8s/rbac.yaml` (the namespace must exist)                |
 
 Useful commands:
 

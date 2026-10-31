@@ -9,6 +9,12 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 ### Added
 
+- **Authentication (SEC-01).** `POST /webhook/deployment` requires an HMAC-SHA256 signature over `<timestamp>.<body>` (`X-Mana-Timestamp`, `X-Mana-Signature`, 300 s window); the operator endpoints require `X-API-Key`. `WEBHOOK_SECRET` and `API_KEY` take comma-separated lists for rotation. Rejected requests return a generic `401`, are counted as `webhook_errors_total{reason="unauthorized"}` and raise the new `WebhookAuthenticationFailures` alert.
+- `REDIS_PASSWORD`, `REDIS_TLS` and `REDIS_TLS_CA_FILE` (SEC-03).
+- `scripts/create-secrets.sh` creates `orchestrator-secrets` with random values; `scripts/notify-orchestrator.sh` builds, signs and sends webhooks and is used by both workflows (SEC-05, SEC-01).
+- Default-deny NetworkPolicies with explicit allow rules, `scripts/test-network-policies.sh` and the `network-policy-test.yml` workflow (Calico on Kind) (SEC-02, SEC-06). Not run on a cluster.
+- Namespaced RBAC for the orchestrator (`orchestrator/k8s/rbac.yaml`), a `ci-deployer` identity for the deploy workflow, Pod Security `restricted` namespace labels (`kubernetes/security/namespaces.yaml`) (SEC-04, SEC-07, SEC-09).
+- `.github/dependabot.yml`, blocking `pip-audit`, Trivy and Bandit jobs (SEC-09, SEC-10).
 - Orchestrator metrics that dashboards and alerts depend on: `deployment_duration_seconds` (now with a `status` label), `active_deployments` (read from Redis at scrape time), `rollback_decision_duration_seconds`, `health_checks_total`, `webhook_requests_total`, `webhook_errors_total` and `redis_connection_errors_total`, plus the new `mana_recovery_duration_seconds` (first failure to a successful retry or verified rollback). Dashboards gain panels for recovery time, health check results and webhook traffic (OBS-03, OBS-09).
 - Deployments are persisted from the `in_progress` webhook with `started_at`, `first_failure_at` and `finished_at`, which `GET /deployment/{id}` returns (CORE-12).
 - `tests/test_monitoring_contract.py` fails when an alert, recording rule or dashboard panel uses a metric nothing provides, or a dashboard uses a datasource placeholder it does not declare.
@@ -17,6 +23,13 @@ MANA has not yet published tagged releases. The orchestrator API reports version
 
 ### Changed
 
+- **Breaking: the orchestrator refuses to start without `WEBHOOK_SECRET` and `API_KEY`** (at least 32 characters) unless `AUTH_DISABLED=true`. Unsigned webhooks and keyless operator calls get `401`. The workflows need a `MANA_WEBHOOK_SECRET` repository secret equal to the orchestrator's `webhook-secret`.
+- **Breaking: the orchestrator's ClusterRole is gone.** A Role and RoleBinding in `production`, `staging` and `canary` grant `get`/`patch` on Deployments and `list` on ReplicaSets and Pods; `/health` reads the API server version instead of listing namespaces. Create the three namespaces before applying `orchestrator/k8s/rbac.yaml`.
+- **Breaking: Redis requires a password** (`redis-password` in `orchestrator-secrets`); Terraform `redis_password` is removed and every Terraform password is generated. `admin123` is gone from Terraform, Helm values, Compose and the Makefile.
+- `kubernetes/security/network-policies.yaml` now holds NetworkPolicies only (default deny, selectors on `kubernetes.io/metadata.name`); the PodSecurityPolicy, OpenShift SCC, duplicate RBAC and placeholder Secret are removed and quotas moved to `resource-quotas.yaml`.
+- Workloads run with `seccomp` `RuntimeDefault`, a read-only root filesystem with an `emptyDir` at `/tmp`, and no service-account token (sample app, Redis); Redis gains probes. `production`, `staging`, `canary` and `orchestrator` enforce Pod Security `restricted`.
+- All GitHub Actions are pinned by commit SHA (same majors as before); images are pushed with `GITHUB_TOKEN` instead of `GHCR_PAT`; `KUBE_CONFIG` and inputs are passed through `env:`; failed notifications raise a `::warning::` annotation.
+- Dependencies: orchestrator `fastapi` 0.143.2 with `starlette` 1.8.0; sample app `Flask` 3.1.3 and `gunicorn` 23.0.0 (advisories found by `pip-audit` on the resolved trees). The sample app's test tools moved to `sample-app/requirements-dev.txt`.
 - **`deployments_total` now counts final outcomes** (`success`, `failed`, `rolled_back`), once per transition, instead of every webhook. `in_progress` events and retried attempts are no longer counted, so success-rate rules are correct (OBS-02). Queries on `status="in_progress"` stop returning data.
 - `GET /metrics/deployment/{namespace}/{deployment_name}` moves to `GET /deployments/{namespace}/{deployment_name}/status`; the old path is gone. `GET /metrics` is served directly instead of redirecting (OBS-04, OBS-05).
 - Every log line is one JSON object, with audit fields merged in, and `LOG_LEVEL` and `ENABLE_AUDIT_LOGGING` are applied. An invalid `LOG_LEVEL` stops startup (OBS-01, OBS-08).
@@ -45,7 +58,8 @@ These are confirmed by the current code and are tracked in [Data Flow: Known Beh
 
 - Build and test failures reported with `namespace: ci` are counted as `failed` in `deployments_total{namespace="ci"}` and lower the aggregate success rate (CORE-14).
 - A counter's first increment is invisible to `rate()` (the series appears already at 1), so the first deployment of each new namespace and status is missed by rate-based panels.
-- No authentication on the webhook and API endpoints; Grafana ships with a default password.
+- A signed webhook can be replayed for 300 seconds, and two replicas can both act on one event (CORE-06). `/health`, `/metrics` and the OpenAPI routes are unauthenticated by design.
+- The NetworkPolicies, Pod Security admission, the read-only root filesystem under gunicorn, the Trivy gate, the Terraform changes and the first runs of the new workflows have not been exercised on a cluster or on GitHub.
 - Several Makefile targets reference scripts that are not in the repository.
 
 ## Milestone 6: CI/CD pipeline and hardening (February 2026)
@@ -121,7 +135,16 @@ These are confirmed by the current code and are tracked in [Data Flow: Known Beh
 
 ## Upgrade Notes
 
-There is no upgrade path to document yet because no releases have been published. As a general rule:
+No releases have been published, but moving from the previous commit needs these steps in order:
+
+1. Create the namespaces (`kubectl apply -f kubernetes/security/namespaces.yaml`; `orchestrator` is created by its manifest) and run `scripts/create-secrets.sh`.
+2. Apply `orchestrator/k8s/rbac.yaml`, then delete the old `orchestrator-role` ClusterRole and ClusterRoleBinding.
+3. Apply `redis.yaml` and `deployment.yaml`, and restart Redis and the orchestrator together so both use the new password.
+4. Copy the webhook secret into the `MANA_WEBHOOK_SECRET` repository secret.
+5. Apply `kubernetes/security/network-policies.yaml` last, after running `scripts/test-network-policies.sh` on a cluster that enforces policy.
+6. With Terraform, expect the secrets, NetworkPolicies, Roles and the Grafana password to be replaced; the state then holds generated secrets.
+
+As a general rule:
 
 - Redis state expires after 24 hours, so restarting the orchestrator or upgrading it does not require a migration.
 - `last_successful:<namespace>:<app>` keys do not expire; keep them if you want rollbacks to work immediately after an upgrade.

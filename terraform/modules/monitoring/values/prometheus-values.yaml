@@ -47,7 +47,6 @@ prometheus:
 
 grafana:
   enabled: true
-  adminPassword: "admin123"
   
   service:
     type: LoadBalancer

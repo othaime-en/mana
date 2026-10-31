@@ -1,14 +1,66 @@
 # Network policies, resource quotas, and limit ranges for all namespaces.
-# Translates kubernetes/security/network-policies.yaml into Terraform-managed resources.
+# Mirrors kubernetes/security/network-policies.yaml and resource-quotas.yaml.
+# Namespaces are selected with kubernetes.io/metadata.name, which Kubernetes sets on
+# every namespace. Enforcement needs a CNI that implements NetworkPolicy.
+
+variable "ci_runner_namespace" {
+  description = "Namespace whose pods may call the orchestrator (for example Actions Runner Controller runners)"
+  type        = string
+  default     = "ci-runners"
+}
+
+variable "managed_namespaces" {
+  description = "Namespaces whose sample-app pods the orchestrator probes and patches"
+  type        = list(string)
+  default     = ["production", "staging", "canary"]
+}
 
 locals {
   dns_egress_ports = [
     { port = 53, protocol = "TCP" },
     { port = 53, protocol = "UDP" },
   ]
+  apiserver_egress_ports = [443, 6443]
+  sample_app_port        = "5000"
 }
 
 # ── Network Policies ──────────────────────────────────────────────────────────
+
+resource "kubernetes_network_policy" "default_deny_production" {
+  metadata {
+    name      = "default-deny-all"
+    namespace = "production"
+  }
+
+  spec {
+    pod_selector {}
+    policy_types = ["Ingress", "Egress"]
+  }
+}
+
+resource "kubernetes_network_policy" "default_deny_staging" {
+  metadata {
+    name      = "default-deny-all"
+    namespace = "staging"
+  }
+
+  spec {
+    pod_selector {}
+    policy_types = ["Ingress", "Egress"]
+  }
+}
+
+resource "kubernetes_network_policy" "default_deny_orchestrator" {
+  metadata {
+    name      = "default-deny-all"
+    namespace = "orchestrator"
+  }
+
+  spec {
+    pod_selector {}
+    policy_types = ["Ingress", "Egress"]
+  }
+}
 
 resource "kubernetes_network_policy" "sample_app" {
   metadata {
@@ -26,34 +78,37 @@ resource "kubernetes_network_policy" "sample_app" {
     ingress {
       from {
         namespace_selector {
-          match_labels = { name = "ingress-nginx" }
+          match_labels = { "kubernetes.io/metadata.name" = "orchestrator" }
+        }
+        pod_selector {
+          match_labels = { app = "orchestrator" }
         }
       }
-      ports {
-        protocol = "TCP"
-        port     = "5000"
-      }
-    }
-
-    ingress {
       from {
         namespace_selector {
-          match_labels = { name = "monitoring" }
+          match_labels = { "kubernetes.io/metadata.name" = "monitoring" }
+        }
+      }
+      from {
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = "ingress-nginx" }
         }
       }
       ports {
         protocol = "TCP"
-        port     = "5000"
+        port     = local.sample_app_port
       }
     }
 
-    # DNS egress
     dynamic "egress" {
       for_each = local.dns_egress_ports
       content {
         to {
           namespace_selector {
-            match_labels = { name = "kube-system" }
+            match_labels = { "kubernetes.io/metadata.name" = "kube-system" }
+          }
+          pod_selector {
+            match_labels = { "k8s-app" = "kube-dns" }
           }
         }
         ports {
@@ -81,24 +136,25 @@ resource "kubernetes_network_policy" "sample_app_staging" {
     ingress {
       from {
         namespace_selector {
-          match_labels = { name = "ingress-nginx" }
+          match_labels = { "kubernetes.io/metadata.name" = "orchestrator" }
+        }
+        pod_selector {
+          match_labels = { app = "orchestrator" }
         }
       }
-      ports {
-        protocol = "TCP"
-        port     = "5000"
-      }
-    }
-
-    ingress {
       from {
         namespace_selector {
-          match_labels = { name = "monitoring" }
+          match_labels = { "kubernetes.io/metadata.name" = "monitoring" }
+        }
+      }
+      from {
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = "ingress-nginx" }
         }
       }
       ports {
         protocol = "TCP"
-        port     = "5000"
+        port     = local.sample_app_port
       }
     }
 
@@ -107,7 +163,10 @@ resource "kubernetes_network_policy" "sample_app_staging" {
       content {
         to {
           namespace_selector {
-            match_labels = { name = "kube-system" }
+            match_labels = { "kubernetes.io/metadata.name" = "kube-system" }
+          }
+          pod_selector {
+            match_labels = { "k8s-app" = "kube-dns" }
           }
         }
         ports {
@@ -132,14 +191,39 @@ resource "kubernetes_network_policy" "orchestrator" {
 
     policy_types = ["Ingress", "Egress"]
 
-    # Accept webhook calls from anywhere (GitHub Actions, in-cluster callers)
+    # Prometheus scrapes /metrics; the pipeline posts webhooks from its runner namespace
     ingress {
       from {
-        namespace_selector {}
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = "monitoring" }
+        }
+      }
+      from {
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = var.ci_runner_namespace }
+        }
       }
       ports {
         protocol = "TCP"
         port     = "8000"
+      }
+    }
+
+    dynamic "egress" {
+      for_each = local.dns_egress_ports
+      content {
+        to {
+          namespace_selector {
+            match_labels = { "kubernetes.io/metadata.name" = "kube-system" }
+          }
+          pod_selector {
+            match_labels = { "k8s-app" = "kube-dns" }
+          }
+        }
+        ports {
+          protocol = egress.value.protocol
+          port     = tostring(egress.value.port)
+        }
       }
     }
 
@@ -155,31 +239,66 @@ resource "kubernetes_network_policy" "orchestrator" {
       }
     }
 
-    # Kubernetes API server
+    # Health probes against the managed applications
     egress {
       to {
         namespace_selector {
-          match_labels = { name = "kube-system" }
+          match_expressions {
+            key      = "kubernetes.io/metadata.name"
+            operator = "In"
+            values   = var.managed_namespaces
+          }
+        }
+        pod_selector {
+          match_labels = { app = "sample-app" }
         }
       }
       ports {
         protocol = "TCP"
-        port     = "443"
+        port     = local.sample_app_port
       }
     }
 
+    # Kubernetes API server and api.github.com; narrow the CIDR to the API server address when known
     dynamic "egress" {
-      for_each = local.dns_egress_ports
+      for_each = local.apiserver_egress_ports
       content {
         to {
-          namespace_selector {
-            match_labels = { name = "kube-system" }
+          ip_block {
+            cidr = "0.0.0.0/0"
           }
         }
         ports {
-          protocol = egress.value.protocol
-          port     = tostring(egress.value.port)
+          protocol = "TCP"
+          port     = tostring(egress.value)
         }
+      }
+    }
+  }
+}
+
+resource "kubernetes_network_policy" "redis" {
+  metadata {
+    name      = "redis-netpol"
+    namespace = "orchestrator"
+  }
+
+  spec {
+    pod_selector {
+      match_labels = { app = "redis" }
+    }
+
+    policy_types = ["Ingress", "Egress"]
+
+    ingress {
+      from {
+        pod_selector {
+          match_labels = { app = "orchestrator" }
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "6379"
       }
     }
   }

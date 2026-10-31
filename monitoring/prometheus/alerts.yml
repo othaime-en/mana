@@ -146,6 +146,18 @@ groups:
           description: "Webhook failure rate is {{ $value | humanizePercentage }}. Orchestrator may not be receiving deployment events properly."
           runbook_url: "https://docs.example.com/runbooks/webhook-failures"
 
+      # Warning: Webhooks rejected for a missing or invalid signature
+      - alert: WebhookAuthenticationFailures
+        expr: sum by (endpoint) (increase(webhook_errors_total{reason="unauthorized"}[10m])) > 3
+        for: 2m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "Webhooks are being rejected as unauthorized"
+          description: "{{ $value | humanize }} webhook requests to {{ $labels.endpoint }} failed signature checks in 10 minutes. Either the pipeline secret and WEBHOOK_SECRET differ (check the last rotation) or someone is probing the endpoint."
+          runbook_url: "https://docs.example.com/runbooks/webhook-auth-failures"
+
       # Critical: Redis connection failures
       - alert: RedisConnectionFailures
         expr: |

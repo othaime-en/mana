@@ -28,13 +28,6 @@ variable "redis_enabled" {
   default     = true
 }
 
-variable "redis_password" {
-  description = "Redis password (leave empty for no auth)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
 variable "max_retries" {
   description = "Maximum deployment retry attempts"
   type        = number
@@ -63,4 +56,10 @@ variable "resources" {
       memory = "512Mi"
     }
   }
+}
+
+variable "managed_namespaces" {
+  description = "Namespaces whose Deployments the orchestrator may read and patch"
+  type        = list(string)
+  default     = ["production", "staging", "canary"]
 }

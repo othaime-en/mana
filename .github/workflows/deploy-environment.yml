@@ -35,14 +35,16 @@ jobs:
   deploy:
     name: Deploy to ${{ inputs.environment }}
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: read
+
     environment:
       name: ${{ inputs.environment }}
       url: http://sample-app.${{ inputs.environment }}.local
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Derive deployment identity
         id: identity
@@ -52,63 +54,57 @@ jobs:
           echo "deployment_id=deploy-${GITHUB_RUN_ID}-${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
+        uses: azure/setup-kubectl@901a10e89ea615cf61f57ac05cecdf23e7de06d8 # v3.2
         with:
           version: "v1.28.0"
 
       - name: Configure kubectl
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
         run: |
-          if [ -z "${{ secrets.KUBE_CONFIG }}" ]; then
+          if [ -z "$KUBE_CONFIG_B64" ]; then
             echo "Error: KUBE_CONFIG secret not configured"
             exit 1
           fi
-          
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
-          export KUBECONFIG=./kubeconfig
-          kubectl cluster-info
+
+          umask 077
+          printf '%s' "$KUBE_CONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+          KUBECONFIG="$RUNNER_TEMP/kubeconfig" kubectl cluster-info
 
       - name: Notify deployment start
         if: env.ORCHESTRATOR_URL != ''
-        run: |
-          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"deployment_id\": \"${{ steps.identity.outputs.deployment_id }}\",
-              \"namespace\": \"${{ inputs.namespace }}\",
-              \"app_name\": \"sample-app\",
-              \"version\": \"${{ inputs.version }}\",
-              \"status\": \"in_progress\",
-              \"metadata\": {
-                \"commit\": \"${{ github.sha }}\",
-                \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\",
-                \"workflow_run_id\": \"${{ github.run_id }}\",
-                \"run_attempt\": \"${{ github.run_attempt }}\"
-              }
-            }" || echo "⚠️  Failed to notify orchestrator"
+        continue-on-error: true
+        env:
+          MANA_WEBHOOK_SECRET: ${{ secrets.MANA_WEBHOOK_SECRET }}
+          MANA_DEPLOYMENT_ID: ${{ steps.identity.outputs.deployment_id }}
+          MANA_NAMESPACE: ${{ inputs.namespace }}
+          MANA_VERSION: ${{ inputs.version }}
+          MANA_STATUS: in_progress
+          MANA_WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: scripts/notify-orchestrator.sh
 
       - name: Deploy application
         id: deploy
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
         run: |
-          export KUBECONFIG=./kubeconfig
-          
-          kubectl set image deployment/sample-app \
-            sample-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }} \
-            -n ${{ inputs.namespace }}
-          
-          kubectl rollout status deployment/sample-app \
-            -n ${{ inputs.namespace }} \
-            --timeout=10m
+          kubectl set image deployment/sample-app "sample-app=${IMAGE}" -n "$NAMESPACE"
+
+          kubectl rollout status deployment/sample-app -n "$NAMESPACE" --timeout=10m
 
       - name: Health check
         id: health
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          HEALTH_CHECK_TIMEOUT: ${{ inputs.health-check-timeout }}
         run: |
-          export KUBECONFIG=./kubeconfig
-          sleep ${{ inputs.health-check-timeout }}
+          sleep "$HEALTH_CHECK_TIMEOUT"
 
-          READY_PODS=$(kubectl get pods -n ${{ inputs.namespace }} -l app=sample-app -o json | \
+          READY_PODS=$(kubectl get pods -n "$NAMESPACE" -l app=sample-app -o json | \
             jq '[.items[] | select(.status.phase=="Running" and (.status.conditions // [] | any(.type=="Ready" and .status=="True")))] | length')
-          TOTAL_PODS=$(kubectl get deployment sample-app -n ${{ inputs.namespace }} -o jsonpath='{.spec.replicas}')
+          TOTAL_PODS=$(kubectl get deployment sample-app -n "$NAMESPACE" -o jsonpath='{.spec.replicas}')
 
           echo "Ready pods: $READY_PODS / $TOTAL_PODS"
 
@@ -117,37 +113,37 @@ jobs:
             exit 0
           else
             echo "✗ Health check failed"
-            kubectl get pods -n ${{ inputs.namespace }} -l app=sample-app
-            kubectl describe pods -n ${{ inputs.namespace }} -l app=sample-app
+            kubectl get pods -n "$NAMESPACE" -l app=sample-app
+            kubectl describe pods -n "$NAMESPACE" -l app=sample-app
             exit 1
           fi
 
       - name: Run smoke tests
         id: smoke
         if: inputs.smoke-tests
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
         run: |
-          export KUBECONFIG=./kubeconfig
-
-          kubectl port-forward -n ${{ inputs.namespace }} service/sample-app-service 8080:80 &
+          kubectl port-forward -n "$NAMESPACE" service/sample-app-service 8080:80 &
           PF_PID=$!
           sleep 5
 
           TESTS_PASSED=true
-          
+
           echo "Testing /health..."
           curl -f http://localhost:8080/health || TESTS_PASSED=false
-          
+
           echo "Testing /..."
           curl -f http://localhost:8080/ || TESTS_PASSED=false
-          
+
           echo "Testing /api/data..."
           curl -f http://localhost:8080/api/data || TESTS_PASSED=false
-          
+
           echo "Testing /api/config..."
           curl -f http://localhost:8080/api/config || TESTS_PASSED=false
 
           kill $PF_PID || true
-          
+
           if [ "$TESTS_PASSED" = true ]; then
             echo "✓ All smoke tests passed"
           else
@@ -176,27 +172,14 @@ jobs:
           fi
 
       - name: Notify deployment result
-        if: always()
-        run: |
-          if [ -z "${{ env.ORCHESTRATOR_URL }}" ]; then
-            echo "⚠️  Orchestrator URL not configured, skipping notification"
-            exit 0
-          fi
-          
-          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"deployment_id\": \"${{ steps.identity.outputs.deployment_id }}\",
-              \"namespace\": \"${{ inputs.namespace }}\",
-              \"app_name\": \"sample-app\",
-              \"version\": \"${{ inputs.version }}\",
-              \"status\": \"${{ steps.status.outputs.status }}\",
-              \"failure_type\": \"${{ steps.status.outputs.failure_type }}\",
-              \"metadata\": {
-                \"commit\": \"${{ github.sha }}\",
-                \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\",
-                \"workflow_run_id\": \"${{ github.run_id }}\",
-                \"run_attempt\": \"${{ github.run_attempt }}\"
-              }
-            }" || echo "⚠️  Failed to notify orchestrator"
+        if: always() && env.ORCHESTRATOR_URL != ''
+        continue-on-error: true
+        env:
+          MANA_WEBHOOK_SECRET: ${{ secrets.MANA_WEBHOOK_SECRET }}
+          MANA_DEPLOYMENT_ID: ${{ steps.identity.outputs.deployment_id }}
+          MANA_NAMESPACE: ${{ inputs.namespace }}
+          MANA_VERSION: ${{ inputs.version }}
+          MANA_STATUS: ${{ steps.status.outputs.status }}
+          MANA_FAILURE_TYPE: ${{ steps.status.outputs.failure_type }}
+          MANA_WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: scripts/notify-orchestrator.sh

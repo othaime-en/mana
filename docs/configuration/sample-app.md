@@ -132,7 +132,7 @@ Run several in parallel to push CPU toward the HPA target and watch scaling in `
 ```bash
 cd sample-app
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ENVIRONMENT=development FAILURE_RATE=0.2 python -m flask --app src.app run --port 5000
 # or
 docker compose up sample-app      # docker-compose.yml sets FAILURE_RATE=0.1

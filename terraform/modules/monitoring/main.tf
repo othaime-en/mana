@@ -5,6 +5,11 @@ variable "enabled" {
   default     = true
 }
 
+resource "random_password" "grafana_admin" {
+  length  = 32
+  special = false
+}
+
 # Prometheus
 resource "helm_release" "prometheus" {
   count = var.enabled ? 1 : 0
@@ -29,9 +34,9 @@ resource "helm_release" "prometheus" {
     value = "10Gi"
   }
   
-  set {
+  set_sensitive {
     name  = "grafana.adminPassword"
-    value = "admin123"  # Change in production!
+    value = random_password.grafana_admin.result
   }
 }
 

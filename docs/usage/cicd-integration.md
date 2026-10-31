@@ -54,8 +54,10 @@ In **Settings, Secrets and variables, Actions**:
 | Secret             | Value                                                                                                                                                                       |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ORCHESTRATOR_URL` | Base URL, no trailing slash (for example `https://mana.internal.example.com`). If empty, webhook steps are skipped                                                          |
-| `KUBE_CONFIG`      | `base64 -w0 ~/.kube/config` for a context that can patch Deployments in the target namespaces. Use a dedicated, least-privilege ServiceAccount kubeconfig, not an admin one |
-| `GHCR_PAT`         | Personal access token with `write:packages` to push images to `ghcr.io`                                                                                                     |
+| `MANA_WEBHOOK_SECRET` | The orchestrator's `webhook-secret`: `kubectl -n orchestrator get secret orchestrator-secrets -o jsonpath='{.data.webhook-secret}' \| base64 -d \| gh secret set MANA_WEBHOOK_SECRET`. Every webhook is signed with it |
+| `KUBE_CONFIG`      | `base64 -w0` of a kubeconfig for the `ci-deployer` ServiceAccount (`kubernetes/security/ci-deployer-rbac.yaml`), which can only patch Deployments and read pods in `production` and `staging`. Not an admin kubeconfig |
+
+Images are pushed with the workflow's `GITHUB_TOKEN` (`packages: write`), so no registry token is needed. If the first push is refused, give this repository write access to the package under the package's settings.
 
 ### 3. Give the orchestrator permission to re-run workflows
 
@@ -86,7 +88,7 @@ The deploy job runs `kubectl set image deployment/sample-app sample-app=ghcr.io/
 
 ```bash
 kubectl logs -n orchestrator -l app=orchestrator -f | grep -E "webhook|AUDIT"
-curl -s "$MANA/deployments/recent?namespace=staging" | jq
+curl -s -H "X-API-Key: $MANA_API_KEY" "$MANA/deployments/recent?namespace=staging" | jq
 ```
 
 After a successful run the Redis key `last_successful:staging:sample-app` holds the deployed version.
@@ -139,9 +141,9 @@ These small edits bring the workflows in line with the orchestrator's behaviour.
 
 ## Sending Webhooks Safely
 
-- Build the JSON with `jq -n --arg …` rather than string interpolation; values with quotes or newlines break hand-built JSON.
-- Use `curl --fail-with-body --max-time <seconds>`. Rollback is synchronous and can take up to five minutes, so set the timeout above that or treat a timeout as non-fatal.
-- Make the notification step non-blocking for the pipeline (`|| echo "notify failed"`, as the shipped steps do), but do not ignore repeated failures; alert on missing webhooks.
+- Call `scripts/notify-orchestrator.sh` with every value in `env:`. It builds the JSON with `jq -n --arg`, signs `<timestamp>.<body>` with HMAC-SHA256 and sends `X-Mana-Timestamp` and `X-Mana-Signature`. Never write `${{ secrets.* }}` or `${{ inputs.* }}` inside a `run:` block; `test_workflow_contract.py` fails if a workflow does.
+- The script's timeout (360 s) exceeds the five-minute rollback wait, because the orchestrator answers a rollback synchronously.
+- The shipped steps use `continue-on-error: true` and the script emits a `::warning::` annotation when delivery fails; do not ignore repeated warnings, and watch the `WebhookAuthenticationFailures` alert (a `401` means the secret differs).
 - Run the notify step with `if: always()` so failures are reported even when earlier steps fail.
 
 ## Using Another CI System
@@ -154,11 +156,12 @@ Only the webhook half is CI-agnostic. Any system that can send the JSON above ca
 | ----------------------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | Webhook steps print "Orchestrator URL not configured" | `ORCHESTRATOR_URL` secret empty                                                        | Repository secrets                                                                                                                      |
 | `curl: (6)`, `(7)` or timeouts                        | Runner cannot reach the orchestrator                                                   | Use a self-hosted runner or tunnel; test with `curl $ORCHESTRATOR_URL/health` from the runner                                           |
+| `::warning::Mana webhook not delivered` with `401`    | `MANA_WEBHOOK_SECRET` differs from the orchestrator's `webhook-secret`, or the runner clock is off by more than 300 s | Compare the secrets; rotate with `<new>,<old>` in `WEBHOOK_SECRET`                          |
 | HTTP 422                                              | Payload missing a required field or malformed JSON                                     | Build with `jq`; compare with the contract above                                                                                        |
 | HTTP 422 mentioning `failure_type`                    | Unknown `failure_type`, or `status: failed` without one                                | Use one of the six values in the contract above                                                                                         |
 | `action: alert` with "missing workflow_run_id"        | The failure webhook has no `metadata.workflow_run_id`                                  | Send it on failure webhooks; build-stage failures currently omit it and always alert (see [Recommended changes](#recommended-workflow-changes)) |
 | Retries scheduled but no new run starts               | Token lacks Actions write permission, wrong `GITHUB_REPO`, or the run was still active | Orchestrator logs: `permission denied`, `Failed to trigger re-run`                                                                      |
-| Retries never end in a rollback                       | New `deployment_id` per attempt                                                        | Use `deploy-${GITHUB_RUN_ID}`                                                                                                           |
+| Retries never end in a rollback                       | New `deployment_id` per attempt                                                        | Use `deploy-${GITHUB_RUN_ID}-<namespace>`                                                                                                         |
 | `action: alert` with "No previous version"            | No successful deploy recorded and no versioned ReplicaSets                             | Run one successful deployment first, or ensure pods carry a `version` label                                                             |
 | `kubectl set image` fails                             | Deployment or container is not named `sample-app`, or wrong namespace                  | `kubectl get deploy -n <ns> -o wide`                                                                                                    |
 | `Error: KUBE_CONFIG secret not configured`            | Secret missing                                                                         | Add a base64-encoded kubeconfig                                                                                                         |

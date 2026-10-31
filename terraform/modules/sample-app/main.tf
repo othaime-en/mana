@@ -47,6 +47,14 @@ resource "kubernetes_deployment" "sample_app" {
       }
 
       spec {
+        automount_service_account_token = false
+
+        security_context {
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
         container {
           name              = local.app_name
           image             = local.image
@@ -121,6 +129,18 @@ resource "kubernetes_deployment" "sample_app" {
             capabilities {
               drop = ["ALL"]
             }
+          }
+
+          volume_mount {
+            name       = "tmp"
+            mount_path = "/tmp"
+          }
+        }
+
+        volume {
+          name = "tmp"
+          empty_dir {
+            size_limit = "64Mi"
           }
         }
       }

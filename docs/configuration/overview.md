@@ -186,7 +186,7 @@ MAX_RETRIES=0 python -c "from src.config import OrchestratorConfig as C; C.from_
 
 ### Settings you may see mentioned elsewhere
 
-Earlier drafts of the documentation described options such as leader election, webhook authentication and secrets, Redis password/TLS, state TTL and cleanup intervals, jitter, namespace or label selectors for monitoring, and GitHub tuning variables. **None of these exist in the code today**, and setting them has no effect. In particular, MANA does not watch namespaces by label: it acts on the deployments named in webhook payloads. The complete list of supported variables is in [Environment Variables](environment-variables.md).
+Earlier drafts of the documentation described options such as leader election, state TTL and cleanup intervals, jitter, namespace or label selectors for monitoring, and GitHub tuning variables. **None of these exist in the code today** (webhook and API authentication and the Redis password and TLS options do, and are documented in [Environment Variables](environment-variables.md)), and setting them has no effect. In particular, MANA does not watch namespaces by label: it acts on the deployments named in webhook payloads. The complete list of supported variables is in [Environment Variables](environment-variables.md).
 
 ## Next Steps
 

@@ -231,7 +231,7 @@ kubectl -n orchestrator exec deploy/redis -- redis-cli ttl 'deployment:<deployme
 5. **Alert on `manual_intervention_required`** in your log pipeline; it means automation gave up.
 6. **Rehearse failures regularly** in staging with the [failure recipes](../configuration/sample-app.md#failure-recipes).
 7. **Review the audit trail** periodically for recurring failure patterns.
-8. **Restrict access** to the API; it has no authentication ([Security](../about/security.md)).
+8. **Protect the credentials**: webhooks are signed with `WEBHOOK_SECRET` and operator calls need `X-API-Key`; rotate them as described in [Security](../about/security.md).
 
 ## Troubleshooting Usage Issues
 

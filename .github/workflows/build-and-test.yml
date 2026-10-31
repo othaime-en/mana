@@ -33,10 +33,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -51,13 +51,16 @@ jobs:
   build:
     name: Build and Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       image_tag: ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Derive version from commit
         id: version
@@ -68,7 +71,7 @@ jobs:
 
       # Python testing and linting
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -76,14 +79,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
         working-directory: ./sample-app
         run: |
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
           pip install flake8==7.4.1 black==26.10.1
 
       - name: Run linting
@@ -106,18 +109,18 @@ jobs:
 
       # Docker build and test
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -127,7 +130,7 @@ jobs:
       # Build sample-app
       - name: Build sample-app image
         id: build-app
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: ./sample-app
           push: false
@@ -163,7 +166,7 @@ jobs:
 
       # Build orchestrator
       - name: Build orchestrator image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: ./orchestrator
           push: ${{ inputs.push-images }}
@@ -179,7 +182,7 @@ jobs:
       # Push sample-app (if enabled)
       - name: Push sample-app image
         if: inputs.push-images
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: ./sample-app
           push: true
@@ -193,25 +196,18 @@ jobs:
       # Notify on failures
       - name: Notify orchestrator on failure
         if: failure() && env.ORCHESTRATOR_URL != ''
+        continue-on-error: true
+        env:
+          MANA_WEBHOOK_SECRET: ${{ secrets.MANA_WEBHOOK_SECRET }}
+          MANA_DEPLOYMENT_ID: ci-${{ github.run_id }}
+          MANA_NAMESPACE: ci
+          MANA_VERSION: ${{ steps.version.outputs.version }}
+          MANA_STATUS: failed
+          BUILD_OUTCOME: ${{ steps.build-app.outcome }}
         run: |
-          FAILURE_TYPE="build_failure"
-          if [ "${{ steps.build-app.outcome }}" != "failure" ]; then
-            FAILURE_TYPE="test_failure"
+          MANA_FAILURE_TYPE="build_failure"
+          if [ "$BUILD_OUTCOME" != "failure" ]; then
+            MANA_FAILURE_TYPE="test_failure"
           fi
-          
-          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhook/deployment" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"deployment_id\": \"ci-${{ github.run_id }}\",
-              \"namespace\": \"ci\",
-              \"app_name\": \"sample-app\",
-              \"version\": \"${{ steps.version.outputs.version }}\",
-              \"status\": \"failed\",
-              \"failure_type\": \"$FAILURE_TYPE\",
-              \"metadata\": {
-                \"commit\": \"${{ github.sha }}\",
-                \"author\": \"${{ github.actor }}\",
-                \"branch\": \"${{ github.ref_name }}\",
-                \"run_attempt\": \"${{ github.run_attempt }}\"
-              }
-            }" || echo "Failed to notify orchestrator"
+          export MANA_FAILURE_TYPE
+          scripts/notify-orchestrator.sh

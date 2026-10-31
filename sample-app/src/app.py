@@ -357,4 +357,5 @@ if __name__ == "__main__":
         },
     )
 
-    app.run(host="0.0.0.0", port=config.port, debug=config.debug)
+    # The container must listen on all interfaces
+    app.run(host="0.0.0.0", port=config.port, debug=config.debug)  # nosec B104

@@ -241,7 +241,7 @@ kubectl set image deployment/sample-app sample-app=ghcr.io/<owner>/mana/sample-a
 
 ```bash
 make port-forward-prometheus   # then open http://localhost:9090/targets
-make port-forward-grafana      # http://localhost:3000 (admin / admin123 by default)
+make port-forward-grafana      # http://localhost:3000 (admin; password from the prometheus-grafana secret)
 curl -s http://localhost:9090/api/v1/query --data-urlencode 'query=sum(rate(deployments_total[5m])) by (status)' | jq
 ```
 

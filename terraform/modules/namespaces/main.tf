@@ -1,3 +1,10 @@
+locals {
+  restricted = {
+    "pod-security.kubernetes.io/enforce" = "restricted"
+    "pod-security.kubernetes.io/warn"    = "restricted"
+  }
+}
+
 variable "labels" {
   description = "Common labels to apply to all namespaces"
   type        = map(string)
@@ -7,28 +14,28 @@ variable "labels" {
 resource "kubernetes_namespace" "production" {
   metadata {
     name   = "production"
-    labels = merge(var.labels, { name = "production", environment = "production" })
+    labels = merge(var.labels, local.restricted, { name = "production", environment = "production" })
   }
 }
 
 resource "kubernetes_namespace" "staging" {
   metadata {
     name   = "staging"
-    labels = merge(var.labels, { name = "staging", environment = "staging" })
+    labels = merge(var.labels, local.restricted, { name = "staging", environment = "staging" })
   }
 }
 
 resource "kubernetes_namespace" "canary" {
   metadata {
     name   = "canary"
-    labels = merge(var.labels, { name = "canary", environment = "canary" })
+    labels = merge(var.labels, local.restricted, { name = "canary", environment = "canary" })
   }
 }
 
 resource "kubernetes_namespace" "orchestrator" {
   metadata {
     name   = "orchestrator"
-    labels = merge(var.labels, { name = "orchestrator", environment = "production" })
+    labels = merge(var.labels, local.restricted, { name = "orchestrator", environment = "production" })
   }
 }
 

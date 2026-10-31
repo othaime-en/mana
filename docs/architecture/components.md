@@ -133,7 +133,7 @@ All workflows live in `.github/workflows/`. See [CI/CD Integration](../usage/cic
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `namespaces`   | `production`, `staging`, `canary`, `orchestrator`, `monitoring` (each labelled `name=<namespace>`)                           |
 | `sample-app`   | Deployment, Service, Ingress, HPA and related resources for the sample app                                                   |
-| `orchestrator` | ServiceAccount, ClusterRole/Binding, ConfigMap, Secret, Redis Deployment and Service, orchestrator Deployment                |
+| `orchestrator` | ServiceAccount, a Role and RoleBinding per managed namespace, ConfigMap, generated Secret, Redis Deployment and Service, orchestrator Deployment                |
 | `security`     | NetworkPolicies, ResourceQuotas and LimitRanges                                                                              |
 | `monitoring`   | `kube-prometheus-stack` and `loki-stack` Helm releases, ServiceMonitors, one `PrometheusRule` built from `monitoring/prometheus/*.yml` and one dashboard ConfigMap per file in `monitoring/grafana/dashboards` |
 

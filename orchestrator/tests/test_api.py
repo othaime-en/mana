@@ -366,3 +366,25 @@ async def test_old_deployment_metrics_path_is_gone(api):
         response = await client.get("/metrics/deployment/production/sample-app")
 
     assert response.status_code == 404
+
+
+
+def test_health_checks_kubernetes_through_the_version_endpoint(api):
+    version, core = Mock(), Mock()
+    with patch.object(api.orchestrator, "k8s_version", version), \
+         patch.object(api.orchestrator, "k8s_core", core), \
+         patch.object(api.orchestrator, "redis_client", Mock()):
+        body = api.health()
+    assert body["kubernetes"] == "healthy"
+    version.get_code.assert_called_once()
+    core.list_namespace.assert_not_called()
+
+
+def test_health_reports_degraded_when_the_api_server_is_unreachable(api):
+    version = Mock()
+    version.get_code.side_effect = RuntimeError("connection refused")
+    with patch.object(api.orchestrator, "k8s_version", version), \
+         patch.object(api.orchestrator, "redis_client", Mock()):
+        body = api.health()
+    assert body["status"] == "degraded"
+    assert body["kubernetes"] == "unhealthy"

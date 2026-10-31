@@ -13,15 +13,34 @@ spec:
       labels:
         app: redis
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: redis
         image: redis:8-alpine
         ports:
         - containerPort: 6379
-        args:
-        - redis-server
-        - --appendonly
-        - "yes"
+        command:
+        - sh
+        - -c
+        - exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: orchestrator-secrets
+              key: redis-password
+        - name: REDISCLI_AUTH
+          valueFrom:
+            secretKeyRef:
+              name: orchestrator-secrets
+              key: redis-password
         resources:
           requests:
             memory: "64Mi"
@@ -29,6 +48,24 @@ spec:
           limits:
             memory: "128Mi"
             cpu: "100m"
+        livenessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         volumeMounts:
         - name: redis-data
           mountPath: /data

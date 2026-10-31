@@ -130,7 +130,7 @@ port-forward-orchestrator: ## Port forward to orchestrator
 
 port-forward-grafana: ## Port forward to Grafana
 	@echo "$(COLOR_GREEN)Forwarding port 3000 -> Grafana...$(COLOR_RESET)"
-	@echo "Username: admin, Password: admin123"
+	@echo "Username: admin; password: kubectl -n monitoring get secret prometheus-grafana -o jsonpath='{.data.admin-password}' | base64 -d"
 	@kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
 
 port-forward-prometheus: ## Port forward to Prometheus

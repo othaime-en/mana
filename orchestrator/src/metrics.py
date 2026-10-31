@@ -116,6 +116,7 @@ def record_webhook(endpoint: str, status_code: int) -> None:
     if status_code >= 400:
         reason = (
             'validation' if status_code == 422
+            else 'unauthorized' if status_code in (401, 403)
             else 'server_error' if status_code >= 500
             else 'client_error'
         )

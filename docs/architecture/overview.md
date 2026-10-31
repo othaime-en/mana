@@ -66,7 +66,7 @@ The orchestrator can modify Deployments, so its permissions and exposure matter.
 
 **Implemented**
 
-- **RBAC**: a ClusterRole limited to `get/list/watch/update/patch` on Deployments and ReplicaSets, `get/list/watch` on Pods, and `create/patch` on Events. It cannot read Secrets.
+- **RBAC**: a Role and RoleBinding in each managed namespace (`production`, `staging`, `canary`): `get`/`patch` on Deployments, `list` on ReplicaSets and Pods. There are no cluster-wide permissions and it cannot read Secrets.
 - **Container hardening**: non-root user (UID 1000), `allowPrivilegeEscalation: false`, all Linux capabilities dropped, CPU and memory limits.
 - **Secrets**: the GitHub token comes from a Kubernetes Secret, never from an image or ConfigMap.
 - **Network exposure**: Services are `ClusterIP`; nothing is exposed outside the cluster by default.
@@ -75,7 +75,7 @@ The orchestrator can modify Deployments, so its permissions and exposure matter.
 
 **Not implemented (be aware)**
 
-- The API and webhook endpoint have **no authentication**; restrict access at the network layer.
+- Webhooks are HMAC-signed and operator endpoints need an API key; `/health`, `/metrics` and the OpenAPI routes are open, so restrict ingress with the NetworkPolicy. A signed webhook can be replayed for 300 s until idempotency keys exist (CORE-06).
 - Redis has no password or TLS support in the client.
 - The RBAC role is cluster-wide.
 

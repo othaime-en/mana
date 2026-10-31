@@ -17,41 +17,46 @@ resource "kubernetes_service_account" "orchestrator" {
   }
 }
 
-# ClusterRole for Orchestrator
-resource "kubernetes_cluster_role" "orchestrator" {
+# Namespaced access: only the managed namespaces, only the verbs the code uses
+resource "kubernetes_role" "orchestrator" {
+  for_each = toset(var.managed_namespaces)
+
   metadata {
-    name = "${local.app_name}-role"
+    name      = "mana-orchestrator"
+    namespace = each.value
   }
 
   rule {
     api_groups = ["apps"]
-    resources  = ["deployments", "replicasets"]
-    verbs      = ["get", "list", "watch", "update", "patch"]
+    resources  = ["deployments"]
+    verbs      = ["get", "patch"]
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources  = ["replicasets"]
+    verbs      = ["list"]
   }
 
   rule {
     api_groups = [""]
-    resources  = ["pods", "services"]
-    verbs      = ["get", "list", "watch"]
-  }
-
-  rule {
-    api_groups = [""]
-    resources  = ["events"]
-    verbs      = ["create", "patch"]
+    resources  = ["pods"]
+    verbs      = ["list"]
   }
 }
 
-# ClusterRoleBinding
-resource "kubernetes_cluster_role_binding" "orchestrator" {
+resource "kubernetes_role_binding" "orchestrator" {
+  for_each = toset(var.managed_namespaces)
+
   metadata {
-    name = "${local.app_name}-binding"
+    name      = "mana-orchestrator"
+    namespace = each.value
   }
 
   role_ref {
     api_group = "rbac.authorization.k8s.io"
-    kind      = "ClusterRole"
-    name      = kubernetes_cluster_role.orchestrator.metadata[0].name
+    kind      = "Role"
+    name      = kubernetes_role.orchestrator[each.value].metadata[0].name
   }
 
   subject {
@@ -76,7 +81,22 @@ resource "kubernetes_config_map" "orchestrator" {
   }
 }
 
-# Secret for sensitive data
+resource "random_password" "redis" {
+  length  = 48
+  special = false
+}
+
+resource "random_password" "webhook" {
+  length  = 48
+  special = false
+}
+
+resource "random_password" "api_key" {
+  length  = 48
+  special = false
+}
+
+# Secret for sensitive data (the provider base64-encodes data itself)
 resource "kubernetes_secret" "orchestrator" {
   metadata {
     name      = "${local.app_name}-secrets"
@@ -84,9 +104,9 @@ resource "kubernetes_secret" "orchestrator" {
   }
 
   data = {
-    redis-password = base64encode(var.redis_password)
-    webhook-token  = base64encode("change-me-in-production")
-    api-key        = base64encode("change-me-in-production")
+    redis-password = random_password.redis.result
+    webhook-secret = random_password.webhook.result
+    api-key        = random_password.api_key.result
   }
 
   type = "Opaque"
@@ -121,6 +141,18 @@ resource "kubernetes_deployment" "redis" {
       }
 
       spec {
+        automount_service_account_token = false
+
+        security_context {
+          run_as_non_root = true
+          run_as_user     = 999
+          run_as_group    = 999
+          fs_group        = 999
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
         container {
           name  = "redis"
           image = "redis:8-alpine"
@@ -130,8 +162,27 @@ resource "kubernetes_deployment" "redis" {
             name           = "redis"
           }
 
-          command = ["redis-server"]
-          args    = var.redis_password != "" ? ["--requirepass", var.redis_password] : []
+          command = ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$REDIS_PASSWORD\""]
+
+          env {
+            name = "REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+
+          env {
+            name = "REDISCLI_AUTH"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
 
           resources {
             requests = {
@@ -163,6 +214,14 @@ resource "kubernetes_deployment" "redis" {
           volume_mount {
             name       = "redis-data"
             mount_path = "/data"
+          }
+
+          security_context {
+            allow_privilege_escalation = false
+            read_only_root_filesystem  = true
+            capabilities {
+              drop = ["ALL"]
+            }
           }
         }
 
@@ -241,6 +300,12 @@ resource "kubernetes_deployment" "orchestrator" {
       spec {
         service_account_name = kubernetes_service_account.orchestrator.metadata[0].name
 
+        security_context {
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
+
         container {
           name              = local.app_name
           image             = local.image
@@ -273,6 +338,36 @@ resource "kubernetes_deployment" "orchestrator" {
               config_map_key_ref {
                 name = kubernetes_config_map.orchestrator.metadata[0].name
                 key  = "REDIS_PORT"
+              }
+            }
+          }
+
+          env {
+            name = "REDIS_PASSWORD"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "redis-password"
+              }
+            }
+          }
+
+          env {
+            name = "WEBHOOK_SECRET"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "webhook-secret"
+              }
+            }
+          }
+
+          env {
+            name = "API_KEY"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.orchestrator.metadata[0].name
+                key  = "api-key"
               }
             }
           }
@@ -339,13 +434,25 @@ resource "kubernetes_deployment" "orchestrator" {
               drop = ["ALL"]
             }
           }
+
+          volume_mount {
+            name       = "tmp"
+            mount_path = "/tmp"
+          }
+        }
+
+        volume {
+          name = "tmp"
+          empty_dir {
+            size_limit = "64Mi"
+          }
         }
       }
     }
   }
 
   depends_on = [
-    kubernetes_cluster_role_binding.orchestrator
+    kubernetes_role_binding.orchestrator
   ]
 }
 

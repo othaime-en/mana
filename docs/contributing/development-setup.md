@@ -29,7 +29,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 ```
 
-One virtual environment serves both components. `requirements-dev.txt` at the repository root includes `orchestrator/requirements-dev.txt` (runtime packages plus `pytest`, `pytest-cov`, `pytest-asyncio` and `httpx`) and `sample-app/requirements.txt`. The two files must pin shared packages to the same version, and `orchestrator/tests/test_requirements_alignment.py` fails if they drift apart. When you bump a shared package such as `pytest`, change it in both files. CI and the Docker images still install each component's own file, so each runs with exactly its own dependencies.
+One virtual environment serves both components. `requirements-dev.txt` at the repository root includes `orchestrator/requirements-dev.txt` (runtime packages plus `pytest`, `pytest-cov`, `pytest-asyncio` and `httpx`) and `sample-app/requirements-dev.txt` (the sample app's runtime packages plus `pytest` and `pytest-cov`). The two files must pin shared packages to the same version, and `orchestrator/tests/test_requirements_alignment.py` fails if they drift apart. When you bump a shared package such as `pytest`, change it in both files. CI and the Docker images still install each component's own file, so each runs with exactly its own dependencies.
 
 Optional linters used by `make lint`: `pip install flake8 black isort pylint`.
 
@@ -100,12 +100,13 @@ curl localhost:5000/health
 ## 4. Docker Compose Stack
 
 ```bash
+scripts/create-secrets.sh --compose   # once: writes .env with random MANA_* and Grafana values
 make dev-start        # docker compose up -d
 make dev-logs
 make dev-stop
 ```
 
-This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, `admin` / `admin123`), Loki and Alloy.
+This starts Redis, the sample app, the orchestrator, Prometheus, Grafana (<http://localhost:3000>, user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`), Loki and Alloy.
 
 !!! warning "Known Compose issues to be aware of" - The orchestrator service mounts `~/.kube/config` to `/root/.kube/config`, but the image runs as the non-root user `orchestrator`, which cannot read `/root`. Mount the file to `/home/orchestrator/.kube/config` instead. - A kubeconfig for Kind or Minikube points at `127.0.0.1`, which inside the container is the container itself. Use a kubeconfig whose server address is reachable from Docker (for Kind: `kind get kubeconfig --internal` with the Kind network attached). - The orchestrator service's healthcheck uses `curl`, which the orchestrator image does not install, so Compose reports it unhealthy. Use `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"` or add `curl` to the image. - Prometheus in Compose expects an Alertmanager at `alertmanager:9093`, which Compose does not define; alert delivery will not work locally.
 

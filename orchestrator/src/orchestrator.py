@@ -65,6 +65,9 @@ TERMINAL_STATUSES = frozenset({
 
 STATE_TTL_SECONDS = 86400
 ACTIVE_INDEX_KEY = "mana:active"
+RECENT_INDEX_KEY = "mana:recent"
+RECENT_INDEX_LIMIT = 1000
+RECENT_PAGE_SIZE = 50
 
 
 class ContainerNotFoundError(Exception):
@@ -403,6 +406,7 @@ class SelfHealingOrchestrator:
             raise
         
         self._update_active_index(state)
+        self._update_recent_index(state)
         self._record_outcome(state, previous)
     
     @staticmethod
@@ -446,6 +450,25 @@ class SelfHealingOrchestrator:
                 self.redis_client.zrem(ACTIVE_INDEX_KEY, member)
         except redis.RedisError as e:
             logger.warning(f"Could not update the active deployment index: {e}")
+    
+    def _update_recent_index(self, state: DeploymentState) -> None:
+        """
+        Keep the newest deployments in a sorted set so history needs no key scan
+
+        The set is capped and trimmed by age, so it stays small whatever the
+        keyspace does. Entries whose state has expired are dropped when read.
+        """
+        member = f"{state.namespace}|{state.deployment_id}"
+        try:
+            self.redis_client.zadd(RECENT_INDEX_KEY, {member: state.timestamp})
+            self.redis_client.zremrangebyscore(
+                RECENT_INDEX_KEY, "-inf", time.time() - STATE_TTL_SECONDS
+            )
+            self.redis_client.zremrangebyrank(
+                RECENT_INDEX_KEY, 0, -(RECENT_INDEX_LIMIT + 1)
+            )
+        except redis.RedisError as e:
+            logger.warning(f"Could not update the recent deployment index: {e}")
     
     def active_deployment_counts(self) -> Dict[str, int]:
         """
@@ -551,6 +574,19 @@ class SelfHealingOrchestrator:
         )
         return StateTransition(state, previous_status)
     
+    @staticmethod
+    def _decode_state(raw: str) -> DeploymentState:
+        """Rebuild a DeploymentState from its stored JSON, ignoring unknown fields"""
+        known_fields = {f.name for f in fields(DeploymentState)}
+        state_dict = {
+            key: value for key, value in json.loads(raw).items()
+            if key in known_fields
+        }
+        state_dict['status'] = DeploymentStatus(state_dict['status'])
+        if state_dict.get('failure_type'):
+            state_dict['failure_type'] = FailureType(state_dict['failure_type'])
+        return DeploymentState(**state_dict)
+    
     def get_deployment_state(self, deployment_id: str) -> Optional[DeploymentState]:
         """
         Retrieve deployment state from Redis with proper Enum deserialization        
@@ -560,16 +596,7 @@ class SelfHealingOrchestrator:
         try:
             data = self.redis_client.get(key)
             if data:
-                known_fields = {f.name for f in fields(DeploymentState)}
-                state_dict = {
-                    key: value for key, value in json.loads(data).items()
-                    if key in known_fields
-                }
-                
-                # Convert string values back to Enums
-                state_dict['status'] = DeploymentStatus(state_dict['status'])
-                if state_dict.get('failure_type'):
-                    state_dict['failure_type'] = FailureType(state_dict['failure_type'])
+                state = self._decode_state(data)
                 
                 audit_logger.log_event(
                     action=AuditAction.STATE_RETRIEVED,
@@ -577,7 +604,7 @@ class SelfHealingOrchestrator:
                     success=True
                 )
                 
-                return DeploymentState(**state_dict)
+                return state
             
             return None
             
@@ -1391,59 +1418,37 @@ class SelfHealingOrchestrator:
         limit: int = 10
     ) -> List[DeploymentState]:
         """
-        Get recent deployment states for monitoring
-        
-        NEW: Enables deployment history queries
+        Get the newest deployment states, optionally for one namespace
+
+        Reads the recent-deployments index instead of scanning every key, and
+        loads states a page at a time until the limit is reached.
         """
-        try:
-            keys = self.redis_client.keys("deployment:*")
-            states = []
-            
-            for key in keys:
+        members = self.redis_client.zrevrange(RECENT_INDEX_KEY, 0, -1)
+        wanted = [
+            member for member in members
+            if namespace is None or member.partition('|')[0] == namespace
+        ]
+        
+        states: List[DeploymentState] = []
+        expired: List[str] = []
+        for start in range(0, len(wanted), RECENT_PAGE_SIZE):
+            page = wanted[start:start + RECENT_PAGE_SIZE]
+            raw_states = self.redis_client.mget(
+                [f"deployment:{member.partition('|')[2]}" for member in page]
+            )
+            for member, raw in zip(page, raw_states):
+                if raw is None:
+                    expired.append(member)
+                    continue
                 try:
-                    deployment_id = key.split(':')[1]
-                    state = self.get_deployment_state(deployment_id)
-                    if state:
-                        # Filter by namespace if specified
-                        if namespace is None or state.namespace == namespace:
-                            states.append(state)
-                except Exception as e:
-                    logger.warning(f"Error retrieving state {key}: {e}")
-            
-            # Sort by timestamp, most recent first
-            states.sort(key=lambda x: x.timestamp, reverse=True)
-            
-            return states[:limit]
-            
-        except Exception as e:
-            logger.error(f"Error getting recent deployments: {e}")
-            return []
-    
-    def cleanup_old_states(self, days_to_keep: int = 7):
-        """
-        Remove deployment states older than specified days
+                    states.append(self._decode_state(raw))
+                except (ValueError, KeyError, TypeError) as e:
+                    logger.warning(f"Skipping unreadable state {member}: {e}")
+            if len(states) >= limit:
+                break
         
-        NEW: Prevents Redis memory leak
-        """
-        cutoff_time = time.time() - (days_to_keep * 86400)
+        if expired:
+            self.redis_client.zrem(RECENT_INDEX_KEY, *expired)
         
-        try:
-            # Get all deployment keys
-            keys = self.redis_client.keys("deployment:*")
-            
-            cleaned_count = 0
-            for key in keys:
-                try:
-                    data = self.redis_client.get(key)
-                    if data:
-                        state_dict = json.loads(data)
-                        if state_dict.get('timestamp', 0) < cutoff_time:
-                            self.redis_client.delete(key)
-                            cleaned_count += 1
-                except Exception as e:
-                    logger.warning(f"Error cleaning state {key}: {e}")
-            
-            logger.info(f"🧹 Cleaned up {cleaned_count} old deployment states")
-            
-        except Exception as e:
-            logger.error(f"Error during state cleanup: {e}")
+        states.sort(key=lambda state: state.timestamp, reverse=True)
+        return states[:limit]

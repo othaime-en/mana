@@ -19,6 +19,9 @@ class FakeRedis:
     def setex(self, key, _ttl, value):
         self.data[key] = value
 
+    def mget(self, keys):
+        return [self.data.get(key) for key in keys]
+
     def zadd(self, key, mapping):
         self.sorted_sets.setdefault(key, {}).update(mapping)
 
@@ -30,6 +33,24 @@ class FakeRedis:
         entries = self.sorted_sets.get(key, {})
         ordered = sorted(entries, key=entries.get)
         return ordered[start:] if end == -1 else ordered[start:end + 1]
+
+    def zrevrange(self, key, start, end):
+        entries = self.sorted_sets.get(key, {})
+        ordered = sorted(entries, key=entries.get, reverse=True)
+        return ordered[start:] if end == -1 else ordered[start:end + 1]
+
+    def zremrangebyrank(self, key, start, end):
+        entries = self.sorted_sets.get(key, {})
+        ordered = sorted(entries, key=entries.get)
+        size = len(ordered)
+        first = start if start >= 0 else max(size + start, 0)
+        last = end if end >= 0 else size + end
+        if last < 0:
+            return 0
+        doomed = ordered[first:last + 1]
+        for member in doomed:
+            del entries[member]
+        return len(doomed)
 
     def zremrangebyscore(self, key, low, high):
         entries = self.sorted_sets.get(key, {})

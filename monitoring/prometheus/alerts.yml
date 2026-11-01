@@ -194,6 +194,17 @@ groups:
           description: "{{ $value | humanize }} {{ $labels.kind }} job(s) failed every attempt in the last 15 minutes. The affected deployment is marked failed and needs manual intervention."
           runbook_url: "https://docs.example.com/runbooks/jobs-dead-lettered"
 
+      # Warning: Alerts are not reaching their channel
+      - alert: AlertDeliveryFailing
+        expr: sum by (channel) (increase(mana_alerts_sent_total{outcome="failed"}[15m])) > 2
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "Mana cannot deliver alerts to {{ $labels.channel }}"
+          description: "{{ $value | humanize }} deliveries to {{ $labels.channel }} failed in 15 minutes. People are not being told when automatic recovery needs them. Check SLACK_WEBHOOK_URL or the token's commit-status permission."
+          runbook_url: "https://docs.example.com/runbooks/alert-delivery-failing"
+
       # Warning: GitHub rejects workflow re-runs
       - alert: GitHubRerunFailing
         expr: |

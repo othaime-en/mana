@@ -364,3 +364,27 @@ def test_collector_stays_silent_when_redis_is_down():
         raise redis.ConnectionError("down")
 
     assert list(metrics.SchedulerCollector(down).collect()) == []
+
+
+def test_the_queue_and_locks_work_through_the_counting_wrapper(real_redis):
+    from src.locks import AppLocks
+
+    wrapped = metrics.CountingRedis(real_redis)
+    queue = JobQueue(wrapped)
+    queue.enqueue("k", {"a": 1}, job_id="j1")
+
+    assert queue.claim(30).payload == {"a": 1}
+    assert queue.stats().inflight == 1
+    with AppLocks(wrapped, ttl=5).acquire("production", "sample-app"):
+        assert AppLocks(wrapped, ttl=5).acquire("production", "sample-app") is None
+
+
+def test_script_connection_errors_are_counted():
+    unreachable = redis.Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.2)
+    queue = JobQueue(metrics.CountingRedis(unreachable))
+    before = metrics.redis_connection_errors_total._value.get()
+
+    with pytest.raises(redis.ConnectionError):
+        queue.stats()
+
+    assert metrics.redis_connection_errors_total._value.get() == before + 1

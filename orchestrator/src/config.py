@@ -53,6 +53,9 @@ class OrchestratorConfig:
     job_max_attempts: int = 5
     shutdown_grace_seconds: float = 30.0
     
+    slack_webhook_url: Optional[str] = field(default=None, repr=False)
+    alert_github_status: bool = True
+    
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
         """Load configuration from environment variables"""
@@ -99,7 +102,11 @@ class OrchestratorConfig:
             scheduler_poll_seconds=float(os.getenv('SCHEDULER_POLL_SECONDS', '1')),
             scheduler_concurrency=int(os.getenv('SCHEDULER_CONCURRENCY', '4')),
             job_max_attempts=int(os.getenv('JOB_MAX_ATTEMPTS', '5')),
-            shutdown_grace_seconds=float(os.getenv('SHUTDOWN_GRACE_SECONDS', '30'))
+            shutdown_grace_seconds=float(os.getenv('SHUTDOWN_GRACE_SECONDS', '30')),
+            
+            # Alert delivery
+            slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL') or None,
+            alert_github_status=os.getenv('ALERT_GITHUB_STATUS', 'true').lower() != 'false'
         )
     
     def redis_client_kwargs(self) -> Dict[str, Any]:
@@ -154,6 +161,9 @@ class OrchestratorConfig:
         
         if self.shutdown_grace_seconds < 0:
             raise ValueError("shutdown_grace_seconds must be >= 0")
+        
+        if self.slack_webhook_url and not self.slack_webhook_url.startswith('https://'):
+            raise ValueError("SLACK_WEBHOOK_URL must be an https:// URL")
         
         if self.redis_tls_ca_file and not self.redis_tls:
             raise ValueError("redis_tls_ca_file requires REDIS_TLS=true")

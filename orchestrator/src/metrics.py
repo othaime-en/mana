@@ -82,6 +82,11 @@ webhook_duplicates_total = Counter(
     'Webhook deliveries dropped as copies of one already seen',
     ['outcome']
 )
+alerts_sent_total = Counter(
+    'mana_alerts_sent_total',
+    'Alert deliveries by channel and outcome (sent, skipped, failed)',
+    ['channel', 'outcome']
+)
 github_api_requests_total = Counter(
     'mana_github_api_requests_total',
     'GitHub API requests by endpoint and HTTP status (error when none came back)',
@@ -151,19 +156,24 @@ class CountingRedis:
     def __init__(self, client):
         self._client = client
 
-    def __getattr__(self, name):
-        attribute = getattr(self._client, name)
-        if not callable(attribute):
-            return attribute
-
+    @staticmethod
+    def _counted(function):
         def call(*args, **kwargs):
             try:
-                return attribute(*args, **kwargs)
+                return function(*args, **kwargs)
             except (redis.ConnectionError, redis.TimeoutError):
                 redis_connection_errors_total.inc()
                 raise
 
         return call
+
+    def __getattr__(self, name):
+        attribute = getattr(self._client, name)
+        if not callable(attribute):
+            return attribute
+        if name == "register_script":
+            return lambda *args, **kwargs: self._counted(attribute(*args, **kwargs))
+        return self._counted(attribute)
 
 
 class ActiveDeploymentsCollector(Collector):

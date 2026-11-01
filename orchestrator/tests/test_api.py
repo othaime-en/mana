@@ -454,7 +454,7 @@ def test_the_scheduler_is_built_from_the_orchestrator_and_settings(api):
     scheduler = api.build_scheduler()
 
     assert scheduler.queue is api.orchestrator.jobs
-    assert set(scheduler.handlers) == {"retry_rerun", "rollback"}
+    assert set(scheduler.handlers) == {"retry_rerun", "rollback", "notify"}
     assert scheduler.lease_seconds == api._config.job_lease_seconds
     assert scheduler.on_dead == api.orchestrator.handle_dead_job
 

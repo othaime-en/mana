@@ -17,6 +17,7 @@ from kubernetes.client.rest import ApiException
 
 from src import metrics
 from src.utils import get_audit_logger, AuditAction, split_image_reference, with_tag
+from src.alerts import Alert, Alerter, GitHubStatusChannel, SlackChannel, JOB_NOTIFY
 from src.config import get_config
 from src.jobs import Job, JobDeferred, JobQueue, PermanentJobError
 from src.locks import AppLocks
@@ -194,6 +195,8 @@ class SelfHealingOrchestrator:
             self.health_check_path = cfg.health_check_path
             self.max_app_health_failures = 3  # Allow 3 consecutive app health failures
             self.lock_ttl = cfg.job_lease_seconds
+            slack_webhook_url = cfg.slack_webhook_url
+            alert_github_status = cfg.alert_github_status
             
         else:
             # Fallback for testing or manual initialization
@@ -211,6 +214,8 @@ class SelfHealingOrchestrator:
             self.health_check_path = '/health'
             self.max_app_health_failures = 3
             self.lock_ttl = 60.0
+            slack_webhook_url = None
+            alert_github_status = False
         
         self.jobs = JobQueue(self.redis_client)
         self.locks = AppLocks(self.redis_client, ttl=self.lock_ttl)
@@ -230,6 +235,14 @@ class SelfHealingOrchestrator:
                 "GITHUB_REPO not set - retry functionality will be limited. "
                 "Set GITHUB_REPO environment variable (format: 'owner/repo')."
             )
+        
+        channels = []
+        if slack_webhook_url:
+            channels.append(SlackChannel(slack_webhook_url))
+        if alert_github_status and self.github_token and self.github_repo:
+            channels.append(GitHubStatusChannel(self.github_token, self.github_repo))
+        self.alerter = Alerter(self.jobs, channels)
+        logger.info(f"Alert channels: {self.alerter.channel_names or 'none'}")
         
         # Load Kubernetes config
         try:
@@ -1094,6 +1107,7 @@ class SelfHealingOrchestrator:
         return {
             JOB_RETRY_RERUN: self._run_retry_job,
             JOB_ROLLBACK: self._run_rollback_job,
+            JOB_NOTIFY: self._run_notify_job,
         }
     
     def _job_is_current(self, job: Job, state: Optional[DeploymentState]) -> bool:
@@ -1118,6 +1132,45 @@ class SelfHealingOrchestrator:
         """Read the job's deployment, letting Redis errors propagate so the job retries"""
         raw = self.redis_client.get(f"deployment:{job.payload.get('deployment_id')}")
         return self._decode_state(raw) if raw is not None else None
+    
+    def _notify(
+        self,
+        state: DeploymentState,
+        event: str,
+        severity: str,
+        title: str,
+        message: str
+    ) -> None:
+        """Queue an alert for every configured channel; never raises"""
+        self.alerter.dispatch(
+            Alert(
+                event=event,
+                severity=severity,
+                title=title,
+                message=message,
+                deployment_id=state.deployment_id,
+                namespace=state.namespace,
+                app_name=state.app_name,
+                version=state.version,
+                previous_version=state.previous_version,
+                commit=state.metadata.get('commit'),
+                failure_type=state.failure_type.value if state.failure_type else None
+            ),
+            retry_count=state.retry_count
+        )
+    
+    def _run_notify_job(self, job: Job) -> None:
+        payload = job.payload["alert"]
+        outcome = self.alerter.deliver(job.payload["channel"], payload)
+        if outcome == "sent":
+            audit_logger.log_alert_sent(
+                deployment_id=payload["deployment_id"],
+                namespace=payload["namespace"],
+                deployment_name=payload["app_name"],
+                version=payload["version"],
+                channel=job.payload["channel"],
+                event=payload["event"]
+            )
     
     def _run_retry_job(self, job: Job) -> None:
         if not self._job_is_current(job, self._load_state_for_job(job)):
@@ -1171,6 +1224,14 @@ class SelfHealingOrchestrator:
                     namespace=namespace,
                     reason=state.failure_type.value if state.failure_type else "unknown"
                 ).inc()
+                self._notify(
+                    state, "rolled_back", "warning",
+                    f"{deployment_name} {payload['version']} was rolled back to "
+                    f"{target_version} in {namespace}",
+                    f"Version {payload['version']} kept failing "
+                    f"({state.failure_type.value if state.failure_type else 'unknown'}). "
+                    f"{deployment_name} is running {target_version} again."
+                )
             else:
                 state.status = DeploymentStatus.FAILED
                 self.save_deployment_state(state)
@@ -1181,15 +1242,33 @@ class SelfHealingOrchestrator:
                     version=payload["version"],
                     reason="Rollback failed after exceeding retry threshold"
                 )
+                self._notify(
+                    state, "rollback_failed", "critical",
+                    f"Rollback of {deployment_name} to {target_version} failed in {namespace}",
+                    f"Version {payload['version']} failed and the rollback to "
+                    f"{target_version} did not become healthy. Manual intervention is required."
+                )
     
     def handle_dead_job(self, job: Job, error: Exception) -> None:
         """A job ran out of attempts: fail the deployment it was working for"""
+        if job.kind == JOB_NOTIFY:
+            logger.error(
+                f"Alert to {job.payload.get('channel')} abandoned after "
+                f"{job.attempts} attempts: {error}"
+            )
+            return
         state = self._load_state_for_job(job)
         if state is None:
             return
         if self._job_is_current(job, state):
             state.status = DeploymentStatus.FAILED
             self.save_deployment_state(state)
+            self._notify(
+                state, "job_abandoned", "critical",
+                f"Recovery of {state.app_name} {state.version} in {state.namespace} gave up",
+                f"The {job.kind} job failed {job.attempts} times: {error}. "
+                f"Manual intervention is required."
+            )
         audit_logger.log_manual_intervention_required(
             deployment_id=state.deployment_id,
             namespace=state.namespace,
@@ -1284,6 +1363,11 @@ class SelfHealingOrchestrator:
                     deployment_name=deployment_name,
                     version=version,
                     reason="Cannot retry - missing workflow_run_id in metadata"
+                )
+                await asyncio.to_thread(
+                    self._notify, state, "manual_intervention", "critical",
+                    f"{deployment_name} {version} failed in {namespace}: manual intervention needed",
+                    "The failure webhook carried no workflow_run_id, so the workflow cannot be re-run."
                 )
                 
                 return {
@@ -1391,6 +1475,11 @@ class SelfHealingOrchestrator:
                 version=version,
                 reason="No previous version available for rollback"
             )
+            await asyncio.to_thread(
+                self._notify, state, "manual_intervention", "critical",
+                f"{deployment_name} {version} failed in {namespace}: manual intervention needed",
+                "No previous version is known, so there is nothing to roll back to."
+            )
             
             return {
                 'action': 'alert',
@@ -1412,6 +1501,11 @@ class SelfHealingOrchestrator:
             deployment_name=state.app_name,
             version=version,
             reason=reason
+        )
+        self._notify(
+            state, "manual_intervention", "critical",
+            f"{state.app_name} {version} failed in {state.namespace}: manual intervention needed",
+            reason
         )
         
         return {

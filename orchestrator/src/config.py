@@ -47,6 +47,12 @@ class OrchestratorConfig:
     api_keys: Tuple[str, ...] = field(default=(), repr=False)
     auth_disabled: bool = False
     
+    job_lease_seconds: float = 60.0
+    scheduler_poll_seconds: float = 1.0
+    scheduler_concurrency: int = 4
+    job_max_attempts: int = 5
+    shutdown_grace_seconds: float = 30.0
+    
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
         """Load configuration from environment variables"""
@@ -86,7 +92,14 @@ class OrchestratorConfig:
             # Authentication
             webhook_secrets=split_secrets(os.getenv('WEBHOOK_SECRET', '')),
             api_keys=split_secrets(os.getenv('API_KEY', '')),
-            auth_disabled=os.getenv('AUTH_DISABLED', 'false').lower() == 'true'
+            auth_disabled=os.getenv('AUTH_DISABLED', 'false').lower() == 'true',
+            
+            # Job scheduler
+            job_lease_seconds=float(os.getenv('JOB_LEASE_SECONDS', '60')),
+            scheduler_poll_seconds=float(os.getenv('SCHEDULER_POLL_SECONDS', '1')),
+            scheduler_concurrency=int(os.getenv('SCHEDULER_CONCURRENCY', '4')),
+            job_max_attempts=int(os.getenv('JOB_MAX_ATTEMPTS', '5')),
+            shutdown_grace_seconds=float(os.getenv('SHUTDOWN_GRACE_SECONDS', '30'))
         )
     
     def redis_client_kwargs(self) -> Dict[str, Any]:
@@ -126,6 +139,21 @@ class OrchestratorConfig:
         
         if self.health_check_port < 1 or self.health_check_port > 65535:
             raise ValueError("health_check_port must be between 1-65535")
+        
+        if self.job_lease_seconds < 3:
+            raise ValueError("job_lease_seconds must be >= 3")
+        
+        if self.scheduler_poll_seconds <= 0:
+            raise ValueError("scheduler_poll_seconds must be > 0")
+        
+        if self.scheduler_concurrency < 1:
+            raise ValueError("scheduler_concurrency must be >= 1")
+        
+        if self.job_max_attempts < 1:
+            raise ValueError("job_max_attempts must be >= 1")
+        
+        if self.shutdown_grace_seconds < 0:
+            raise ValueError("shutdown_grace_seconds must be >= 0")
         
         if self.redis_tls_ca_file and not self.redis_tls:
             raise ValueError("redis_tls_ca_file requires REDIS_TLS=true")

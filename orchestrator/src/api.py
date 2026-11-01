@@ -35,6 +35,7 @@ app = FastAPI(
 # Initialize orchestrator with configuration from config.py
 orchestrator = SelfHealingOrchestrator(use_config=True)
 REGISTRY.register(metrics.ActiveDeploymentsCollector(orchestrator.active_deployment_counts))
+REGISTRY.register(metrics.SchedulerCollector(lambda: orchestrator.jobs.stats()))
 
 
 @app.middleware("http")

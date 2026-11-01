@@ -171,6 +171,46 @@ groups:
           description: "Orchestrator is experiencing Redis connection failures. State persistence is affected."
           runbook_url: "https://docs.example.com/runbooks/redis-connection-failures"
 
+      # Critical: Nobody is working the job queue
+      - alert: SchedulerStalled
+        expr: max(mana_scheduler_overdue_seconds) > 120
+        for: 2m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "Retries and rollbacks are waiting for a worker"
+          description: "The oldest due job has been waiting {{ $value | humanizeDuration }}. No orchestrator replica is claiming jobs, so scheduled retries and rollbacks are not running."
+          runbook_url: "https://docs.example.com/runbooks/scheduler-stalled"
+
+      # Critical: A job ran out of attempts
+      - alert: JobsDeadLettered
+        expr: sum by (kind) (increase(mana_scheduler_jobs_total{outcome="dead"}[15m])) > 0
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "A {{ $labels.kind }} job was abandoned"
+          description: "{{ $value | humanize }} {{ $labels.kind }} job(s) failed every attempt in the last 15 minutes. The affected deployment is marked failed and needs manual intervention."
+          runbook_url: "https://docs.example.com/runbooks/jobs-dead-lettered"
+
+      # Warning: GitHub rejects workflow re-runs
+      - alert: GitHubRerunFailing
+        expr: |
+          (
+            sum(rate(mana_github_api_requests_total{endpoint="rerun",code!~"2.."}[10m]))
+            /
+            sum(rate(mana_github_api_requests_total{endpoint="rerun"}[10m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "GitHub is rejecting workflow re-runs"
+          description: "{{ $value | humanizePercentage }} of re-run requests fail. Check the token's Actions write permission, and that the run has finished."
+          runbook_url: "https://docs.example.com/runbooks/github-rerun-failing"
+
       # Warning: High health check failure rate
       - alert: HighHealthCheckFailureRate
         expr: |

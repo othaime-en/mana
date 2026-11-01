@@ -18,6 +18,7 @@ from kubernetes.client.rest import ApiException
 from src import metrics
 from src.utils import get_audit_logger, AuditAction, split_image_reference, with_tag
 from src.config import get_config
+from src.jobs import JobQueue
 
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,8 @@ class SelfHealingOrchestrator:
             self.health_check_port = 5000
             self.health_check_path = '/health'
             self.max_app_health_failures = 3
+        
+        self.jobs = JobQueue(self.redis_client)
         
         # GitHub integration for retry mechanism
         import os

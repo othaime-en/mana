@@ -52,7 +52,7 @@ GRAFANA_INTERVAL_VARIABLES = re.compile(r"\$\{?__(rate_interval|interval|range)\
 
 def emitted_metric_names() -> Set[str]:
     """Sample names the orchestrator exposes, derived from src.metrics"""
-    names = {"active_deployments"}
+    names = set(metrics.COLLECTED_METRIC_NAMES)
     for value in vars(metrics).values():
         if not isinstance(value, MetricWrapperBase):
             continue

@@ -235,3 +235,38 @@ class TestRedisSecurityConfig:
              patch('src.orchestrator.client.CoreV1Api'):
             SelfHealingOrchestrator(use_config=True)
         assert redis_cls.call_args.kwargs['password'] == 's3cret'
+
+
+class TestSchedulerSettings:
+    def test_defaults(self):
+        config = OrchestratorConfig.from_env()
+
+        assert (config.job_lease_seconds, config.scheduler_poll_seconds) == (60.0, 1.0)
+        assert (config.scheduler_concurrency, config.job_max_attempts) == (4, 5)
+        assert config.shutdown_grace_seconds == 30.0
+
+    def test_environment_overrides(self, monkeypatch):
+        monkeypatch.setenv('JOB_LEASE_SECONDS', '90')
+        monkeypatch.setenv('SCHEDULER_POLL_SECONDS', '0.5')
+        monkeypatch.setenv('SCHEDULER_CONCURRENCY', '2')
+        monkeypatch.setenv('JOB_MAX_ATTEMPTS', '7')
+        monkeypatch.setenv('SHUTDOWN_GRACE_SECONDS', '10')
+
+        config = OrchestratorConfig.from_env()
+
+        assert (config.job_lease_seconds, config.scheduler_poll_seconds) == (90.0, 0.5)
+        assert (config.scheduler_concurrency, config.job_max_attempts) == (2, 7)
+        assert config.shutdown_grace_seconds == 10.0
+
+    @pytest.mark.parametrize('variable,value', [
+        ('JOB_LEASE_SECONDS', '2'),
+        ('SCHEDULER_POLL_SECONDS', '0'),
+        ('SCHEDULER_CONCURRENCY', '0'),
+        ('JOB_MAX_ATTEMPTS', '0'),
+        ('SHUTDOWN_GRACE_SECONDS', '-1'),
+    ])
+    def test_invalid_values_are_rejected(self, monkeypatch, variable, value):
+        monkeypatch.setenv(variable, value)
+
+        with pytest.raises(ValueError):
+            OrchestratorConfig.from_env().validate()

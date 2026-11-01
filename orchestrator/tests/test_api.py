@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from unittest.mock import Mock, patch
 
@@ -407,7 +408,7 @@ def test_health_checks_kubernetes_through_the_version_endpoint(api):
     with patch.object(api.orchestrator, "k8s_version", version), \
          patch.object(api.orchestrator, "k8s_core", core), \
          patch.object(api.orchestrator, "redis_client", Mock()):
-        body = api.health()
+        body = json.loads(api.health().body)
     assert body["kubernetes"] == "healthy"
     version.get_code.assert_called_once()
     core.list_namespace.assert_not_called()
@@ -418,7 +419,9 @@ def test_health_reports_degraded_when_the_api_server_is_unreachable(api):
     version.get_code.side_effect = RuntimeError("connection refused")
     with patch.object(api.orchestrator, "k8s_version", version), \
          patch.object(api.orchestrator, "redis_client", Mock()):
-        body = api.health()
+        response = api.health()
+        body = json.loads(response.body)
+    assert response.status_code == 503
     assert body["status"] == "degraded"
     assert body["kubernetes"] == "unhealthy"
 
@@ -489,3 +492,80 @@ async def test_manual_rollback_releases_the_lock(api, outcome, status):
 
     assert response.status_code == status
     assert locks.held == set()
+
+
+async def get(api, path):
+    transport = httpx.ASGITransport(app=api.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.get(path)
+
+
+@pytest.mark.asyncio
+async def test_livez_answers_without_touching_any_dependency(api):
+    with patch.object(api.orchestrator, "redis_client", Mock(**{"ping.side_effect": redis.ConnectionError("down")})), \
+         patch.object(api.orchestrator, "k8s_version", Mock(**{"get_code.side_effect": RuntimeError("down")})):
+        response = await get(api, "/livez")
+
+    assert (response.status_code, response.json()) == (200, {"status": "alive"})
+
+
+@pytest.mark.asyncio
+async def test_readyz_is_ready_when_redis_answers(api):
+    with patch.object(api.orchestrator, "redis_client", Mock()):
+        response = await get(api, "/readyz")
+
+    assert (response.status_code, response.json()) == (200, {"status": "ready"})
+
+
+@pytest.mark.asyncio
+async def test_readyz_fails_when_redis_is_down_but_ignores_kubernetes(api):
+    with patch.object(api.orchestrator, "redis_client", Mock(**{"ping.side_effect": redis.ConnectionError("down")})):
+        down = await get(api, "/readyz")
+    with patch.object(api.orchestrator, "redis_client", Mock()), \
+         patch.object(api.orchestrator, "k8s_version", Mock(**{"get_code.side_effect": RuntimeError("down")})):
+        k8s_down = await get(api, "/readyz")
+
+    assert (down.status_code, down.json()["redis"]) == (503, "unhealthy")
+    assert k8s_down.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_readyz_fails_while_draining(api):
+    api.app.state.draining = True
+    try:
+        with patch.object(api.orchestrator, "redis_client", Mock()):
+            response = await get(api, "/readyz")
+    finally:
+        api.app.state.draining = False
+
+    assert (response.status_code, response.json()) == (503, {"status": "draining"})
+
+
+@pytest.mark.asyncio
+async def test_the_lifespan_marks_the_replica_unready_before_draining(api):
+    scheduler = StubScheduler()
+    seen = []
+
+    async def stop(grace_seconds):
+        seen.append(api.app.state.draining)
+        scheduler.release.set()
+
+    scheduler.stop = stop
+    with patch.object(api, "build_scheduler", return_value=scheduler):
+        async with api.lifespan(api.app):
+            assert api.app.state.draining is False
+
+    assert seen == [True]
+
+
+@pytest.mark.asyncio
+async def test_health_reports_503_when_degraded_and_200_when_healthy(api):
+    with patch.object(api.orchestrator, "redis_client", Mock()), \
+         patch.object(api.orchestrator, "k8s_version", Mock()):
+        healthy = await get(api, "/health")
+    with patch.object(api.orchestrator, "redis_client", Mock(**{"ping.side_effect": redis.ConnectionError("down")})), \
+         patch.object(api.orchestrator, "k8s_version", Mock()):
+        degraded = await get(api, "/health")
+
+    assert (healthy.status_code, healthy.json()["status"]) == (200, "healthy")
+    assert (degraded.status_code, degraded.json()["status"], degraded.json()["redis"]) == (503, "degraded", "unhealthy")

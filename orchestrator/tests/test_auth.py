@@ -236,7 +236,7 @@ async def test_operator_endpoints_require_the_api_key(client, secured, method, p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/", "/health", "/metrics"])
+@pytest.mark.parametrize("path", ["/", "/health", "/livez", "/readyz", "/metrics"])
 async def test_probe_and_scrape_endpoints_stay_open(client, secured, path):
     assert (await client.get(path)).status_code == 200
 
@@ -247,7 +247,7 @@ async def test_disabled_auth_lets_requests_through(client, monkeypatch):
     assert (await client.get("/config")).status_code == 200
 
 
-PUBLIC_PATHS = {"/", "/health", "/metrics", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+PUBLIC_PATHS = {"/", "/health", "/livez", "/readyz", "/metrics", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 
 
 def test_every_route_is_either_public_by_decision_or_protected(api):

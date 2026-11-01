@@ -43,3 +43,10 @@ def real_redis():
     yield client
     client.flushdb()
     client.close()
+
+
+@pytest.fixture(autouse=True)
+def replica_is_not_draining(request):
+    """Lifespan tests flip the draining flag; start every test with it cleared"""
+    if "api" in request.fixturenames:
+        request.getfixturevalue("api").app.state.draining = False

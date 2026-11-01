@@ -54,9 +54,11 @@ async def lifespan(_app: FastAPI):
     """Run the scheduler for the life of the process; drain it on shutdown"""
     scheduler = build_scheduler()
     worker = asyncio.create_task(scheduler.run(), name="scheduler")
+    _app.state.draining = False
     try:
         yield
     finally:
+        _app.state.draining = True
         await scheduler.stop(_config.shutdown_grace_seconds)
         await worker
 
@@ -158,9 +160,39 @@ def root():
     }
 
 
+@app.get("/livez")
+async def livez():
+    """
+    Liveness probe: the process is up and its event loop is responding
+
+    Depends on nothing else, so a Redis or Kubernetes outage never makes the
+    kubelet restart a healthy process.
+    """
+    return {"status": "alive"}
+
+
+@app.get("/readyz")
+def readyz():
+    """
+    Readiness probe: this replica can do its work
+
+    Needs Redis, which holds all state and the job queue. Fails while the
+    replica drains on shutdown so traffic moves to the others first.
+    """
+    if getattr(app.state, "draining", False):
+        return JSONResponse(status_code=503, content={"status": "draining"})
+    try:
+        orchestrator.redis_client.ping()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"status": "not_ready", "redis": "unhealthy"}
+        )
+    return {"status": "ready"}
+
+
 @app.get("/health")
 def health():
-    """Health check endpoint"""
+    """Dependency report; answers 503 when Redis or Kubernetes is unreachable"""
     try:
         # Check Redis connectivity
         orchestrator.redis_client.ping()
@@ -177,14 +209,17 @@ def health():
     
     overall_healthy = redis_healthy and k8s_healthy
     
-    return {
-        "status": "healthy" if overall_healthy else "degraded",
-        "redis": "healthy" if redis_healthy else "unhealthy",
-        "kubernetes": "healthy" if k8s_healthy else "unhealthy",
-        "github_integration": bool(
-            orchestrator.github_token and orchestrator.github_repo
-        )
-    }
+    return JSONResponse(
+        status_code=200 if overall_healthy else 503,
+        content={
+            "status": "healthy" if overall_healthy else "degraded",
+            "redis": "healthy" if redis_healthy else "unhealthy",
+            "kubernetes": "healthy" if k8s_healthy else "unhealthy",
+            "github_integration": bool(
+                orchestrator.github_token and orchestrator.github_repo
+            )
+        }
+    )
 
 
 @app.post("/webhook/deployment", dependencies=[Depends(require_signed_webhook)])

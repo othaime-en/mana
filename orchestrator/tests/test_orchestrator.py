@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, Mock, patch, MagicMock, call
+from unittest.mock import Mock, patch, MagicMock, call
 from kubernetes.client.rest import ApiException
 from src.orchestrator import (
     SelfHealingOrchestrator,
@@ -10,6 +10,8 @@ from src.orchestrator import (
     find_container
 )
 import time
+
+from tests.fakes import FakeJobQueue, FakeLocks
 
 
 @pytest.fixture
@@ -26,6 +28,8 @@ def orchestrator():
         orch.redis_client = mock_redis.return_value
         orch.k8s_apps = mock_apps.return_value
         orch.k8s_core = mock_core.return_value
+        orch.jobs = FakeJobQueue()
+        orch.locks = FakeLocks()
         
         yield orch
 
@@ -228,8 +232,7 @@ class TestEnhancedFailureHandling:
         orchestrator.redis_client.get.return_value = None
         orchestrator.redis_client.setex = Mock()
         
-        with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'), \
-             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()) as rerun:
+        with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'):
             result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
@@ -244,7 +247,16 @@ class TestEnhancedFailureHandling:
             assert 'backoff_seconds' in result
             assert result['backoff_seconds'] == 10.0  # First retry backoff
             assert result['workflow_run_id'] == '12345'
-            rerun.assert_called_once_with('12345', 10.0)
+            assert orchestrator.jobs.jobs == [{
+                'kind': 'retry_rerun',
+                'payload': {
+                    'deployment_id': 'test-123',
+                    'workflow_run_id': '12345',
+                    'retry_count': 1
+                },
+                'delay': 10.0,
+                'job_id': 'retry_rerun:test-123:1'
+            }]
     
     @pytest.mark.asyncio
     async def test_handle_deployment_failure_increasing_backoff(self, orchestrator):
@@ -264,8 +276,7 @@ class TestEnhancedFailureHandling:
         )
         
         with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
-             patch.object(orchestrator, 'save_deployment_state'), \
-             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()) as rerun:
+             patch.object(orchestrator, 'save_deployment_state'):
             
             result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
@@ -279,7 +290,8 @@ class TestEnhancedFailureHandling:
             assert result['action'] == 'retry'
             assert result['retry_count'] == 2
             assert result['backoff_seconds'] == 20.0  # Second retry backoff
-            rerun.assert_called_once_with('12345', 20.0)
+            job = orchestrator.jobs.jobs[0]
+            assert (job['delay'], job['job_id']) == (20.0, 'retry_rerun:test-123:2')
     
     @pytest.mark.asyncio
     async def test_handle_deployment_failure_alerts_without_workflow_run_id(self, orchestrator):
@@ -287,8 +299,7 @@ class TestEnhancedFailureHandling:
         orchestrator.redis_client.get.return_value = None
         orchestrator.redis_client.setex = Mock()
         
-        with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'), \
-             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()) as rerun:
+        with patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'):
             result = await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
@@ -299,7 +310,7 @@ class TestEnhancedFailureHandling:
             )
             
             assert result['action'] == 'alert'
-            rerun.assert_not_called()
+            assert orchestrator.jobs.jobs == []
     
     @pytest.mark.asyncio
     async def test_handle_deployment_failure_persists_webhook_metadata(self, orchestrator):
@@ -318,8 +329,7 @@ class TestEnhancedFailureHandling:
         )
         
         with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
-             patch.object(orchestrator, 'save_deployment_state') as save, \
-             patch.object(orchestrator, 'trigger_github_workflow_rerun', new=AsyncMock()):
+             patch.object(orchestrator, 'save_deployment_state') as save:
             await orchestrator.handle_deployment_failure(
                 deployment_id='test-123',
                 namespace='production',
@@ -362,7 +372,8 @@ class TestEnhancedFailureHandling:
             )
             
             assert result['action'] == 'rollback'
-            assert 'previous_version' in result
+            assert result['previous_version'] == '0.9.0'
+            assert 'scheduled' in result['message']
 
 
 def exhausted_state(failure_type=FailureType.DEPLOYMENT_FAILURE, previous_version='0.9.0'):
@@ -432,7 +443,10 @@ class TestRollbackGuards:
         )
 
         assert result['action'] == 'rollback'
-        rollback.assert_called_once()
+        rollback.assert_not_called()
+        assert [item['job_id'] for item in orchestrator.jobs.of_kind('rollback')] == [
+            'rollback:test-123:4'
+        ]
 
     @pytest.mark.asyncio
     async def test_rollback_is_skipped_when_another_version_is_live(self, orchestrator):
@@ -514,8 +528,6 @@ class TestRollbackAfterRetries:
              patch.object(orchestrator, 'save_deployment_state', side_effect=save), \
              patch.object(orchestrator, 'get_previous_version', return_value='0.9.0'), \
              patch.object(orchestrator, 'get_live_version', return_value='1.0.0'), \
-             patch.object(orchestrator, 'trigger_github_workflow_rerun',
-                          new=AsyncMock(return_value=True)), \
              patch.object(orchestrator, 'rollback_deployment', return_value=True):
             for _ in failures:
                 result = await orchestrator.handle_deployment_failure(

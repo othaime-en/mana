@@ -1,3 +1,57 @@
+from src.jobs import Job, QueueStats
+
+
+class FakeJobQueue:
+    """Records enqueued jobs; the handlers can be run by hand with job()"""
+
+    def __init__(self):
+        self.jobs = []
+
+    def enqueue(self, kind, payload, delay=0.0, job_id=None):
+        if job_id is not None and any(item["job_id"] == job_id for item in self.jobs):
+            return False
+        self.jobs.append({"kind": kind, "payload": payload, "delay": delay, "job_id": job_id})
+        return True
+
+    def of_kind(self, kind):
+        return [item for item in self.jobs if item["kind"] == kind]
+
+    def job(self, index=-1):
+        item = self.jobs[index]
+        return Job(id=item["job_id"], kind=item["kind"], payload=item["payload"], attempts=1)
+
+    def stats(self):
+        return QueueStats(pending=len(self.jobs))
+
+
+class FakeLocks:
+    """Per-application locks held in memory"""
+
+    def __init__(self):
+        self.held = set()
+
+    def acquire(self, namespace, app):
+        key = (namespace, app)
+        if key in self.held:
+            return None
+        self.held.add(key)
+        return _Held(self, key)
+
+
+class _Held:
+    def __init__(self, locks, key):
+        self._locks, self._key = locks, key
+
+    def release(self):
+        self._locks.held.discard(self._key)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.release()
+
+
 class FakeRedis:
     """In-memory stand-in for the Redis calls the orchestrator makes"""
 

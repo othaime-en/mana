@@ -7,7 +7,7 @@ import logging
 import time
 import requests
 import asyncio
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, asdict, fields
 from enum import Enum
 import redis
@@ -18,7 +18,8 @@ from kubernetes.client.rest import ApiException
 from src import metrics
 from src.utils import get_audit_logger, AuditAction, split_image_reference, with_tag
 from src.config import get_config
-from src.jobs import JobQueue
+from src.jobs import Job, JobDeferred, JobQueue, PermanentJobError
+from src.locks import AppLocks
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,11 @@ RECENT_INDEX_KEY = "mana:recent"
 RECENT_INDEX_LIMIT = 1000
 RECENT_PAGE_SIZE = 50
 
+JOB_RETRY_RERUN = "retry_rerun"
+JOB_ROLLBACK = "rollback"
+LOCK_RETRY_SECONDS = 5.0
+GITHUB_RETRYABLE_CODES = frozenset({403, 409, 429})
+
 
 class ContainerNotFoundError(Exception):
     """The Deployment has no container Mana can identify as the application"""
@@ -77,6 +83,10 @@ class ContainerNotFoundError(Exception):
 
 class RollbackError(Exception):
     """A rollback patch was accepted but did not produce the expected image"""
+
+
+class GitHubRetryableError(Exception):
+    """GitHub did not accept the re-run now, but may accept it later"""
 
 
 def rollout_complete(deployment, generation: int) -> bool:
@@ -183,6 +193,7 @@ class SelfHealingOrchestrator:
             self.health_check_port = cfg.health_check_port
             self.health_check_path = cfg.health_check_path
             self.max_app_health_failures = 3  # Allow 3 consecutive app health failures
+            self.lock_ttl = cfg.job_lease_seconds
             
         else:
             # Fallback for testing or manual initialization
@@ -199,8 +210,10 @@ class SelfHealingOrchestrator:
             self.health_check_port = 5000
             self.health_check_path = '/health'
             self.max_app_health_failures = 3
+            self.lock_ttl = 60.0
         
         self.jobs = JobQueue(self.redis_client)
+        self.locks = AppLocks(self.redis_client, ttl=self.lock_ttl)
         
         # GitHub integration for retry mechanism
         import os
@@ -1030,38 +1043,24 @@ class SelfHealingOrchestrator:
             
             return False
     
-    async def trigger_github_workflow_rerun(
-        self,
-        workflow_run_id: str,
-        backoff_seconds: float
-    ) -> bool:
+    def rerun_workflow(self, workflow_run_id: str) -> None:
         """
-        Trigger GitHub Actions workflow re-run after backoff delay
-            
-        Args:
-            workflow_run_id: GitHub Actions workflow run ID
-            backoff_seconds: Delay before retry
-            
-        Returns:
-            True if re-run triggered successfully
+        Ask GitHub to re-run a workflow
+
+        Returns when GitHub accepted the request. Raises GitHubRetryableError
+        when a later attempt may succeed (network trouble, rate limits, server
+        errors, and 403 or 409 while the run is still in progress) and
+        PermanentJobError when no retry can help.
         """
         if not self.github_token or not self.github_repo:
-            logger.error(
-                "Cannot trigger GitHub workflow re-run: "
-                "GITHUB_TOKEN or GITHUB_REPO not configured"
+            raise PermanentJobError(
+                "GITHUB_TOKEN or GITHUB_REPO is not configured, so workflows cannot be re-run"
             )
-            return False
         
-        # Wait for backoff period
-        logger.info(f"⏳ Waiting {backoff_seconds}s before retry...")
-        await asyncio.sleep(backoff_seconds)
-        
-        # Trigger re-run via GitHub API
         url = (
             f"https://api.github.com/repos/{self.github_repo}/"
             f"actions/runs/{workflow_run_id}/rerun"
         )
-        
         headers = {
             "Authorization": f"Bearer {self.github_token}",
             "Accept": "application/vnd.github+json",
@@ -1070,31 +1069,134 @@ class SelfHealingOrchestrator:
         
         try:
             response = requests.post(url, headers=headers, timeout=10)
+        except requests.exceptions.RequestException as e:
+            metrics.github_api_requests_total.labels(endpoint="rerun", code="error").inc()
+            raise GitHubRetryableError(f"GitHub API request failed: {e}") from e
+        
+        code = response.status_code
+        metrics.github_api_requests_total.labels(endpoint="rerun", code=str(code)).inc()
+        
+        if code == 201:
+            logger.info(f"Triggered workflow re-run: {workflow_run_id}")
+            return
+        if code in GITHUB_RETRYABLE_CODES or code >= 500:
+            raise GitHubRetryableError(
+                f"GitHub answered {code} for the re-run of {workflow_run_id}: "
+                f"the run may still be in progress, or the token may lack "
+                f"'actions: write' ({response.text[:200]})"
+            )
+        raise PermanentJobError(
+            f"GitHub refused the re-run of {workflow_run_id} with {code}: {response.text[:200]}"
+        )
+    
+    def job_handlers(self) -> Dict[str, Any]:
+        """Handlers for the job kinds this orchestrator enqueues"""
+        return {
+            JOB_RETRY_RERUN: self._run_retry_job,
+            JOB_ROLLBACK: self._run_rollback_job,
+        }
+    
+    def _job_is_current(self, job: Job, state: Optional[DeploymentState]) -> bool:
+        """
+        True while the deployment is still waiting for this very job
+
+        A job queued earlier in a failure sequence must not act, or mark the
+        deployment failed, after the deployment moved on to a later step.
+        """
+        if state is None:
+            return False
+        if job.kind == JOB_RETRY_RERUN:
+            return (
+                state.status is DeploymentStatus.RETRY_SCHEDULED
+                and state.retry_count == job.payload.get("retry_count")
+            )
+        if job.kind == JOB_ROLLBACK:
+            return state.status is DeploymentStatus.ROLLING_BACK
+        return False
+    
+    def _load_state_for_job(self, job: Job) -> Optional[DeploymentState]:
+        """Read the job's deployment, letting Redis errors propagate so the job retries"""
+        raw = self.redis_client.get(f"deployment:{job.payload.get('deployment_id')}")
+        return self._decode_state(raw) if raw is not None else None
+    
+    def _run_retry_job(self, job: Job) -> None:
+        if not self._job_is_current(job, self._load_state_for_job(job)):
+            logger.info(f"Retry job {job.id} is out of date; not re-running the workflow")
+            return
+        self.rerun_workflow(job.payload["workflow_run_id"])
+    
+    def _run_rollback_job(self, job: Job) -> None:
+        """
+        Execute a scheduled rollback
+
+        Holds the per-application lock for the whole rollback. The failed
+        version must still be live. A job that is being retried (an earlier
+        attempt may have died after patching) also accepts the target version
+        as live and goes on to verify it. A first attempt that finds the target
+        live means another rollback already did the work, so it is skipped.
+        """
+        payload = job.payload
+        namespace = payload["namespace"]
+        deployment_name = payload["deployment_name"]
+        target_version = payload["target_version"]
+        
+        lock = self.locks.acquire(namespace, deployment_name)
+        if lock is None:
+            raise JobDeferred(
+                LOCK_RETRY_SECONDS,
+                f"another rollback of {namespace}/{deployment_name} is in progress"
+            )
+        
+        with lock:
+            state = self._load_state_for_job(job)
+            if not self._job_is_current(job, state):
+                logger.info(f"Rollback job {job.id} is out of date; nothing to roll back")
+                return
             
-            if response.status_code == 201:
-                logger.info(
-                    f"Successfully triggered workflow re-run: {workflow_run_id}"
-                )
-                return True
-            elif response.status_code == 403:
-                logger.error(
-                    f"GitHub API permission denied. "
-                    f"Ensure GITHUB_TOKEN has 'actions:write' permission."
-                )
-                return False
+            resume_version = target_version if job.attempts > 1 else None
+            if self._assess_rollback(state, payload["version"], resume_version=resume_version):
+                return
+            
+            success = self.rollback_deployment(
+                namespace,
+                deployment_name,
+                target_version,
+                deployment_id=state.deployment_id
+            )
+            
+            if success:
+                state.status = DeploymentStatus.ROLLED_BACK
+                self.save_deployment_state(state)
+                metrics.rollbacks_total.labels(
+                    namespace=namespace,
+                    reason=state.failure_type.value if state.failure_type else "unknown"
+                ).inc()
             else:
-                logger.error(
-                    f"Failed to trigger re-run: "
-                    f"{response.status_code} - {response.text}"
+                state.status = DeploymentStatus.FAILED
+                self.save_deployment_state(state)
+                audit_logger.log_manual_intervention_required(
+                    deployment_id=state.deployment_id,
+                    namespace=namespace,
+                    deployment_name=deployment_name,
+                    version=payload["version"],
+                    reason="Rollback failed after exceeding retry threshold"
                 )
-                return False
-                
-        except requests.exceptions.Timeout:
-            logger.error("GitHub API request timeout")
-            return False
-        except Exception as e:
-            logger.error(f"Error triggering GitHub workflow re-run: {e}")
-            return False
+    
+    def handle_dead_job(self, job: Job, error: Exception) -> None:
+        """A job ran out of attempts: fail the deployment it was working for"""
+        state = self._load_state_for_job(job)
+        if state is None:
+            return
+        if self._job_is_current(job, state):
+            state.status = DeploymentStatus.FAILED
+            self.save_deployment_state(state)
+        audit_logger.log_manual_intervention_required(
+            deployment_id=state.deployment_id,
+            namespace=state.namespace,
+            deployment_name=state.app_name,
+            version=state.version,
+            reason=f"{job.kind} job abandoned after {job.attempts} attempts: {error}"
+        )
     
     async def handle_deployment_failure(
         self,
@@ -1106,7 +1208,10 @@ class SelfHealingOrchestrator:
         metadata: Optional[Dict] = None
     ) -> Dict:
         """
-        Main failure handling logic with retry execution
+        Decide how to recover from a failed deployment and schedule it
+
+        Retries and rollbacks run later as durable jobs, so this returns as
+        soon as the decision is saved and the job is queued.
 
         Args:
             metadata: Webhook metadata (e.g. workflow_run_id) merged into the
@@ -1125,7 +1230,7 @@ class SelfHealingOrchestrator:
         )
         
         # Get or create deployment state
-        state = self.get_deployment_state(deployment_id)
+        state = await asyncio.to_thread(self.get_deployment_state, deployment_id)
         if not state:
             state = DeploymentState(
                 deployment_id=deployment_id,
@@ -1171,7 +1276,7 @@ class SelfHealingOrchestrator:
                 
                 # Fall back to alert
                 state.status = DeploymentStatus.FAILED
-                self.save_deployment_state(state)
+                await asyncio.to_thread(self.save_deployment_state, state)
                 
                 audit_logger.log_manual_intervention_required(
                     deployment_id=deployment_id,
@@ -1203,17 +1308,18 @@ class SelfHealingOrchestrator:
             
             self._observe_decision(decision_started)
             
-            # Schedule and trigger the retry
             state.status = DeploymentStatus.RETRY_SCHEDULED
-            self.save_deployment_state(state)
-            
-            # Schedule retry in background (async)
-            # This will be picked up by FastAPI's event loop
-            asyncio.create_task(
-                self.trigger_github_workflow_rerun(
-                    workflow_run_id,
-                    backoff_delay
-                )
+            await asyncio.to_thread(self.save_deployment_state, state)
+            await asyncio.to_thread(
+                self.jobs.enqueue,
+                JOB_RETRY_RERUN,
+                {
+                    'deployment_id': deployment_id,
+                    'workflow_run_id': workflow_run_id,
+                    'retry_count': state.retry_count
+                },
+                backoff_delay,
+                f"{JOB_RETRY_RERUN}:{deployment_id}:{state.retry_count}"
             )
             
             return {
@@ -1233,55 +1339,40 @@ class SelfHealingOrchestrator:
                 f"so there is nothing to roll back"
             )
             self._observe_decision(decision_started)
-            return self._alert(state, version, reason)
+            return await asyncio.to_thread(self._alert, state, version, reason)
         
         elif state.previous_version:
-            blocked = await self._rollback_blocker(state, version)
+            blocked = await asyncio.to_thread(self._assess_rollback, state, version)
             self._observe_decision(decision_started)
             if blocked:
                 return blocked
             
-            # Rollback to previous version
             logger.warning(
                 f"Max retries exceeded ({state.retry_count}), "
-                f"initiating rollback to {state.previous_version}"
+                f"scheduling rollback to {state.previous_version}"
             )
             
             state.status = DeploymentStatus.ROLLING_BACK
-            self.save_deployment_state(state)
-            
-            success = await asyncio.to_thread(
-                self.rollback_deployment,
-                namespace,
-                deployment_name,
-                state.previous_version,
-                deployment_id=deployment_id
+            await asyncio.to_thread(self.save_deployment_state, state)
+            await asyncio.to_thread(
+                self.jobs.enqueue,
+                JOB_ROLLBACK,
+                {
+                    'deployment_id': deployment_id,
+                    'namespace': namespace,
+                    'deployment_name': deployment_name,
+                    'version': version,
+                    'target_version': state.previous_version
+                },
+                0,
+                f"{JOB_ROLLBACK}:{deployment_id}:{state.retry_count}"
             )
             
-            if success:
-                state.status = DeploymentStatus.ROLLED_BACK
-                self.save_deployment_state(state)
-                return {
-                    'action': 'rollback',
-                    'previous_version': state.previous_version,
-                    'message': f'Rolled back to version {state.previous_version}'
-                }
-            else:
-                state.status = DeploymentStatus.FAILED
-                self.save_deployment_state(state)
-                
-                audit_logger.log_manual_intervention_required(
-                    deployment_id=deployment_id,
-                    namespace=namespace,
-                    deployment_name=deployment_name,
-                    version=version,
-                    reason="Rollback failed after exceeding retry threshold"
-                )
-                
-                return {
-                    'action': 'alert',
-                    'message': 'Rollback failed - manual intervention required'
-                }
+            return {
+                'action': 'rollback',
+                'previous_version': state.previous_version,
+                'message': f'Rollback to version {state.previous_version} scheduled'
+            }
         
         else:
             # No previous version or other issues - alert
@@ -1291,7 +1382,7 @@ class SelfHealingOrchestrator:
             )
             self._observe_decision(decision_started)
             state.status = DeploymentStatus.FAILED
-            self.save_deployment_state(state)
+            await asyncio.to_thread(self.save_deployment_state, state)
             
             audit_logger.log_manual_intervention_required(
                 deployment_id=deployment_id,
@@ -1328,23 +1419,22 @@ class SelfHealingOrchestrator:
             'message': f'{reason} - manual intervention required'
         }
     
-    async def _rollback_blocker(
+    def _assess_rollback(
         self,
         state: DeploymentState,
-        version: str
+        version: str,
+        resume_version: Optional[str] = None
     ) -> Optional[Dict]:
         """
         Check that the failed version is the one running before rolling back
 
         Returns the response to send instead of rolling back, or None when the
-        rollback may go ahead.
+        rollback may go ahead. With resume_version, a live version equal to it
+        also lets the rollback go ahead: an earlier attempt already patched the
+        Deployment and only verification is left.
         """
         try:
-            live_version = await asyncio.to_thread(
-                self.get_live_version,
-                state.namespace,
-                state.app_name
-            )
+            live_version = self.get_live_version(state.namespace, state.app_name)
         except ApiException as e:
             return self._alert(
                 state, version,
@@ -1359,6 +1449,9 @@ class SelfHealingOrchestrator:
                 "Live image is not addressed by tag, so it cannot be matched "
                 "to the failed version"
             )
+        
+        if resume_version is not None and live_version == resume_version:
+            return None
         
         if live_version != version:
             logger.warning(

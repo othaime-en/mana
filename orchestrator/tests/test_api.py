@@ -1,13 +1,13 @@
 import asyncio
 import time
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
 import redis
 
 from src.orchestrator import DeploymentState, DeploymentStatus, FailureType
-from tests.fakes import FakeRedis
+from tests.fakes import FakeJobQueue, FakeLocks, FakeRedis
 
 BLOCK_SECONDS = 1.0
 MAX_LOOP_STALL_SECONDS = 0.5
@@ -101,14 +101,14 @@ async def test_health_check_endpoint_does_not_block_event_loop(api):
 
 
 @pytest.mark.asyncio
-async def test_webhook_rollback_does_not_block_event_loop(api):
+async def test_webhook_rollback_decision_does_not_block_event_loop(api):
     transport = httpx.ASGITransport(app=api.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         with patch.object(api.orchestrator, "get_deployment_state",
                           return_value=failed_state_past_retry_limit()), \
              patch.object(api.orchestrator, "save_deployment_state"), \
-             patch.object(api.orchestrator, "get_live_version", return_value="1.0.0"), \
-             patch.object(api.orchestrator, "rollback_deployment", side_effect=blocking):
+             patch.object(api.orchestrator, "jobs", FakeJobQueue()), \
+             patch.object(api.orchestrator, "get_live_version", side_effect=lambda *_: blocking() and "1.0.0"):
             stall, health, response = await run_with_heartbeat(
                 client,
                 client.post(
@@ -129,6 +129,39 @@ async def test_webhook_rollback_does_not_block_event_loop(api):
     assert response.json()["action_taken"]["action"] == "rollback"
     assert health.status_code == 200
     assert stall < MAX_LOOP_STALL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_webhook_answers_before_the_rollback_runs(api):
+    transport = httpx.ASGITransport(app=api.app)
+    jobs = FakeJobQueue()
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "get_deployment_state",
+                          return_value=failed_state_past_retry_limit()), \
+             patch.object(api.orchestrator, "save_deployment_state") as save, \
+             patch.object(api.orchestrator, "jobs", jobs), \
+             patch.object(api.orchestrator, "get_live_version", return_value="1.0.0"), \
+             patch.object(api.orchestrator, "rollback_deployment", side_effect=blocking) as rollback:
+            started = time.monotonic()
+            response = await client.post(
+                "/webhook/deployment",
+                json={
+                    "deployment_id": "deploy-1",
+                    "namespace": "production",
+                    "app_name": "sample-app",
+                    "version": "1.0.0",
+                    "status": "failed",
+                    "failure_type": "deployment_failure",
+                    "metadata": {"workflow_run_id": "42"},
+                },
+            )
+            elapsed = time.monotonic() - started
+
+    assert response.json()["action_taken"]["action"] == "rollback"
+    assert elapsed < BLOCK_SECONDS
+    rollback.assert_not_called()
+    assert jobs.of_kind("rollback")[0]["payload"]["target_version"] == "0.9.0"
+    assert save.call_args[0][0].status is DeploymentStatus.ROLLING_BACK
 
 
 def webhook_body(status, metadata, failure_type=None):
@@ -153,8 +186,7 @@ async def test_first_failed_webhook_retries_when_workflow_run_id_sent(api):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
              patch.object(api.orchestrator, "get_previous_version", return_value="0.9.0"), \
-             patch.object(api.orchestrator, "trigger_github_workflow_rerun",
-                          new=AsyncMock(return_value=True)) as rerun:
+             patch.object(api.orchestrator, "jobs", FakeJobQueue()) as jobs:
             started = await client.post(
                 "/webhook/deployment", json=webhook_body("in_progress", metadata)
             )
@@ -171,7 +203,9 @@ async def test_first_failed_webhook_retries_when_workflow_run_id_sent(api):
     assert action["action"] == "retry"
     assert action["retry_count"] == 1
     assert action["workflow_run_id"] == "987654"
-    rerun.assert_called_once_with("987654", 10.0)
+    assert [(j["kind"], j["delay"], j["payload"]["workflow_run_id"]) for j in jobs.jobs] == [
+        ("retry_rerun", 10.0, "987654")
+    ]
     assert state.json()["metadata"]["workflow_run_id"] == "987654"
 
 
@@ -196,8 +230,7 @@ async def post_webhook(api, body):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
              patch.object(api.orchestrator, "get_previous_version", return_value="0.9.0"), \
-             patch.object(api.orchestrator, "trigger_github_workflow_rerun",
-                          new=AsyncMock(return_value=True)):
+             patch.object(api.orchestrator, "jobs", FakeJobQueue()):
             response = await client.post("/webhook/deployment", json=body)
             await asyncio.sleep(0)
     return response
@@ -388,3 +421,71 @@ def test_health_reports_degraded_when_the_api_server_is_unreachable(api):
         body = api.health()
     assert body["status"] == "degraded"
     assert body["kubernetes"] == "unhealthy"
+
+
+class StubScheduler:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.grace = None
+
+    async def run(self):
+        self.started.set()
+        await self.release.wait()
+
+    async def stop(self, grace_seconds):
+        self.grace = grace_seconds
+        self.release.set()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_runs_the_scheduler_and_drains_it_on_shutdown(api):
+    scheduler = StubScheduler()
+
+    with patch.object(api, "build_scheduler", return_value=scheduler):
+        async with api.lifespan(api.app):
+            await asyncio.wait_for(scheduler.started.wait(), 1)
+            assert scheduler.grace is None
+
+    assert scheduler.grace == api._config.shutdown_grace_seconds
+
+
+def test_the_scheduler_is_built_from_the_orchestrator_and_settings(api):
+    scheduler = api.build_scheduler()
+
+    assert scheduler.queue is api.orchestrator.jobs
+    assert set(scheduler.handlers) == {"retry_rerun", "rollback"}
+    assert scheduler.lease_seconds == api._config.job_lease_seconds
+    assert scheduler.on_dead == api.orchestrator.handle_dead_job
+
+
+MANUAL_ROLLBACK = {"namespace": "production", "deployment_name": "sample-app", "target_version": "0.9.0"}
+
+
+@pytest.mark.asyncio
+async def test_manual_rollback_is_refused_while_another_rollback_holds_the_lock(api):
+    transport = httpx.ASGITransport(app=api.app)
+    locks = FakeLocks()
+    locks.acquire("production", "sample-app")
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "locks", locks), \
+             patch.object(api.orchestrator, "rollback_deployment") as rollback:
+            response = await client.post("/rollback", json=MANUAL_ROLLBACK)
+
+    assert response.status_code == 409
+    assert "already in progress" in response.json()["detail"]
+    rollback.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,status", [(True, 200), (False, 500)])
+async def test_manual_rollback_releases_the_lock(api, outcome, status):
+    transport = httpx.ASGITransport(app=api.app)
+    locks = FakeLocks()
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "locks", locks), \
+             patch.object(api.orchestrator, "rollback_deployment", return_value=outcome):
+            response = await client.post("/rollback", json=MANUAL_ROLLBACK)
+
+    assert response.status_code == status
+    assert locks.held == set()

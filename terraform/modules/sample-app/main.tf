@@ -214,7 +214,7 @@ resource "kubernetes_pod_disruption_budget_v1" "sample_app" {
   }
 
   spec {
-    min_available = 2
+    max_unavailable = "1"
 
     selector {
       match_labels = {

@@ -364,3 +364,20 @@ def test_disruption_budgets_never_block_a_node_drain(name, namespace, replicas_i
     assert "minAvailable" not in pdb["spec"]
     assert pdb["spec"]["maxUnavailable"] == 1
     assert pdb["spec"]["selector"]["matchLabels"] == workload(replicas_in)["spec"]["selector"]["matchLabels"]
+
+
+def test_terraform_mirrors_the_durability_changes():
+    modules = ROOT / "terraform" / "modules"
+    orchestrator = (modules / "orchestrator" / "main.tf").read_text()
+    assert 'resource "kubernetes_stateful_set_v1" "redis"' in orchestrator
+    assert 'resource "kubernetes_deployment" "redis"' not in orchestrator
+    assert "volume_claim_template" in orchestrator and 'cluster_ip = "None"' in orchestrator
+    assert "--appendonly yes" in orchestrator and "--dir /data" in orchestrator
+    assert 'path = "/livez"' in orchestrator and 'path = "/readyz"' in orchestrator
+    assert 'path = "/health"' not in orchestrator
+    assert "termination_grace_period_seconds = 45" in orchestrator
+    assert "topology_spread_constraint" in orchestrator
+    assert 'resource "kubernetes_pod_disruption_budget_v1" "orchestrator"' in orchestrator
+    for module in ("orchestrator", "sample-app"):
+        text = (modules / module / "main.tf").read_text()
+        assert 'max_unavailable = "1"' in text and "min_available" not in text

@@ -30,6 +30,19 @@ jobs:
     defaults:
       run:
         working-directory: orchestrator
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      MANA_TEST_REDIS_URL: redis://localhost:6379/15
+      REQUIRE_REDIS_TESTS: "1"
 
     steps:
       - name: Checkout code
@@ -46,7 +59,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run tests with coverage gate
-        run: python -m pytest tests -v --cov=src --cov-report=term-missing --cov-fail-under=75
+        run: python -m pytest tests -v --cov=src --cov-report=term-missing --cov-fail-under=85
 
   build:
     name: Build and Test

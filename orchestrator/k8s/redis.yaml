@@ -1,19 +1,31 @@
+# Upgrading from the earlier Deployment (emptyDir): delete it first, because the
+# StatefulSet takes over the same pods' selector:
+#   kubectl -n orchestrator delete deployment redis
+# The state in it is lost once; send a success webhook per app to record the
+# last good version again.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: redis
   namespace: orchestrator
+  labels:
+    app: redis
 spec:
+  serviceName: redis-headless
   replicas: 1
   selector:
     matchLabels:
       app: redis
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   template:
     metadata:
       labels:
         app: redis
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
@@ -29,7 +41,7 @@ spec:
         command:
         - sh
         - -c
-        - exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+        - exec redis-server --dir /data --appendonly yes --appendfsync everysec --save "" --requirepass "$REDIS_PASSWORD"
         env:
         - name: REDIS_PASSWORD
           valueFrom:
@@ -69,9 +81,31 @@ spec:
         volumeMounts:
         - name: redis-data
           mountPath: /data
-      volumes:
-      - name: redis-data
-        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+      labels:
+        app: redis
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: orchestrator
+  labels:
+    app: redis
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
 ---
 apiVersion: v1
 kind: Service

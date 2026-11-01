@@ -134,7 +134,7 @@ metadata:
   name: sample-app-pdb
   namespace: production
 spec:
-  minAvailable: 2
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: sample-app

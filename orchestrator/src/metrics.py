@@ -77,6 +77,11 @@ scheduler_jobs_total = Counter(
     'Scheduler job executions by kind and outcome',
     ['kind', 'outcome']
 )
+webhook_duplicates_total = Counter(
+    'mana_webhook_duplicates_total',
+    'Webhook deliveries dropped as copies of one already seen',
+    ['outcome']
+)
 github_api_requests_total = Counter(
     'mana_github_api_requests_total',
     'GitHub API requests by endpoint and HTTP status (error when none came back)',

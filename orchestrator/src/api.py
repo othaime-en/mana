@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 from typing import Optional, Dict, List
 import asyncio
+import json
 import uvicorn
 import os
 import redis
@@ -15,6 +16,7 @@ from src.orchestrator import (
 )
 from src.auth import require_api_key, require_signed_webhook, warn_if_disabled
 from src.config import get_config as load_config
+from src.deliveries import Deliveries
 from src.jobs import Scheduler
 from src.logging_config import configure_logging
 from src.utils import get_audit_logger
@@ -186,11 +188,62 @@ def health():
 
 
 @app.post("/webhook/deployment", dependencies=[Depends(require_signed_webhook)])
-async def deployment_webhook(payload: WebhookPayload):
+async def deployment_webhook(
+    payload: WebhookPayload,
+    x_mana_signature: Optional[str] = Header(default=None)
+):
     """
     Webhook endpoint for deployment events from GitHub Actions
-    Stores workflow_run_id in metadata for retry mechanism
+
+    A request that was already seen, whether replayed, retried by the sender or
+    delivered to two replicas, is answered with the first response and not
+    processed again. Without a signature (AUTH_DISABLED) there is nothing to
+    identify a delivery by, so every request is processed.
     """
+    if not x_mana_signature:
+        return await process_deployment_event(payload)
+    
+    deliveries = Deliveries(orchestrator.redis_client)
+    try:
+        claim = await asyncio.to_thread(deliveries.begin, x_mana_signature)
+    except redis.RedisError:
+        logger.warning("Could not check for duplicate deliveries; processing anyway", exc_info=True)
+        return await process_deployment_event(payload)
+    
+    if not claim.is_new:
+        outcome = "replayed" if claim.state == "done" else "in_flight"
+        metrics.webhook_duplicates_total.labels(outcome=outcome).inc()
+        logger.warning(
+            f"Dropped a duplicate delivery for {payload.deployment_id} ({outcome})"
+        )
+        if claim.state == "done":
+            return JSONResponse(
+                status_code=claim.status_code,
+                content=claim.body,
+                headers={"X-Mana-Duplicate": "true"}
+            )
+        raise HTTPException(
+            status_code=409,
+            detail="This delivery is already being processed"
+        )
+    
+    try:
+        response = await process_deployment_event(payload)
+    except BaseException:
+        await asyncio.to_thread(deliveries.abandon, claim)
+        raise
+    
+    try:
+        await asyncio.to_thread(
+            deliveries.finish, claim, response.status_code, json.loads(response.body)
+        )
+    except redis.RedisError:
+        logger.warning("Could not record the delivery result; copies may be reprocessed", exc_info=True)
+    return response
+
+
+async def process_deployment_event(payload: WebhookPayload) -> JSONResponse:
+    """Record a deployment event and schedule recovery when it failed"""
     logger.info(f"Received deployment webhook: {payload.deployment_id}")
     
     metadata = payload.metadata or {}

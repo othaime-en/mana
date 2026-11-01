@@ -65,13 +65,23 @@ class FakeRedis:
     def get(self, key):
         return self.data.get(key)
 
-    def set(self, key, value, get=False, **_kwargs):
+    def set(self, key, value, get=False, nx=False, **_kwargs):
         previous = self.data.get(key)
+        if nx and previous is not None:
+            return None
         self.data[key] = value
-        return previous if get else None
+        if get:
+            return previous
+        return True if nx else None
 
     def setex(self, key, _ttl, value):
         self.data[key] = value
+
+    def delete(self, *keys):
+        removed = 0
+        for key in keys:
+            removed += self.data.pop(key, None) is not None
+        return removed
 
     def mget(self, keys):
         return [self.data.get(key) for key in keys]

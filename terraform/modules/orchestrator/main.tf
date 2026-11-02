@@ -113,7 +113,7 @@ resource "kubernetes_secret" "orchestrator" {
 }
 
 # Redis Deployment (if enabled)
-resource "kubernetes_deployment" "redis" {
+resource "kubernetes_stateful_set_v1" "redis" {
   count = var.redis_enabled ? 1 : 0
 
   metadata {
@@ -125,7 +125,8 @@ resource "kubernetes_deployment" "redis" {
   }
 
   spec {
-    replicas = 1
+    replicas     = 1
+    service_name = kubernetes_service.redis_headless[0].metadata[0].name
 
     selector {
       match_labels = {
@@ -141,7 +142,8 @@ resource "kubernetes_deployment" "redis" {
       }
 
       spec {
-        automount_service_account_token = false
+        automount_service_account_token  = false
+        termination_grace_period_seconds = 30
 
         security_context {
           run_as_non_root = true
@@ -162,7 +164,7 @@ resource "kubernetes_deployment" "redis" {
             name           = "redis"
           }
 
-          command = ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$REDIS_PASSWORD\""]
+          command = ["sh", "-c", "exec redis-server --dir /data --appendonly yes --appendfsync everysec --save \"\" --requirepass \"$REDIS_PASSWORD\""]
 
           env {
             name = "REDIS_PASSWORD"
@@ -225,11 +227,54 @@ resource "kubernetes_deployment" "redis" {
           }
         }
 
-        volume {
-          name = "redis-data"
-          empty_dir {}
+      }
+    }
+
+    volume_claim_template {
+      metadata {
+        name = "redis-data"
+        labels = {
+          app = "redis"
         }
       }
+
+      spec {
+        access_modes = ["ReadWriteOnce"]
+
+        resources {
+          requests = {
+            storage = var.redis_storage_size
+          }
+        }
+      }
+    }
+  }
+}
+
+# Headless Service the StatefulSet is governed by
+resource "kubernetes_service" "redis_headless" {
+  count = var.redis_enabled ? 1 : 0
+
+  metadata {
+    name      = "redis-headless"
+    namespace = var.namespace
+    labels = {
+      app = "redis"
+    }
+  }
+
+  spec {
+    cluster_ip = "None"
+
+    selector = {
+      app = "redis"
+    }
+
+    port {
+      port        = 6379
+      target_port = 6379
+      protocol    = "TCP"
+      name        = "redis"
     }
   }
 }
@@ -298,7 +343,19 @@ resource "kubernetes_deployment" "orchestrator" {
       }
 
       spec {
-        service_account_name = kubernetes_service_account.orchestrator.metadata[0].name
+        service_account_name             = kubernetes_service_account.orchestrator.metadata[0].name
+        termination_grace_period_seconds = 45
+
+        topology_spread_constraint {
+          max_skew           = 1
+          topology_key       = "kubernetes.io/hostname"
+          when_unsatisfiable = "ScheduleAnyway"
+          label_selector {
+            match_labels = {
+              app = local.app_name
+            }
+          }
+        }
 
         security_context {
           seccomp_profile {
@@ -320,6 +377,27 @@ resource "kubernetes_deployment" "orchestrator" {
           env {
             name  = "PORT"
             value = "8000"
+          }
+
+          env {
+            name  = "JOB_LEASE_SECONDS"
+            value = "60"
+          }
+
+          env {
+            name  = "SHUTDOWN_GRACE_SECONDS"
+            value = "30"
+          }
+
+          env {
+            name = "SLACK_WEBHOOK_URL"
+            value_from {
+              secret_key_ref {
+                name     = "slack-webhook"
+                key      = "url"
+                optional = true
+              }
+            }
           }
 
           env {
@@ -403,26 +481,33 @@ resource "kubernetes_deployment" "orchestrator" {
             }
           }
 
-          liveness_probe {
+          startup_probe {
             http_get {
-              path = "/health"
+              path = "/livez"
               port = 8000
             }
-            initial_delay_seconds = 30
-            period_seconds        = 10
-            timeout_seconds       = 5
-            failure_threshold     = 3
+            period_seconds    = 5
+            failure_threshold = 24
+          }
+
+          liveness_probe {
+            http_get {
+              path = "/livez"
+              port = 8000
+            }
+            period_seconds    = 10
+            timeout_seconds   = 3
+            failure_threshold = 3
           }
 
           readiness_probe {
             http_get {
-              path = "/health"
+              path = "/readyz"
               port = 8000
             }
-            initial_delay_seconds = 10
-            period_seconds        = 5
-            timeout_seconds       = 3
-            failure_threshold     = 3
+            period_seconds    = 5
+            timeout_seconds   = 3
+            failure_threshold = 3
           }
 
           security_context {
@@ -454,6 +539,23 @@ resource "kubernetes_deployment" "orchestrator" {
   depends_on = [
     kubernetes_role_binding.orchestrator
   ]
+}
+
+resource "kubernetes_pod_disruption_budget_v1" "orchestrator" {
+  metadata {
+    name      = "${local.app_name}-pdb"
+    namespace = var.namespace
+  }
+
+  spec {
+    max_unavailable = "1"
+
+    selector {
+      match_labels = {
+        app = local.app_name
+      }
+    }
+  }
 }
 
 # Orchestrator Service

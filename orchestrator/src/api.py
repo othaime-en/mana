@@ -1,9 +1,12 @@
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 from typing import Optional, Dict, List
 import asyncio
+import json
 import uvicorn
 import os
 import redis
@@ -12,29 +15,62 @@ from src.orchestrator import (
     FailureType
 )
 from src.auth import require_api_key, require_signed_webhook, warn_if_disabled
-from src.config import get_config
+from src.config import get_config as load_config
+from src.deliveries import Deliveries
+from src.jobs import Scheduler
 from src.logging_config import configure_logging
 from src.utils import get_audit_logger
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from src import metrics
 import logging
 
-_config = get_config()
+_config = load_config()
 configure_logging(_config.log_level, _config.enable_audit_logging)
 logger = logging.getLogger(__name__)
 
 audit_logger = get_audit_logger()
 warn_if_disabled(_config)
 
+# Initialize orchestrator with configuration from config.py
+orchestrator = SelfHealingOrchestrator(use_config=True)
+
+
+def build_scheduler() -> Scheduler:
+    """The job scheduler that runs retries and rollbacks on this replica"""
+    return Scheduler(
+        queue=orchestrator.jobs,
+        handlers=orchestrator.job_handlers(),
+        on_dead=orchestrator.handle_dead_job,
+        retry_delay=orchestrator.calculate_backoff,
+        lease_seconds=_config.job_lease_seconds,
+        poll_seconds=_config.scheduler_poll_seconds,
+        max_concurrency=_config.scheduler_concurrency,
+        max_attempts=_config.job_max_attempts
+    )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run the scheduler for the life of the process; drain it on shutdown"""
+    scheduler = build_scheduler()
+    worker = asyncio.create_task(scheduler.run(), name="scheduler")
+    _app.state.draining = False
+    try:
+        yield
+    finally:
+        _app.state.draining = True
+        await scheduler.stop(_config.shutdown_grace_seconds)
+        await worker
+
+
 app = FastAPI(
     title="Self-Healing Orchestrator API",
     description="API for managing self-healing CI/CD deployments",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
-
-# Initialize orchestrator with configuration from config.py
-orchestrator = SelfHealingOrchestrator(use_config=True)
 REGISTRY.register(metrics.ActiveDeploymentsCollector(orchestrator.active_deployment_counts))
+REGISTRY.register(metrics.SchedulerCollector(lambda: orchestrator.jobs.stats()))
 
 
 @app.middleware("http")
@@ -124,9 +160,39 @@ def root():
     }
 
 
+@app.get("/livez")
+async def livez():
+    """
+    Liveness probe: the process is up and its event loop is responding
+
+    Depends on nothing else, so a Redis or Kubernetes outage never makes the
+    kubelet restart a healthy process.
+    """
+    return {"status": "alive"}
+
+
+@app.get("/readyz")
+def readyz():
+    """
+    Readiness probe: this replica can do its work
+
+    Needs Redis, which holds all state and the job queue. Fails while the
+    replica drains on shutdown so traffic moves to the others first.
+    """
+    if getattr(app.state, "draining", False):
+        return JSONResponse(status_code=503, content={"status": "draining"})
+    try:
+        orchestrator.redis_client.ping()
+    except Exception:
+        return JSONResponse(
+            status_code=503, content={"status": "not_ready", "redis": "unhealthy"}
+        )
+    return {"status": "ready"}
+
+
 @app.get("/health")
 def health():
-    """Health check endpoint"""
+    """Dependency report; answers 503 when Redis or Kubernetes is unreachable"""
     try:
         # Check Redis connectivity
         orchestrator.redis_client.ping()
@@ -143,22 +209,76 @@ def health():
     
     overall_healthy = redis_healthy and k8s_healthy
     
-    return {
-        "status": "healthy" if overall_healthy else "degraded",
-        "redis": "healthy" if redis_healthy else "unhealthy",
-        "kubernetes": "healthy" if k8s_healthy else "unhealthy",
-        "github_integration": bool(
-            orchestrator.github_token and orchestrator.github_repo
-        )
-    }
+    return JSONResponse(
+        status_code=200 if overall_healthy else 503,
+        content={
+            "status": "healthy" if overall_healthy else "degraded",
+            "redis": "healthy" if redis_healthy else "unhealthy",
+            "kubernetes": "healthy" if k8s_healthy else "unhealthy",
+            "github_integration": bool(
+                orchestrator.github_token and orchestrator.github_repo
+            )
+        }
+    )
 
 
 @app.post("/webhook/deployment", dependencies=[Depends(require_signed_webhook)])
-async def deployment_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
+async def deployment_webhook(
+    payload: WebhookPayload,
+    x_mana_signature: Optional[str] = Header(default=None)
+):
     """
     Webhook endpoint for deployment events from GitHub Actions
-    Stores workflow_run_id in metadata for retry mechanism
+
+    A request that was already seen, whether replayed, retried by the sender or
+    delivered to two replicas, is answered with the first response and not
+    processed again. Without a signature (AUTH_DISABLED) there is nothing to
+    identify a delivery by, so every request is processed.
     """
+    if not x_mana_signature:
+        return await process_deployment_event(payload)
+    
+    deliveries = Deliveries(orchestrator.redis_client)
+    try:
+        claim = await asyncio.to_thread(deliveries.begin, x_mana_signature)
+    except redis.RedisError:
+        logger.warning("Could not check for duplicate deliveries; processing anyway", exc_info=True)
+        return await process_deployment_event(payload)
+    
+    if not claim.is_new:
+        outcome = "replayed" if claim.state == "done" else "in_flight"
+        metrics.webhook_duplicates_total.labels(outcome=outcome).inc()
+        logger.warning(
+            f"Dropped a duplicate delivery for {payload.deployment_id} ({outcome})"
+        )
+        if claim.state == "done":
+            return JSONResponse(
+                status_code=claim.status_code,
+                content=claim.body,
+                headers={"X-Mana-Duplicate": "true"}
+            )
+        raise HTTPException(
+            status_code=409,
+            detail="This delivery is already being processed"
+        )
+    
+    try:
+        response = await process_deployment_event(payload)
+    except BaseException:
+        await asyncio.to_thread(deliveries.abandon, claim)
+        raise
+    
+    try:
+        await asyncio.to_thread(
+            deliveries.finish, claim, response.status_code, json.loads(response.body)
+        )
+    except redis.RedisError:
+        logger.warning("Could not record the delivery result; copies may be reprocessed", exc_info=True)
+    return response
+
+
+async def process_deployment_event(payload: WebhookPayload) -> JSONResponse:
+    """Record a deployment event and schedule recovery when it failed"""
     logger.info(f"Received deployment webhook: {payload.deployment_id}")
     
     metadata = payload.metadata or {}
@@ -199,13 +319,6 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
                     retry_attempt=result['retry_count']
                 ).inc()
             
-            # Track rollback metrics
-            if result['action'] == 'rollback':
-                metrics.rollbacks_total.labels(
-                    namespace=payload.namespace,
-                    reason=failure_type.value
-                ).inc()
-            
             return JSONResponse(
                 status_code=200,
                 content={
@@ -216,7 +329,8 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             )
         
         elif payload.status is WebhookStatus.SUCCESS:
-            orchestrator.record_deployment_succeeded(
+            await asyncio.to_thread(
+                orchestrator.record_deployment_succeeded,
                 deployment_id=payload.deployment_id,
                 namespace=payload.namespace,
                 deployment_name=payload.app_name,
@@ -234,7 +348,8 @@ async def deployment_webhook(payload: WebhookPayload, background_tasks: Backgrou
             )
         
         try:
-            orchestrator.record_deployment_started(
+            await asyncio.to_thread(
+                orchestrator.record_deployment_started,
                 deployment_id=payload.deployment_id,
                 namespace=payload.namespace,
                 deployment_name=payload.app_name,
@@ -270,6 +385,15 @@ async def manual_rollback(request: RollbackRequest):
     import uuid
     deployment_id = f"manual-rollback-{uuid.uuid4()}"
     
+    lock = await asyncio.to_thread(
+        orchestrator.locks.acquire, request.namespace, request.deployment_name
+    )
+    if lock is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A rollback of {request.namespace}/{request.deployment_name} is already in progress"
+        )
+    
     try:
         success = await asyncio.to_thread(
             orchestrator.rollback_deployment,
@@ -297,9 +421,13 @@ async def manual_rollback(request: RollbackRequest):
                 detail="Rollback failed"
             )
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error during manual rollback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await asyncio.to_thread(lock.release)
 
 
 @app.post("/health-check", dependencies=[Depends(require_api_key)])
@@ -333,7 +461,7 @@ async def check_health(request: HealthCheckRequest):
 @app.get("/deployment/{deployment_id}", dependencies=[Depends(require_api_key)])
 async def get_deployment(deployment_id: str):
     """Get deployment state"""
-    state = orchestrator.get_deployment_state(deployment_id)
+    state = await asyncio.to_thread(orchestrator.get_deployment_state, deployment_id)
     
     if not state:
         raise HTTPException(status_code=404, detail="Deployment not found")
@@ -361,7 +489,9 @@ async def get_recent_deployments(namespace: Optional[str] = None, limit: int = 1
     Get recent deployment states
     """
     try:
-        states = orchestrator.get_recent_deployments(namespace=namespace, limit=limit)
+        states = await asyncio.to_thread(
+            orchestrator.get_recent_deployments, namespace=namespace, limit=limit
+        )
         
         return {
             "count": len(states),

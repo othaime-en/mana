@@ -12,7 +12,7 @@ COPY src/ ./src/
 USER orchestrator
 
 HEALTHCHECK --interval=30s --timeout=10s \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')"
+    CMD python -c "import requests; requests.get('http://localhost:8000/livez', timeout=5).raise_for_status()"
 
 EXPOSE 8000
 

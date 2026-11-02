@@ -1,7 +1,7 @@
 """Prometheus metrics emitted by the orchestrator"""
 
 import logging
-from typing import Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 import redis
 from prometheus_client import Counter, Histogram
@@ -72,6 +72,33 @@ redis_connection_errors_total = Counter(
     'redis_connection_errors_total',
     'Redis calls that failed with a connection or timeout error'
 )
+scheduler_jobs_total = Counter(
+    'mana_scheduler_jobs_total',
+    'Scheduler job executions by kind and outcome',
+    ['kind', 'outcome']
+)
+webhook_duplicates_total = Counter(
+    'mana_webhook_duplicates_total',
+    'Webhook deliveries dropped as copies of one already seen',
+    ['outcome']
+)
+alerts_sent_total = Counter(
+    'mana_alerts_sent_total',
+    'Alert deliveries by channel and outcome (sent, skipped, failed)',
+    ['channel', 'outcome']
+)
+github_api_requests_total = Counter(
+    'mana_github_api_requests_total',
+    'GitHub API requests by endpoint and HTTP status (error when none came back)',
+    ['endpoint', 'code']
+)
+
+COLLECTED_METRIC_NAMES = (
+    'active_deployments',
+    'mana_scheduler_pending_jobs',
+    'mana_scheduler_inflight_jobs',
+    'mana_scheduler_overdue_seconds',
+)
 
 
 def record_outcome(
@@ -129,19 +156,24 @@ class CountingRedis:
     def __init__(self, client):
         self._client = client
 
-    def __getattr__(self, name):
-        attribute = getattr(self._client, name)
-        if not callable(attribute):
-            return attribute
-
+    @staticmethod
+    def _counted(function):
         def call(*args, **kwargs):
             try:
-                return attribute(*args, **kwargs)
+                return function(*args, **kwargs)
             except (redis.ConnectionError, redis.TimeoutError):
                 redis_connection_errors_total.inc()
                 raise
 
         return call
+
+    def __getattr__(self, name):
+        attribute = getattr(self._client, name)
+        if not callable(attribute):
+            return attribute
+        if name == "register_script":
+            return lambda *args, **kwargs: self._counted(attribute(*args, **kwargs))
+        return self._counted(attribute)
 
 
 class ActiveDeploymentsCollector(Collector):
@@ -173,3 +205,37 @@ class ActiveDeploymentsCollector(Collector):
         for namespace in sorted(self._seen):
             family.add_metric([namespace], counts.get(namespace, 0))
         yield family
+
+
+class SchedulerCollector(Collector):
+    """
+    Report job queue depth from Redis at scrape time
+
+    Like active_deployments, every replica reports the same values, so queries
+    use max. mana_scheduler_overdue_seconds is how long the oldest due job has
+    waited; it grows when no replica is working the queue.
+    """
+
+    def __init__(self, source: Callable[[], Any]):
+        self._source = source
+
+    def describe(self) -> Iterable[GaugeMetricFamily]:
+        """Skip the registration-time scrape so importing never needs Redis"""
+        return []
+
+    def collect(self) -> Iterable[GaugeMetricFamily]:
+        try:
+            stats = self._source()
+        except redis.RedisError as e:
+            logger.warning(f"scheduler stats unavailable: {e}")
+            return
+
+        for name, doc, value in (
+            ('mana_scheduler_pending_jobs', 'Jobs waiting to run', stats.pending),
+            ('mana_scheduler_inflight_jobs', 'Jobs claimed by a worker', stats.inflight),
+            ('mana_scheduler_overdue_seconds',
+             'Seconds the oldest due job has been waiting', stats.overdue_seconds),
+        ):
+            family = GaugeMetricFamily(name, doc)
+            family.add_metric([], value)
+            yield family

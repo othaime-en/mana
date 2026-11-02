@@ -185,3 +185,14 @@ def test_scanners_that_gate_changes_are_not_advisory():
         if step.get("with", {}).get("exit-code") == "1"
     ]
     assert gate and gate[0]["with"]["severity"] == "CRITICAL"
+
+
+def test_orchestrator_tests_run_against_a_real_redis_that_cannot_be_skipped():
+    import yaml
+
+    job = yaml.safe_load(workflow_text("build-and-test.yml"))["jobs"]["orchestrator-tests"]
+    assert job["services"]["redis"]["image"].startswith("redis:")
+    assert job["env"]["REQUIRE_REDIS_TESTS"] == "1"
+    assert job["env"]["MANA_TEST_REDIS_URL"].startswith("redis://localhost:6379")
+    gate = next(s["run"] for s in job["steps"] if "pytest" in s.get("run", ""))
+    assert int(re.search(r"--cov-fail-under=(\d+)", gate).group(1)) >= 85

@@ -38,7 +38,7 @@ MANA is a learning and portfolio project. It has not been security audited. Trea
 
 ```bash
 scripts/create-secrets.sh --rotate                 # new redis-password, webhook-secret, api-key
-kubectl -n orchestrator rollout restart deployment/redis deployment/orchestrator
+kubectl -n orchestrator rollout restart statefulset/redis deployment/orchestrator
 kubectl -n orchestrator get secret orchestrator-secrets -o jsonpath='{.data.webhook-secret}' \
   | base64 -d | gh secret set MANA_WEBHOOK_SECRET
 ```
@@ -47,10 +47,10 @@ For a rotation without rejected webhooks, set `WEBHOOK_SECRET` to `<new>,<old>` 
 
 ## Known Gaps
 
-1. **Replay.** A valid webhook can be replayed for 300 seconds, and two replicas can both act on one event. Idempotency keys and locks are planned (CORE-06, FEAT-04).
+1. **Replay is blocked, with limits.** A signed webhook is claimed in Redis by its signature, so a replay inside the 300 second window, a retried `curl` and a copy reaching the other replica are answered with the first response and not processed again. If Redis cannot be checked the request is processed, and the per-app rollback lock is what stops a double rollback. Without a signature (`AUTH_DISABLED=true`) nothing is de-duplicated.
 2. **Open read endpoints.** `/`, `/health`, `/metrics` and the OpenAPI routes carry no credential, because probes and Prometheus use them. The NetworkPolicy is the control.
 3. **NetworkPolicy enforcement is not proven on a cluster.** `scripts/test-network-policies.sh` and `network-policy-test.yml` check five allowed and six denied paths on Kind with Calico, but they have not been run. Egress to the API server and `api.github.com` is `0.0.0.0/0` on 443 and 6443; narrow it to the API server address.
-4. **Redis is plain TCP in the cluster and not durable.** The password and the policy protect it; it still stores data on an `emptyDir` (INFRA-04). Use `REDIS_TLS` with a managed Redis.
+4. **Redis is plain TCP in the cluster and a single instance.** The password and the policy protect it, and data now persists on a volume, but there is no failover and no server-side TLS. Use `REDIS_TLS` with a managed Redis.
 5. **Terraform state holds the generated secrets.** Use an encrypted remote backend (INFRA-09) or an external secret store (Sealed Secrets, External Secrets Operator).
 6. **CI credentials are long-lived.** `KUBE_CONFIG` can come from the `ci-deployer` ServiceAccount, but OIDC federation is not implemented, and the self-hosted runner namespace `ci-runners` is an assumption.
 7. **Images are deployed by tag**, there is no SBOM or signature (FEAT-14), and several action majors are old (CI-04).

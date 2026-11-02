@@ -1,3 +1,4 @@
+import asyncio
 import time
 from unittest.mock import patch
 
@@ -235,7 +236,7 @@ async def test_operator_endpoints_require_the_api_key(client, secured, method, p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/", "/health", "/metrics"])
+@pytest.mark.parametrize("path", ["/", "/health", "/livez", "/readyz", "/metrics"])
 async def test_probe_and_scrape_endpoints_stay_open(client, secured, path):
     assert (await client.get(path)).status_code == 200
 
@@ -246,7 +247,7 @@ async def test_disabled_auth_lets_requests_through(client, monkeypatch):
     assert (await client.get("/config")).status_code == 200
 
 
-PUBLIC_PATHS = {"/", "/health", "/metrics", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+PUBLIC_PATHS = {"/", "/health", "/livez", "/readyz", "/metrics", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 
 
 def test_every_route_is_either_public_by_decision_or_protected(api):
@@ -281,3 +282,109 @@ def test_get_config_starts_with_valid_credentials(monkeypatch):
     monkeypatch.setenv("WEBHOOK_SECRET", SECRET)
     monkeypatch.setenv("API_KEY", KEY)
     assert config_module.get_config().api_keys == (KEY,)
+
+
+FAILED_PAYLOAD = (
+    b'{"deployment_id":"deploy-9-production","namespace":"production","app_name":"sample-app",'
+    b'"version":"v1","status":"failed","failure_type":"deployment_failure",'
+    b'"metadata":{"workflow_run_id":"9"}}'
+)
+
+
+def delivery_total(outcome):
+    return sample("mana_webhook_duplicates_total", {"outcome": outcome})
+
+
+@pytest.fixture
+def recovery(api):
+    from tests.fakes import FakeJobQueue, FakeLocks, FakeRedis
+
+    jobs = FakeJobQueue()
+    with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
+         patch.object(api.orchestrator, "jobs", jobs), \
+         patch.object(api.orchestrator, "locks", FakeLocks()), \
+         patch.object(api.orchestrator, "get_previous_version", return_value="v0"):
+        yield jobs
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_webhook_gets_the_first_answer_and_acts_once(api, client, secured, recovery):
+    headers = signed_headers(FAILED_PAYLOAD)
+    before = delivery_total("replayed")
+
+    first = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=headers)
+    replay = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=headers)
+
+    assert first.status_code == replay.status_code == 200
+    assert replay.json() == first.json()
+    assert replay.headers["X-Mana-Duplicate"] == "true"
+    assert "X-Mana-Duplicate" not in first.headers
+    assert len(recovery.jobs) == 1
+    assert delivery_total("replayed") == before + 1
+
+
+@pytest.mark.asyncio
+async def test_a_new_signed_event_for_the_same_deployment_is_processed(api, client, secured, recovery):
+    first = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=signed_headers(FAILED_PAYLOAD, offset=-5))
+    second = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=signed_headers(FAILED_PAYLOAD))
+
+    assert first.json()["action_taken"]["retry_count"] == 1
+    assert second.json()["action_taken"]["retry_count"] == 2
+    assert len(recovery.jobs) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_arrives_while_the_first_is_running_is_refused(api, client, secured, recovery):
+    headers = signed_headers(FAILED_PAYLOAD)
+    started, release = asyncio.Event(), asyncio.Event()
+    real = api.process_deployment_event
+    before = delivery_total("in_flight")
+
+    async def slow(payload):
+        started.set()
+        await release.wait()
+        return await real(payload)
+
+    with patch.object(api, "process_deployment_event", slow):
+        first = asyncio.create_task(client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=headers))
+        await started.wait()
+        copy = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=headers)
+        release.set()
+        await first
+
+    assert copy.status_code == 409
+    assert delivery_total("in_flight") == before + 1
+    assert len(recovery.jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_that_failed_can_be_retried(api, client, secured, recovery):
+    headers = signed_headers(FAILED_PAYLOAD)
+
+    with patch.object(api.orchestrator, "handle_deployment_failure", side_effect=RuntimeError("boom")):
+        broken = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=headers)
+    retried = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=headers)
+
+    assert broken.status_code == 500
+    assert retried.status_code == 200
+    assert "X-Mana-Duplicate" not in retried.headers
+
+
+@pytest.mark.asyncio
+async def test_duplicate_checks_failing_do_not_stop_processing(api, client, secured, recovery):
+    import redis as redis_lib
+
+    with patch("src.api.Deliveries.begin", side_effect=redis_lib.ConnectionError("down")):
+        response = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers=signed_headers(FAILED_PAYLOAD))
+
+    assert response.status_code == 200
+    assert len(recovery.jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_without_authentication_every_request_is_processed(api, client, recovery):
+    first = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers={"Content-Type": "application/json"})
+    second = await client.post("/webhook/deployment", content=FAILED_PAYLOAD, headers={"Content-Type": "application/json"})
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert len(recovery.jobs) == 2

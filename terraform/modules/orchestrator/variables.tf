@@ -63,3 +63,9 @@ variable "managed_namespaces" {
   type        = list(string)
   default     = ["production", "staging", "canary"]
 }
+
+variable "redis_storage_size" {
+  description = "Size of the persistent volume that holds Redis data (deployment state, job queue, last good versions)"
+  type        = string
+  default     = "1Gi"
+}

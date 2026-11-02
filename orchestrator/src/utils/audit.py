@@ -323,6 +323,26 @@ class AuditLogger:
             }
         )
     
+    def log_alert_sent(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        channel: str,
+        event: str
+    ):
+        """Log that an alert reached a channel"""
+        self.log_event(
+            action=AuditAction.ALERT_SENT,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=True,
+            details={"channel": channel, "event": event}
+        )
+    
     def log_manual_intervention_required(
         self,
         deployment_id: str,

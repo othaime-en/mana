@@ -9,7 +9,7 @@ This page describes every moving part of MANA, what it is responsible for, and w
 | Component       | Path                          | Runtime                                           | Role                                                                        |
 | --------------- | ----------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------- |
 | Orchestrator    | `orchestrator/`               | Python 3.12, FastAPI                              | Receives deployment events, decides retry/rollback/alert, executes recovery |
-| Redis           | `orchestrator/k8s/redis.yaml` | Redis 8                                           | Deployment state and last-known-good versions                               |
+| Redis           | `orchestrator/k8s/redis.yaml` | Redis 8                                           | Deployment state, last-known-good versions, the job queue, locks            |
 | Sample app      | `sample-app/`                 | Python 3.12, Flask, Gunicorn                      | Deployment target with health probes, metrics and failure simulation        |
 | CI/CD workflows | `.github/workflows/`          | GitHub Actions                                    | Build, test, deploy, and notify the orchestrator                            |
 | Terraform       | `terraform/`                  | Terraform ≥ 1.5                                   | Provisions namespaces, apps, orchestrator, security and monitoring          |
@@ -80,8 +80,11 @@ Redis holds everything the orchestrator needs to make a stateful decision.
 | ---------------------------------------- | ------------------------------------------------ | ---------------------------------- |
 | `deployment:<deployment_id>`             | JSON-encoded `DeploymentState`                   | 24 hours (refreshed on every save) |
 | `last_successful:<namespace>:<app_name>` | Version string of the last successful deployment | none                               |
+| `mana:recent`                            | Sorted set of recent deployments (`<namespace>\|<id>`), capped at 1000 | trimmed by age and size |
+| `mana:active`                            | Sorted set of deployments still in flight        | entries older than 24 hours are dropped |
+| `mana:jobs:*`, `mana:job:*`, `mana:lock:*`, `mana:delivery:*` | Job queue, locks and webhook de-duplication (see [Data Flow](data-flow.md#durable-jobs)) | per key |
 
-For local development, `orchestrator/k8s/redis.yaml` runs a single Redis pod with AOF enabled but an `emptyDir` volume, so state is lost if the pod is rescheduled. See [Security](../about/security.md) and the [Architecture Overview](overview.md#failure-modes-and-recovery) for production guidance.
+`orchestrator/k8s/redis.yaml` runs one Redis pod as a StatefulSet with a 1Gi PersistentVolumeClaim and AOF (`appendfsync everysec`, so about a second of writes is at risk on a crash), which keeps state, queued jobs and rollback targets across pod restarts and rescheduling. The volume is retained when the StatefulSet is deleted. It is still a single instance with no failover: while it is down the orchestrator is not ready and recovery pauses, then resumes from the queue. Upgrading from the earlier Deployment (`emptyDir`) needs `kubectl -n orchestrator delete deployment redis` first and loses the stored state once. See [Security](../about/security.md) and the [Architecture Overview](overview.md#failure-modes-and-recovery) for production guidance.
 
 ---
 
@@ -133,7 +136,7 @@ All workflows live in `.github/workflows/`. See [CI/CD Integration](../usage/cic
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `namespaces`   | `production`, `staging`, `canary`, `orchestrator`, `monitoring` (each labelled `name=<namespace>`)                           |
 | `sample-app`   | Deployment, Service, Ingress, HPA and related resources for the sample app                                                   |
-| `orchestrator` | ServiceAccount, a Role and RoleBinding per managed namespace, ConfigMap, generated Secret, Redis Deployment and Service, orchestrator Deployment                |
+| `orchestrator` | ServiceAccount, a Role and RoleBinding per managed namespace, ConfigMap, generated Secret, Redis StatefulSet and Services, orchestrator Deployment and PodDisruptionBudget                |
 | `security`     | NetworkPolicies, ResourceQuotas and LimitRanges                                                                              |
 | `monitoring`   | `kube-prometheus-stack` and `loki-stack` Helm releases, ServiceMonitors, one `PrometheusRule` built from `monitoring/prometheus/*.yml` and one dashboard ConfigMap per file in `monitoring/grafana/dashboards` |
 

@@ -1,6 +1,7 @@
 """scripts/notify-orchestrator.sh against a stubbed curl, verified with the real verifier."""
 
 import json
+import uuid
 import os
 import shutil
 import subprocess
@@ -76,6 +77,8 @@ def test_payload_matches_the_webhook_contract(run, api):
     assert result.returncode == 0, result.stderr
     body, _ = sent(tmp)
     payload = json.loads(body)
+    delivery_id = payload["metadata"].pop("delivery_id")
+    assert uuid.UUID(delivery_id)
     assert payload["metadata"] == {
         "commit": "abc123", "author": "octocat", "branch": "main",
         "run_attempt": "2", "workflow_run_id": "42",
@@ -83,6 +86,16 @@ def test_payload_matches_the_webhook_contract(run, api):
     parsed = api.WebhookPayload.model_validate(payload)
     assert parsed.deployment_id == "deploy-1-production"
     assert parsed.failure_type is None
+
+
+def test_every_notification_carries_its_own_delivery_id(run):
+    ids = []
+    for _ in range(2):
+        result, tmp = run()
+        assert result.returncode == 0, result.stderr
+        ids.append(json.loads(sent(tmp)[0])["metadata"]["delivery_id"])
+
+    assert ids[0] != ids[1]
 
 
 def test_signature_is_accepted_by_the_orchestrator_verifier(run):

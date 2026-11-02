@@ -1,6 +1,6 @@
 import json
 import time
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 import redis
@@ -13,7 +13,7 @@ from src.orchestrator import (
     FailureType,
     SelfHealingOrchestrator,
 )
-from tests.fakes import FakeRedis
+from tests.fakes import FakeJobQueue, FakeLocks, FakeRedis
 
 
 @pytest.fixture
@@ -24,6 +24,8 @@ def orchestrator():
          patch("src.orchestrator.client.CoreV1Api"):
         orch = SelfHealingOrchestrator(use_config=False)
     orch.redis_client = FakeRedis()
+    orch.jobs = FakeJobQueue()
+    orch.locks = FakeLocks()
     return orch
 
 
@@ -136,7 +138,6 @@ class TestFailureLifecycle:
         start(orchestrator)
         started_at = orchestrator.get_deployment_state("deploy-1").started_at
         orchestrator.get_previous_version = Mock(return_value="v0")
-        orchestrator.trigger_github_workflow_rerun = AsyncMock()
 
         for _ in range(2):
             await orchestrator.handle_deployment_failure(
@@ -155,7 +156,6 @@ class TestFailureLifecycle:
     async def test_previous_version_is_resolved_at_failure_time_only_once(self, orchestrator):
         start(orchestrator)
         orchestrator.get_previous_version = Mock(return_value="v0")
-        orchestrator.trigger_github_workflow_rerun = AsyncMock()
 
         for _ in range(2):
             await orchestrator.handle_deployment_failure(
@@ -169,7 +169,6 @@ class TestFailureLifecycle:
     @pytest.mark.asyncio
     async def test_failure_without_prior_in_progress_still_works(self, orchestrator):
         orchestrator.get_previous_version = Mock(return_value="v0")
-        orchestrator.trigger_github_workflow_rerun = AsyncMock()
 
         result = await orchestrator.handle_deployment_failure(
             "deploy-1", "production", "sample-app", "v1",
@@ -185,7 +184,6 @@ class TestFailureLifecycle:
     async def test_retry_keeps_the_deployment_active_and_alert_ends_it(self, orchestrator):
         start(orchestrator)
         orchestrator.get_previous_version = Mock(return_value="v0")
-        orchestrator.trigger_github_workflow_rerun = AsyncMock()
 
         await orchestrator.handle_deployment_failure(
             "deploy-1", "production", "sample-app", "v1",

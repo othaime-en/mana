@@ -215,9 +215,9 @@ The structured fields (deployment ID, namespace, version, `success`, details) ar
 ## Inspecting Redis
 
 ```bash
-kubectl -n orchestrator exec deploy/redis -- redis-cli keys 'deployment:*'
-kubectl -n orchestrator exec deploy/redis -- redis-cli get 'last_successful:production:sample-app'
-kubectl -n orchestrator exec deploy/redis -- redis-cli ttl 'deployment:<deployment-id>'
+kubectl -n orchestrator exec redis-0 -- redis-cli zrevrange mana:recent 0 9
+kubectl -n orchestrator exec redis-0 -- redis-cli get 'last_successful:production:sample-app'
+kubectl -n orchestrator exec redis-0 -- redis-cli ttl 'deployment:<deployment-id>'
 ```
 
 `last_successful:<namespace>:<app>` is the rollback target; it has no expiry. If a rollback keeps answering "No previous version", this key is probably missing.

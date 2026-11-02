@@ -95,11 +95,11 @@ Empty endpoints mean no Ready pod matches the selector `app=orchestrator`. From 
 
 ### Cannot connect to Redis
 
-`/health` shows `"redis": "unhealthy"` and logs show `Cannot connect to Redis`.
+`/health` shows `"redis": "unhealthy"`, `/readyz` answers 503, and logs show `Cannot connect to Redis`.
 
 ```bash
-kubectl -n orchestrator get pods,svc -l app=redis
-kubectl -n orchestrator exec deploy/redis -- redis-cli ping           # PONG
+kubectl -n orchestrator get pods,svc,pvc -l app=redis
+kubectl -n orchestrator exec redis-0 -- redis-cli ping           # PONG
 kubectl -n orchestrator exec deploy/orchestrator -- env | grep REDIS
 kubectl -n orchestrator exec deploy/orchestrator -- python -c \
   "import redis,os;print(redis.Redis(host=os.getenv('REDIS_HOST'),port=6379,password=os.getenv('REDIS_PASSWORD') or None,socket_timeout=3).ping())"
@@ -107,7 +107,7 @@ kubectl -n orchestrator exec deploy/orchestrator -- python -c \
 
 Checks: the host must be `redis-service` in-cluster (`redis` in Compose, `localhost` locally); the Redis pod must be Ready; a NetworkPolicy must allow the orchestrator to reach port 6379; a Redis started with `--requirepass` needs the orchestrator's `REDIS_PASSWORD` to match (both come from `orchestrator-secrets`, key `redis-password`; an `AuthenticationError` in the logs means they differ, for example after rotating only one side). With NetworkPolicies enforced, only pods labelled `app=orchestrator` may reach Redis.
 
-Data safety: the bundled Redis uses an `emptyDir`, so rescheduling it loses all state, including `last_successful:*` rollback targets. Send a fresh `success` webhook (or deploy once) to repopulate.
+Data safety: the bundled Redis is a StatefulSet with a persistent volume and AOF, so a restart or rescheduling keeps state, queued jobs and the `last_successful:*` rollback targets (about one second of writes can be lost on a crash). The volume is not deleted with the StatefulSet. If the volume is lost, or after upgrading from the earlier `emptyDir` Deployment, send a fresh `success` webhook (or deploy once) per app to repopulate the rollback targets.
 
 ### Cannot connect to the Kubernetes API
 
@@ -202,8 +202,9 @@ Each of these also writes a `manual_intervention_required` audit event.
 2. Is `github_integration` `true` in `/health`?
 3. After the backoff, look for the GitHub log messages in the table above.
 4. GitHub re-runs only completed runs; the webhook is sent while the run is still finishing, so a short backoff can be rejected. Raise `INITIAL_BACKOFF`.
-5. If the orchestrator pod restarted during the backoff, the pending retry is lost (it lives in memory). Re-run the workflow manually.
-6. Each re-run must reuse the same `deployment_id` or the retry counter restarts ([CI/CD Integration](cicd-integration.md#recommended-workflow-changes)).
+5. Retries are durable jobs: a pod restart during the backoff does not lose them. Check the queue with `redis-cli zrange mana:jobs:pending 0 -1 withscores` and the dashboard's Reliability row. If `mana_scheduler_overdue_seconds` keeps growing, no replica is working the queue (see `SchedulerStalled`).
+6. A GitHub 403 or 409 is retried up to `JOB_MAX_ATTEMPTS`; after that the deployment is `failed` and an alert says why. Look at `mana_github_api_requests_total{endpoint="rerun"}` and the log lines `GitHub answered`.
+7. Each re-run must reuse the same `deployment_id` or the retry counter restarts ([CI/CD Integration](cicd-integration.md#recommended-workflow-changes)).
 
 ### Rollbacks not happening
 
@@ -212,13 +213,14 @@ A rollback needs: the failure count to exceed `MAX_RETRIES`, a known previous ve
 ```bash
 curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/config | jq '{max_retries}'
 curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/<id> | jq '{status, retry_count, previous_version}'
-kubectl -n orchestrator exec deploy/redis -- redis-cli get last_successful:<ns>:<app>
+kubectl -n orchestrator exec redis-0 -- redis-cli get last_successful:<ns>:<app>
 ```
 
 - With the defaults, rollback starts on the **fourth** failure for the same deployment ID.
 - A `skip` answer means another version is live, so there was nothing to roll back; `alert` for a build or test failure means nothing was deployed.
 - If every attempt uses a new deployment ID the count never grows.
 - To roll back immediately, use `POST /rollback`.
+- The automatic rollback is a queued job: `action: rollback` means *scheduled*. Poll `GET /deployment/<id>` for `rolled_back`; if it stays `rolling_back`, check `mana:jobs:pending` / `mana:jobs:inflight` and whether another rollback holds `mana:lock:rollback:<ns>:<app>` (the job waits for it).
 
 ### Rollbacks not succeeding
 

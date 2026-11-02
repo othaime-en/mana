@@ -115,7 +115,7 @@ MANA_STATUS=success scripts/notify-orchestrator.sh | jq
 Confirm it was stored:
 
 ```bash
-kubectl -n orchestrator exec deploy/redis -- redis-cli get last_successful:production:sample-app
+kubectl -n orchestrator exec redis-0 -- redis-cli get last_successful:production:sample-app
 # 1.0.0
 ```
 
@@ -158,7 +158,7 @@ Expected output:
 --- failure #3
 {"action":"retry","retry_count":3,"backoff_seconds":40.0,"workflow_run_id":"1","message":"Retry 3/3 scheduled in 40.0s"}
 --- failure #4
-{"action":"rollback","previous_version":"1.0.0","message":"Rolled back to version 1.0.0"}
+{"action":"rollback","previous_version":"1.0.0","message":"Rollback to version 1.0.0 scheduled"}
 ```
 
 What happened:
@@ -168,7 +168,7 @@ What happened:
 | 1, 2, 3 | `retry`    | Within `MAX_RETRIES=3`; a workflow re-run is scheduled after 10 s, 20 s and 40 s of backoff. Because the token is a placeholder, GitHub rejects the re-run request (an error such as `Failed to trigger re-run: 401` appears in the logs after the backoff), which is harmless for this demo |
 | 4       | `rollback` | `retry_count` (4) now exceeds `MAX_RETRIES`, a previous version (`1.0.0`) is known, and the failed version is the one running                                                                                                                                                                   |
 
-The fourth call takes a few seconds: the orchestrator patches the Deployment back to `sample-app:1.0.0`, waits for all replicas to be ready, and calls each pod's `/health` endpoint before answering.
+The fourth call answers at once with *scheduled*. A rollback job then takes the application's lock, patches the Deployment back to `sample-app:1.0.0`, waits for all replicas to be ready and calls each pod's `/health` endpoint; wait for the state to read `rolled_back` (step 7). The queued retry jobs find the deployment has moved on and do nothing, so the placeholder token is never used.
 
 ## 7. Verify the Recovery
 

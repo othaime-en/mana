@@ -30,6 +30,13 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | `HEALTH_CHECK_PATH`    | string | `/health`   | no             | Application health path                                                     |
 | `LOG_LEVEL`            | string | `INFO`      | no             | `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG` (any case); invalid values stop startup |
 | `ENABLE_AUDIT_LOGGING` | bool   | `true`      | no             | `false` silences audit events; they are otherwise independent of `LOG_LEVEL` |
+| `JOB_LEASE_SECONDS`    | float  | `60`        | no             | How long a worker owns a job (and a per-app lock) without renewing it. A job whose worker died is picked up by another replica after this long. Must be `>= 3` |
+| `SCHEDULER_POLL_SECONDS` | float | `1`        | no             | How often each replica looks for due jobs. Must be `> 0`                    |
+| `SCHEDULER_CONCURRENCY` | int   | `4`         | no             | Jobs one replica runs at the same time. Must be `>= 1`                      |
+| `JOB_MAX_ATTEMPTS`     | int    | `5`         | no             | Attempts per job before it is abandoned, the deployment is marked failed and an alert is sent. Must be `>= 1` |
+| `SHUTDOWN_GRACE_SECONDS` | float | `30`       | no             | Time a stopping replica waits for running jobs. Keep it below the pod's `terminationGracePeriodSeconds` (45) |
+| `SLACK_WEBHOOK_URL`    | secret | unset       | no             | Slack incoming webhook for alerts; must be `https://`. Alerts to Slack are off when unset |
+| `ALERT_GITHUB_STATUS`  | bool   | `true`      | no             | Mark the failing commit with a `mana/recovery` status. Needs `GITHUB_TOKEN` and `GITHUB_REPO`; the token needs commit-status write access |
 | `GITHUB_TOKEN`         | secret | unset       | for retries    | Token with permission to re-run workflows                                   |
 | `GITHUB_REPO`          | string | unset       | for retries    | `owner/repo` that owns the workflow                                         |
 | `PORT`                 | int    | `8000`      | no             | Listen port for `python -m src.api` only; the container uses a fixed `8000` |

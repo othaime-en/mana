@@ -223,9 +223,9 @@ kubectl logs -n orchestrator -l app=orchestrator | grep "<deployment-id>"
 ### Redis inspection
 
 ```bash
-kubectl exec -n orchestrator deploy/redis -- redis-cli keys 'deployment:*'
-kubectl exec -n orchestrator deploy/redis -- redis-cli get 'last_successful:production:sample-app'
-kubectl exec -n orchestrator deploy/redis -- redis-cli ttl 'deployment:<deployment-id>'
+kubectl exec -n orchestrator redis-0 -- redis-cli zrevrange mana:recent 0 9
+kubectl exec -n orchestrator redis-0 -- redis-cli get 'last_successful:production:sample-app'
+kubectl exec -n orchestrator redis-0 -- redis-cli ttl 'deployment:<deployment-id>'
 ```
 
 ### Sample app

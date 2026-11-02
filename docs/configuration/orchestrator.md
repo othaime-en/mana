@@ -68,6 +68,38 @@ delay(n) = min(INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(n-1), MAX_BACKOFF)
 
 The worst-case time spent retrying before a rollback is the sum of the backoff delays plus the time each re-run takes. With the defaults that is 70 s of backoff alone. If your target MTTR is under a minute, lower `INITIAL_BACKOFF` and `MAX_RETRIES`.
 
+### Job scheduler
+
+Retries, rollbacks and alerts are not run inside the webhook request. The webhook decides, saves the deployment state and queues a **job** in Redis; every replica runs a scheduler that claims due jobs.
+
+- A claimed job is **leased** for `JOB_LEASE_SECONDS` and the lease is renewed while it runs. If the replica dies, the lease expires and another replica runs the job, so a pod restart during a backoff or a rollback loses nothing. Expect recovery of a killed worker within about one lease (60 s by default).
+- A job that fails is retried with the same exponential backoff as deployments, up to `JOB_MAX_ATTEMPTS`; then the deployment is marked `failed`, an audit event `manual_intervention_required` is written and an alert is sent.
+- GitHub answers 403 or 409 while a run is still in progress and 429 or 5xx under load; those are retried. Other 4xx answers (bad token, unknown run) and a missing `GITHUB_TOKEN` fail the job at once.
+- Rollbacks take a lock per `(namespace, app)`, so two replicas never roll the same application back at the same time. A job that finds the lock taken waits and tries again without using an attempt.
+
+| Variable                 | Default | Constraint | Description                                                      |
+| ------------------------ | ------- | ---------- | ---------------------------------------------------------------- |
+| `JOB_LEASE_SECONDS`      | `60`    | `>= 3`     | Lease on a running job and on the per-app lock                   |
+| `SCHEDULER_POLL_SECONDS` | `1`     | `> 0`      | Polling interval of each replica                                 |
+| `SCHEDULER_CONCURRENCY`  | `4`     | `>= 1`     | Jobs one replica runs at once                                    |
+| `JOB_MAX_ATTEMPTS`       | `5`     | `>= 1`     | Attempts before a job is abandoned                               |
+| `SHUTDOWN_GRACE_SECONDS` | `30`    | `>= 0`     | Wait for running jobs on shutdown; jobs left over are requeued   |
+
+On shutdown a replica first fails `/readyz` (so traffic moves away), stops claiming jobs and waits up to `SHUTDOWN_GRACE_SECONDS`. Use a `terminationGracePeriodSeconds` larger than that.
+
+### Alerts
+
+| Variable              | Default | Description                                                                                  |
+| --------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `SLACK_WEBHOOK_URL`   | unset   | Slack incoming webhook (`https://` only). Kept in a Secret named `slack-webhook`, key `url`  |
+| `ALERT_GITHUB_STATUS` | `true`  | Set a `mana/recovery` commit status; active when `GITHUB_TOKEN` and `GITHUB_REPO` are set    |
+
+```bash
+kubectl -n orchestrator create secret generic slack-webhook --from-literal=url='https://hooks.slack.com/services/...'
+```
+
+Alerts are sent when a rollback completes (warning), when a rollback fails or a job is abandoned, and whenever automatic recovery cannot continue (critical): a missing `workflow_run_id`, no previous version, a build or test failure after retries, or a live version that cannot be read. Retries and skipped rollbacks are not alerted. Each alert is a queued job per channel, so a failing channel is retried without delaying recovery or the other channel and can never change a deployment's outcome. The commit status needs the `commit` the pipeline sends in the webhook metadata, which `scripts/notify-orchestrator.sh` adds from `GITHUB_SHA`.
+
 ### Health checks
 
 | Variable               | Default   | Constraint     | Description                                                          |
@@ -181,6 +213,12 @@ HEALTH_CHECK_TIMEOUT=5
 | `max_retries must be >= 1`                  | `MAX_RETRIES` is 0 or negative                           |
 | `initial_backoff must be > 0`               | `INITIAL_BACKOFF` is 0 or negative                       |
 | `max_backoff must be > initial_backoff`     | `MAX_BACKOFF` is less than or equal to `INITIAL_BACKOFF` |
+| `job_lease_seconds must be >= 3`            | `JOB_LEASE_SECONDS` is below 3                           |
+| `scheduler_poll_seconds must be > 0`        | `SCHEDULER_POLL_SECONDS` is 0 or negative                |
+| `scheduler_concurrency must be >= 1`        | `SCHEDULER_CONCURRENCY` is below 1                       |
+| `job_max_attempts must be >= 1`             | `JOB_MAX_ATTEMPTS` is below 1                            |
+| `shutdown_grace_seconds must be >= 0`       | `SHUTDOWN_GRACE_SECONDS` is negative                     |
+| `SLACK_WEBHOOK_URL must be an https:// URL` | The Slack URL does not start with `https://`             |
 | `backoff_multiplier must be > 1.0`          | `BACKOFF_MULTIPLIER` is 1.0 or less                      |
 | `health_check_timeout must be > 0`          | `HEALTH_CHECK_TIMEOUT` is 0 or negative                  |
 | `health_check_port must be between 1-65535` | `HEALTH_CHECK_PORT` out of range                         |
@@ -193,7 +231,8 @@ Non-numeric values for numeric variables fail earlier with Python's own `ValueEr
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | Replicas          | 2                                                                                                                             | `orchestrator/k8s/deployment.yaml` (the Terraform module's `replicas` variable also defaults to 2) |
 | Requests / limits | 100m CPU, 256Mi / 500m CPU, 512Mi                                                                                             | `orchestrator/k8s/deployment.yaml`                                                                 |
-| Probes            | `GET /health` on 8000, 60 s initial delay, 20 s period                                                                        | `orchestrator/k8s/deployment.yaml`                                                                 |
+| Probes            | startup and liveness `GET /livez`, readiness `GET /readyz`, all on 8000                                                       | `orchestrator/k8s/deployment.yaml`                                                                 |
+| Availability      | `PodDisruptionBudget` `maxUnavailable: 1`, topology spread across nodes, rolling update with `maxUnavailable: 0`, `terminationGracePeriodSeconds: 45` | `orchestrator/k8s/deployment.yaml` |
 | Security context  | `runAsNonRoot`, UID 1000, no privilege escalation, all capabilities dropped, `seccomp` `RuntimeDefault`, read-only root filesystem with an `emptyDir` at `/tmp` | `orchestrator/k8s/deployment.yaml` |
 | RBAC              | per managed namespace (`production`, `staging`, `canary`): `get`, `patch` on Deployments; `list` on ReplicaSets and Pods. No cluster-wide permissions | `orchestrator/k8s/rbac.yaml` |
 

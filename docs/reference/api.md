@@ -15,7 +15,7 @@ export MANA=http://localhost:8000
 | --------- | ---------- |
 | `POST /webhook/deployment` | `X-Mana-Timestamp` (Unix seconds) and `X-Mana-Signature`: `sha256=` followed by the hex HMAC-SHA256 of `<timestamp>.<raw body>` with `WEBHOOK_SECRET`. The timestamp must be within 300 seconds of the server clock |
 | `POST /rollback`, `POST /health-check`, `GET /deployment/{id}`, `GET /deployments/recent`, `GET /deployments/{ns}/{name}/status`, `GET /config` | `X-API-Key` equal to one of the configured `API_KEY` values |
-| `GET /`, `GET /health`, `GET /metrics`, `/docs`, `/redoc`, `/openapi.json` | none (probes and Prometheus; restrict them with the NetworkPolicy) |
+| `GET /`, `GET /health`, `GET /livez`, `GET /readyz`, `GET /metrics`, `/docs`, `/redoc`, `/openapi.json` | none (probes and Prometheus; restrict them with the NetworkPolicy) |
 
 A missing or wrong credential returns `401` with a generic body. The signature is checked before the payload, so a forged request never reaches validation. `WEBHOOK_SECRET` and `API_KEY` accept comma-separated lists: add the new value, update the clients, then remove the old one. A captured, valid webhook can be replayed for up to five minutes; idempotency keys are planned (CORE-06).
 
@@ -41,7 +41,9 @@ The examples below use `$MANA_API_KEY` for operator endpoints and show the webho
 | Method | Path                                                | Purpose                                                                                           |
 | ------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `GET`  | `/`                                                 | Service info and feature list                                                                     |
-| `GET`  | `/health`                                           | Liveness and dependency health                                                                    |
+| `GET`  | `/livez`                                            | Liveness probe (process only)                                                     |
+| `GET`  | `/readyz`                                           | Readiness probe (needs Redis)                                                     |
+| `GET`  | `/health`                                           | Dependency report: Redis and Kubernetes                                                           |
 | `POST` | `/webhook/deployment`                               | Receive deployment events from CI/CD                                                              |
 | `POST` | `/rollback`                                         | Manually roll a Deployment back to a version                                                      |
 | `POST` | `/health-check`                                     | Run a deployment health check on demand                                                           |
@@ -80,9 +82,17 @@ curl -s $MANA/
 
 `github_integration` is `true` only when both `GITHUB_TOKEN` and `GITHUB_REPO` are set.
 
+## `GET /livez`
+
+Returns `{"status": "alive"}` while the process and its event loop respond. It never touches Redis or the API server, so a dependency outage cannot make Kubernetes restart a healthy pod. Used for the container `HEALTHCHECK`, the startup probe and the liveness probe.
+
+## `GET /readyz`
+
+Returns `{"status": "ready"}` when Redis answers, which holds all state and the job queue. Answers `503` with `{"status": "not_ready", "redis": "unhealthy"}` when it does not, and `503` with `{"status": "draining"}` while the replica shuts down. Kubernetes uses it as the readiness probe, so a replica without Redis, or one that is draining, stops receiving webhooks. It does not check Kubernetes or GitHub.
+
 ## `GET /health`
 
-Checks Redis (`PING`) and Kubernetes (`list_namespace(limit=1)`). It always returns HTTP 200; inspect the body for status. This is the endpoint used by the container and Kubernetes probes.
+Reports Redis (`PING`) and Kubernetes (the version endpoint, which needs no cluster-scope permission). HTTP 200 when both are healthy and **503** when either is not; the body is the same in both cases. Use it for humans and monitoring, not for probes.
 
 ```json
 {
@@ -173,7 +183,7 @@ curl -s -X POST $MANA/webhook/deployment \
 | `action`   | Meaning                                                                                      | Other fields                                                   |
 | ---------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | `retry`    | A workflow re-run has been scheduled after the backoff                                       | `retry_count`, `backoff_seconds`, `workflow_run_id`, `message` |
-| `rollback` | Rollback executed and verified healthy                                                       | `previous_version`, `message`                                  |
+| `rollback` | Rollback **scheduled**; it runs as a durable job and the state becomes `rolled_back` (or `failed`) when it finishes | `previous_version`, `message`                                  |
 | `skip`     | The failed version is not the one running, so rolling back would change a healthy Deployment | `live_version`, `message`                                      |
 | `alert`    | Cannot recover automatically (no `workflow_run_id`, no previous version, a build or test failure, the live version could not be checked, or rollback failed) | `message` |
 
@@ -194,10 +204,15 @@ curl -s -X POST $MANA/webhook/deployment \
 | Code  | Cause                                                                                                                                       |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `422` | Missing or mistyped required field, a `status` other than `in_progress`, `success` or `failed`, an unknown `failure_type`, or `status: failed` without a `failure_type` |
+| `409` | An identical signed request is still being processed (see below)                                                                            |
 | `500` | An internal error such as Redis being unavailable                                                                                           |
 
+### Duplicate deliveries
+
+A signed request is identified by its signature. If the same request arrives again within ten minutes, whether replayed, retried by `curl` or delivered to the other replica, MANA does not process it again: it answers with the first response and the header `X-Mana-Duplicate: true` (counted in `mana_webhook_duplicates_total{outcome="replayed"}`). A copy that arrives while the first is still running gets `409` (`outcome="in_flight"`). A request whose processing failed with a 5xx is released, so the sender can retry it. Two different events are never merged: each signed request has its own timestamp, and `scripts/notify-orchestrator.sh` adds a random `metadata.delivery_id`. Without a signature (`AUTH_DISABLED=true`) every request is processed.
+
 !!! note
-The rollback branch runs synchronously inside the request, including the health verification wait (up to 300 s). Configure your CI client's HTTP timeout accordingly, or treat a timeout as "processing" and check `GET /deployment/{id}` afterwards.
+The webhook answers as soon as the decision is saved and the job is queued, so the response time no longer depends on the rollback. To follow a rollback, poll `GET /deployment/{id}` until `status` is `rolled_back` or `failed`.
 
 ---
 
@@ -225,7 +240,7 @@ curl -s -X POST $MANA/rollback \
 }
 ```
 
-Returns `500` if the rollback does not become healthy. The body is `{"detail": "500: Rollback failed"}` (the prefix is an artefact of the endpoint re-wrapping its own `HTTPException`). A successful call increments `rollbacks_total{reason="manual"}`. Manual rollbacks are logged under the generated `manual-rollback-…` ID but do not create a stored state record.
+Returns `409` if another rollback of the same Deployment is running (the lock is shared with the automatic rollbacks), and `500` if the rollback does not become healthy. The body is `{"detail": "500: Rollback failed"}` (the prefix is an artefact of the endpoint re-wrapping its own `HTTPException`). A successful call increments `rollbacks_total{reason="manual"}`. Manual rollbacks are logged under the generated `manual-rollback-…` ID but do not create a stored state record.
 
 ## `POST /health-check`
 
@@ -354,7 +369,7 @@ Shows the values the running process is using, which is the fastest way to confi
 
 ## `GET /metrics`
 
-Prometheus text exposition format, served directly (no redirect). Rendering reads the active-deployment count from Redis, so a scrape fails to include `active_deployments` while Redis is unreachable.
+Prometheus text exposition format, served directly (no redirect). Rendering reads the active-deployment count and the job queue depth from Redis, so a scrape omits those gauges while Redis is unreachable.
 
 ### Application metrics
 
@@ -371,7 +386,14 @@ Prometheus text exposition format, served directly (no redirect). Rendering read
 | `health_check_duration_seconds`      | histogram | `namespace`, `deployment`    | Duration of each deployment health check                                                                     |
 | `webhook_requests_total`             | counter   | `endpoint`, `code`           | Requests to `/webhook/*` by HTTP status                                                                      |
 | `webhook_errors_total`               | counter   | `endpoint`, `reason`         | Webhook requests answered with an error (`validation` for 422, `server_error` for 5xx, `client_error`)      |
-| `redis_connection_errors_total`      | counter   |                              | Redis calls that failed with a connection or timeout error                                                   |
+| `redis_connection_errors_total`      | counter   |                              | Redis calls (including queue scripts) that failed with a connection or timeout error                         |
+| `mana_scheduler_pending_jobs`        | gauge     |                              | Jobs waiting to run, read from Redis at scrape time (use `max`)                                              |
+| `mana_scheduler_inflight_jobs`       | gauge     |                              | Jobs claimed by a worker                                                                                     |
+| `mana_scheduler_overdue_seconds`     | gauge     |                              | How long the oldest due job has waited; grows when no replica works the queue                                |
+| `mana_scheduler_jobs_total`          | counter   | `kind`, `outcome`            | Job executions: `completed`, `retried`, `deferred`, `dead`, `lease_expired`                                  |
+| `mana_github_api_requests_total`     | counter   | `endpoint`, `code`           | GitHub calls (`rerun`, `status`) by HTTP status, or `error` when none came back                              |
+| `mana_alerts_sent_total`             | counter   | `channel`, `outcome`         | Alert deliveries: `sent`, `skipped` (no commit for a status), `failed`                                       |
+| `mana_webhook_duplicates_total`      | counter   | `outcome`                    | Webhook copies dropped: `replayed` or `in_flight`                                                            |
 
 A failure for a deployment that is already `failed` (for example a fifth failure webhook) is not counted again, and a re-run that reopens a finished deployment and settles again is counted again. Build and test failures reported with `namespace: ci` are counted as `failed` in that namespace (CORE-14).
 

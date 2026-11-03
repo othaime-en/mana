@@ -56,6 +56,8 @@ class OrchestratorConfig:
     slack_webhook_url: Optional[str] = field(default=None, repr=False)
     alert_github_status: bool = True
     
+    policy_file: str = ''
+    
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
         """Load configuration from environment variables"""
@@ -106,7 +108,10 @@ class OrchestratorConfig:
             
             # Alert delivery
             slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL') or None,
-            alert_github_status=os.getenv('ALERT_GITHUB_STATUS', 'true').lower() != 'false'
+            alert_github_status=os.getenv('ALERT_GITHUB_STATUS', 'true').lower() != 'false',
+            
+            # Recovery policy
+            policy_file=os.getenv('POLICY_FILE', '')
         )
     
     def redis_client_kwargs(self) -> Dict[str, Any]:
@@ -164,6 +169,9 @@ class OrchestratorConfig:
         
         if self.slack_webhook_url and not self.slack_webhook_url.startswith('https://'):
             raise ValueError("SLACK_WEBHOOK_URL must be an https:// URL")
+        
+        if self.policy_file and not os.path.isfile(self.policy_file):
+            raise ValueError(f"POLICY_FILE not found: {self.policy_file}")
         
         if self.redis_tls_ca_file and not self.redis_tls:
             raise ValueError("redis_tls_ca_file requires REDIS_TLS=true")

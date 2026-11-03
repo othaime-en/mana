@@ -196,3 +196,28 @@ def test_orchestrator_tests_run_against_a_real_redis_that_cannot_be_skipped():
     assert job["env"]["MANA_TEST_REDIS_URL"].startswith("redis://localhost:6379")
     gate = next(s["run"] for s in job["steps"] if "pytest" in s.get("run", ""))
     assert int(re.search(r"--cov-fail-under=(\d+)", gate).group(1)) >= 85
+
+
+def deploy_steps() -> dict:
+    import yaml
+
+    (job,) = yaml.safe_load(workflow_text("deploy-environment.yml"))["jobs"].values()
+    return {step.get("id") or step["name"]: (index, step) for index, step in enumerate(job["steps"])}
+
+
+def test_a_denied_version_is_refused_before_anything_is_deployed():
+    steps = deploy_steps()
+    start_index, start = steps["start"]
+    refuse_index, refuse = steps["Refuse a denied version"]
+
+    assert start["run"] == "scripts/notify-orchestrator.sh"
+    assert start["env"]["MANA_STATUS"] == "in_progress"
+    assert refuse["if"] == "steps.start.outputs.denied == 'true'"
+    assert start_index < refuse_index < steps["deploy"][0]
+
+
+def test_a_refused_version_reports_no_result_that_could_start_retries():
+    steps = deploy_steps()
+
+    assert "steps.start.outputs.denied != 'true'" in steps["status"][1]["if"]
+    assert "steps.start.outputs.denied != 'true'" in steps["Notify deployment result"][1]["if"]

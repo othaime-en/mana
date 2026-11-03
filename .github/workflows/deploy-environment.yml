@@ -73,6 +73,7 @@ jobs:
           KUBECONFIG="$RUNNER_TEMP/kubeconfig" kubectl cluster-info
 
       - name: Notify deployment start
+        id: start
         if: env.ORCHESTRATOR_URL != ''
         continue-on-error: true
         env:
@@ -83,6 +84,14 @@ jobs:
           MANA_STATUS: in_progress
           MANA_WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: scripts/notify-orchestrator.sh
+
+      - name: Refuse a denied version
+        if: steps.start.outputs.denied == 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "::error::Version ${VERSION} was rolled back earlier and is on the orchestrator deny-list. Deploy a new version, or lift the denial with DELETE /denied-versions/<namespace>/<app>/<version>."
+          exit 1
 
       - name: Deploy application
         id: deploy
@@ -153,7 +162,7 @@ jobs:
 
       - name: Determine deployment status
         id: status
-        if: always()
+        if: always() && steps.start.outputs.denied != 'true'
         run: |
           if [ "${{ steps.deploy.outcome }}" == "success" ] && \
              [ "${{ steps.health.outcome }}" == "success" ] && \
@@ -172,7 +181,7 @@ jobs:
           fi
 
       - name: Notify deployment result
-        if: always() && env.ORCHESTRATOR_URL != ''
+        if: always() && env.ORCHESTRATOR_URL != '' && steps.start.outputs.denied != 'true'
         continue-on-error: true
         env:
           MANA_WEBHOOK_SECRET: ${{ secrets.MANA_WEBHOOK_SECRET }}

@@ -26,7 +26,9 @@ the metadata when present. Every invocation adds a random delivery_id, so two
 notifications are never byte-identical, while curl's own retries resend the same
 body and are recognised by the orchestrator as copies. The body is signed as HMAC-SHA256 over
 "<unix timestamp>.<body>" and sent with X-Mana-Timestamp and X-Mana-Signature.
-Exit status is 1 when the orchestrator cannot be notified.
+Exit status is 1 when the orchestrator cannot be notified, and 3 when it answers
+that the version is on the deny-list (it was rolled back earlier and must not be
+deployed). On GitHub Actions that answer also sets the step output denied=true.
 USAGE
 }
 
@@ -103,12 +105,24 @@ key = os.environ["MANA_WEBHOOK_SECRET"].encode()
 print("sha256=" + hmac.new(key, sys.stdin.buffer.read(), hashlib.sha256).hexdigest())
 ')"
 
-curl --fail-with-body --silent --show-error \
+if ! response="$(curl --fail-with-body --silent --show-error \
   --connect-timeout 10 --max-time 360 --retry 2 --retry-connrefused \
   --request POST "${ORCHESTRATOR_URL%/}/webhook/deployment" \
   --header "Content-Type: application/json" \
   --header "X-Mana-Timestamp: ${timestamp}" \
   --header "X-Mana-Signature: ${signature}" \
-  --data-binary "$body" \
-  || fail "orchestrator did not accept the ${MANA_STATUS} event for ${MANA_DEPLOYMENT_ID}"
-echo
+  --data-binary "$body")"; then
+  printf '%s\n' "$response" >&2
+  fail "orchestrator did not accept the ${MANA_STATUS} event for ${MANA_DEPLOYMENT_ID}"
+fi
+printf '%s\n' "$response"
+
+if [[ "$(printf '%s' "$response" | jq -r '.status? // empty' 2>/dev/null)" == "denied" ]]; then
+  message="$(printf '%s' "$response" | jq -r '.message // "version is on the deny-list"')"
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "::error::${message}"
+    [[ -z "${GITHUB_OUTPUT:-}" ]] || echo "denied=true" >> "$GITHUB_OUTPUT"
+  fi
+  echo "Error: ${message}" >&2
+  exit 3
+fi

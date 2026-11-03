@@ -29,6 +29,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   esac
 done
 echo "$*" > "$STUB_DIR/argv"
+if [ -n "${STUB_BODY:-}" ]; then printf '%s' "$STUB_BODY"; fi
 exit "${STUB_EXIT:-0}"
 """
 
@@ -163,3 +164,55 @@ def test_a_rejected_webhook_fails_the_script_with_an_annotation(run):
     result, _ = run(STUB_EXIT="22", GITHUB_ACTIONS="true")
     assert result.returncode == 1
     assert "::warning::Mana webhook not delivered" in result.stdout
+
+
+DENIED = json.dumps({
+    "status": "denied", "deployment_id": "deploy-1-production",
+    "message": "Version v1a2b3c4 was rolled back earlier and is on the deny-list; do not deploy it",
+})
+
+
+def test_a_denied_answer_fails_with_exit_status_3(run):
+    result, _ = run(STUB_BODY=DENIED)
+
+    assert result.returncode == 3
+    assert "deny-list" in result.stderr
+    assert DENIED in result.stdout
+
+
+def test_on_github_actions_a_denied_answer_sets_the_step_output(run, tmp_path):
+    output = tmp_path / "github_output"
+    result, _ = run(STUB_BODY=DENIED, GITHUB_ACTIONS="true", GITHUB_OUTPUT=str(output))
+
+    assert result.returncode == 3
+    assert output.read_text() == "denied=true\n"
+    assert "::error::Version v1a2b3c4 was rolled back earlier" in result.stdout
+
+
+def test_outside_github_actions_no_output_file_is_needed(run, tmp_path):
+    output = tmp_path / "github_output"
+    result, _ = run(STUB_BODY=DENIED, GITHUB_OUTPUT=str(output))
+
+    assert result.returncode == 3
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("answer", [
+    '{"status": "acknowledged", "deployment_id": "deploy-1-production"}',
+    '{"status": "processed"}',
+    "<html>not json</html>",
+])
+def test_every_other_answer_succeeds_without_a_denial(run, tmp_path, answer):
+    output = tmp_path / "github_output"
+    result, _ = run(STUB_BODY=answer, GITHUB_ACTIONS="true", GITHUB_OUTPUT=str(output))
+
+    assert result.returncode == 0, result.stderr
+    assert answer in result.stdout
+    assert not output.exists()
+
+
+def test_a_rejected_request_prints_the_body_and_fails(run):
+    result, _ = run(STUB_EXIT="22", STUB_BODY='{"detail": "Invalid or missing webhook signature"}')
+
+    assert result.returncode == 1
+    assert "Invalid or missing webhook signature" in result.stderr

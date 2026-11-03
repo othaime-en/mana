@@ -571,3 +571,42 @@ async def test_health_reports_503_when_degraded_and_200_when_healthy(api):
 
     assert (healthy.status_code, healthy.json()["status"]) == (200, "healthy")
     assert (degraded.status_code, degraded.json()["status"], degraded.json()["redis"]) == (503, "degraded", "unhealthy")
+
+
+def test_the_watcher_is_built_only_when_enabled(api, monkeypatch):
+    monkeypatch.setattr(api._config, "watcher_enabled", False)
+    assert api.build_watcher() is None
+
+    monkeypatch.setattr(api._config, "watcher_enabled", True)
+    monkeypatch.setattr(api._config, "watcher_namespaces", "production,staging")
+    watcher = api.build_watcher()
+
+    assert watcher._namespaces == ["production", "staging"]
+    assert (watcher._interval, watcher._stuck_seconds) == (
+        api._config.watcher_interval_seconds, api._config.watcher_stuck_seconds
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_enabled_watcher_runs_for_the_life_of_the_app_and_stops_with_it(api, monkeypatch):
+    runs = []
+
+    class FakeWatcher:
+        def __init__(self):
+            self.stopped = asyncio.Event()
+
+        async def run(self):
+            runs.append("started")
+            await self.stopped.wait()
+            runs.append("stopped")
+
+        def stop(self):
+            self.stopped.set()
+
+    monkeypatch.setattr(api, "build_watcher", lambda: FakeWatcher())
+
+    async with api.lifespan(api.app):
+        await asyncio.sleep(0.05)
+        assert runs == ["started"]
+
+    assert runs == ["started", "stopped"]

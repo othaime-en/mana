@@ -159,6 +159,19 @@ groups:
           description: "An application in {{ $labels.namespace }} rolled back more often than the circuit breaker allows, so a failure was left to a person instead of being rolled back again. Look at GET /deployments/<namespace>/<app>/status for the breaker and the frozen versions."
           runbook_url: "https://docs.example.com/runbooks/circuit-breaker-open"
 
+      # Warning: The cluster-side watcher cannot list Deployments
+      - alert: WatcherScanFailing
+        expr: |
+          sum(increase(mana_watcher_scans_total{outcome="error"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "The rollout watcher cannot list Deployments"
+          description: "The watcher has failed to list Deployments for 10 minutes, so stuck rollouts without a webhook go unnoticed. Check that the orchestrator Role in each WATCHER_NAMESPACES namespace allows `list` on deployments and that the namespaces exist."
+          runbook_url: "https://docs.example.com/runbooks/watcher-scan-failing"
+
       # Warning: High webhook failure rate
       - alert: HighWebhookFailureRate
         expr: |

@@ -132,6 +132,7 @@ SRC = ROOT / "orchestrator" / "src"
 
 API_CALLS = {
     "read_namespaced_deployment": ("apps", "deployments", "get"),
+    "list_namespaced_deployment": ("apps", "deployments", "list"),
     "patch_namespaced_deployment": ("apps", "deployments", "patch"),
     "list_namespaced_replica_set": ("apps", "replicasets", "list"),
     "list_namespaced_pod": ("", "pods", "list"),
@@ -186,7 +187,7 @@ def test_role_grants_exactly_what_the_code_calls(namespace):
 
 def test_terraform_roles_match_the_manifest_rules():
     text = (ROOT / "terraform" / "modules" / "orchestrator" / "main.tf").read_text()
-    for verbs in ('["get", "patch"]', '["list"]'):
+    for verbs in ('["get", "list", "patch"]', '["list"]'):
         assert verbs in text
     for forbidden in ('"update"', '"watch"', '"*"', '"create"', '"delete"'):
         assert forbidden not in text.split('resource "kubernetes_role" "orchestrator"')[1].split("resource \"kubernetes_config_map\"")[0]
@@ -381,3 +382,9 @@ def test_terraform_mirrors_the_durability_changes():
     for module in ("orchestrator", "sample-app"):
         text = (modules / module / "main.tf").read_text()
         assert 'max_unavailable = "1"' in text and "min_available" not in text
+
+
+def test_the_sample_app_opts_in_to_cluster_side_watching():
+    labels = workload("sample-app")["metadata"]["labels"]
+
+    assert labels["mana.io/managed"] == "true"

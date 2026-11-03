@@ -8,7 +8,7 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "list", "patch"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["list"]
@@ -38,7 +38,7 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "list", "patch"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["list"]
@@ -68,7 +68,7 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "list", "patch"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["list"]

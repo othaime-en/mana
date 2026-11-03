@@ -29,7 +29,7 @@ resource "kubernetes_role" "orchestrator" {
   rule {
     api_groups = ["apps"]
     resources  = ["deployments"]
-    verbs      = ["get", "patch"]
+    verbs      = ["get", "list", "patch"]
   }
 
   rule {

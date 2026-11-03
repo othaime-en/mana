@@ -20,6 +20,7 @@ from src.deliveries import Deliveries
 from src.jobs import Scheduler
 from src.logging_config import configure_logging
 from src.utils import get_audit_logger
+from src.watcher import Watcher
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from src import metrics
 import logging
@@ -49,16 +50,33 @@ def build_scheduler() -> Scheduler:
     )
 
 
+def build_watcher() -> Optional[Watcher]:
+    """The cluster-side watcher, when WATCHER_ENABLED is set"""
+    if not _config.watcher_enabled:
+        return None
+    return Watcher(
+        orchestrator,
+        _config.watched_namespaces(),
+        _config.watcher_interval_seconds,
+        _config.watcher_stuck_seconds
+    )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Run the scheduler for the life of the process; drain it on shutdown"""
     scheduler = build_scheduler()
     worker = asyncio.create_task(scheduler.run(), name="scheduler")
+    watcher = build_watcher()
+    watching = asyncio.create_task(watcher.run(), name="watcher") if watcher else None
     _app.state.draining = False
     try:
         yield
     finally:
         _app.state.draining = True
+        if watcher:
+            watcher.stop()
+            await watching
         await scheduler.stop(_config.shutdown_grace_seconds)
         await worker
 

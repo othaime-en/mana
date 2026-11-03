@@ -74,6 +74,16 @@ circuit_breaker_trips_total = Counter(
     'Rollbacks not scheduled because the application already rolled back too often',
     ['namespace']
 )
+watcher_scans_total = Counter(
+    'mana_watcher_scans_total',
+    'Watcher passes over one namespace, by whether the Deployments could be listed',
+    ['outcome']
+)
+watcher_detections_total = Counter(
+    'mana_watcher_detections_total',
+    'Stuck rollouts the watcher found and sent through the recovery policy',
+    ['namespace', 'reason']
+)
 health_check_duration_seconds = Histogram(
     'health_check_duration_seconds',
     'Health check duration in seconds',

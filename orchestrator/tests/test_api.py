@@ -193,7 +193,7 @@ async def test_first_failed_webhook_retries_when_workflow_run_id_sent(api):
             )
             failed = await client.post(
                 "/webhook/deployment",
-                json=webhook_body("failed", metadata, "health_check_failure"),
+                json=webhook_body("failed", metadata, "deployment_failure"),
             )
             await asyncio.sleep(0)
             state = await client.get("/deployment/deploy-first-failure")
@@ -238,14 +238,15 @@ async def post_webhook(api, body):
 
 
 @pytest.mark.asyncio
-async def test_smoke_test_failure_is_accepted_and_handled(api):
-    response = await post_webhook(
-        api,
-        webhook_body("failed", {"workflow_run_id": "1"}, "smoke_test_failure"),
-    )
+async def test_smoke_test_failure_is_accepted_and_rolls_back_at_once(api):
+    with patch.object(api.orchestrator, "get_live_version", return_value="1.0.0"):
+        response = await post_webhook(
+            api,
+            webhook_body("failed", {"workflow_run_id": "1"}, "smoke_test_failure"),
+        )
 
     assert response.status_code == 200
-    assert response.json()["action_taken"]["action"] == "retry"
+    assert response.json()["action_taken"]["action"] == "rollback"
 
 
 @pytest.mark.asyncio

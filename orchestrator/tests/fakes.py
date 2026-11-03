@@ -1,4 +1,11 @@
 from src.jobs import Job, QueueStats
+from src.policy import DEFAULT_POLICY, Policy
+
+
+def retry_policy(attempts=3, failure_type="deployment_failure", then="rollback"):
+    """The default policy with one failure type retried a given number of times first"""
+    default = {**DEFAULT_POLICY["default"], failure_type: {"action": "retry", "max_attempts": attempts, "then": then}}
+    return Policy.model_validate({**DEFAULT_POLICY, "default": default})
 
 
 class FakeJobQueue:

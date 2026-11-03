@@ -19,8 +19,10 @@ from src import metrics
 from src.utils import get_audit_logger, AuditAction, split_image_reference, with_tag
 from src.alerts import Alert, Alerter, GitHubStatusChannel, SlackChannel, JOB_NOTIFY
 from src.config import get_config
+from src.diagnosis import Diagnosis, diagnose
 from src.jobs import Job, JobDeferred, JobQueue, PermanentJobError
 from src.locks import AppLocks
+from src.policy import Action, Decision, Reason, decide, load_policy
 
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,7 @@ class DeploymentState:
     started_at: Optional[float] = None
     first_failure_at: Optional[float] = None
     finished_at: Optional[float] = None
+    diagnosis: Optional[str] = None
 
 
 @dataclass
@@ -194,6 +197,8 @@ class SelfHealingOrchestrator:
             self.health_check_port = cfg.health_check_port
             self.health_check_path = cfg.health_check_path
             self.max_app_health_failures = 3  # Allow 3 consecutive app health failures
+            self.health_poll_seconds = cfg.health_poll_seconds
+            self.policy = load_policy(cfg.policy_file)
             self.lock_ttl = cfg.job_lease_seconds
             slack_webhook_url = cfg.slack_webhook_url
             alert_github_status = cfg.alert_github_status
@@ -213,6 +218,8 @@ class SelfHealingOrchestrator:
             self.health_check_port = 5000
             self.health_check_path = '/health'
             self.max_app_health_failures = 3
+            self.health_poll_seconds = 5.0
+            self.policy = load_policy()
             self.lock_ttl = 60.0
             slack_webhook_url = None
             alert_github_status = False
@@ -771,7 +778,7 @@ class SelfHealingOrchestrator:
                     f"Waiting for deployment {deployment_name}: "
                     f"{ready_replicas}/{replicas} pods ready"
                 )
-                time.sleep(10)
+                time.sleep(self.health_poll_seconds)
                 
             except ApiException as e:
                 logger.error(f"Error checking deployment health: {e}")
@@ -943,7 +950,8 @@ class SelfHealingOrchestrator:
         deployment_name: str,
         target_version: str,
         deployment_id: Optional[str] = None,
-        reason: str = "retries exhausted"
+        reason: str = "retries exhausted",
+        timeout: int = 300
     ) -> bool:
         """
         Rollback deployment to a previous version with full audit trail
@@ -1006,6 +1014,7 @@ class SelfHealingOrchestrator:
             if self.check_deployment_health(
                 namespace,
                 deployment_name,
+                timeout=timeout,
                 deployment_id=deployment_id,
                 expected_generation=patched.metadata.generation
             ):
@@ -1214,7 +1223,8 @@ class SelfHealingOrchestrator:
                 namespace,
                 deployment_name,
                 target_version,
-                deployment_id=state.deployment_id
+                deployment_id=state.deployment_id,
+                timeout=payload.get("verify_timeout_seconds", 300)
             )
             
             if success:
@@ -1277,6 +1287,32 @@ class SelfHealingOrchestrator:
             reason=f"{job.kind} job abandoned after {job.attempts} attempts: {error}"
         )
     
+    def diagnose_failure(
+        self,
+        namespace: str,
+        deployment_name: str,
+        version: str
+    ) -> Optional[Diagnosis]:
+        """
+        Read the pods and the Deployment and say why the rollout failed
+
+        Best effort: the diagnosis only refines a decision, so any trouble
+        reading the cluster means no diagnosis and the policy applies as written.
+        """
+        try:
+            pods = self.k8s_core.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=f"app={deployment_name}"
+            )
+            deployment = self.k8s_apps.read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace
+            )
+            return diagnose(pods.items, deployment, version)
+        except Exception as e:  # noqa: BLE001 - never let diagnosis block recovery
+            logger.warning(f"Could not diagnose {namespace}/{deployment_name}: {e}")
+            return None
+    
     async def handle_deployment_failure(
         self,
         deployment_id: str,
@@ -1334,157 +1370,177 @@ class SelfHealingOrchestrator:
         
         if state.first_failure_at is None:
             state.first_failure_at = time.time()
+            metrics.record_detection(
+                namespace, deployment_name, state.started_at, state.first_failure_at
+            )
         
         state.retry_count += 1
         state.failure_type = failure_type
         
-        # Decision logic with exponential backoff
-        if state.retry_count <= self.max_retries:
-            # Calculate backoff delay
-            backoff_delay = self.calculate_backoff(state.retry_count)
-            
-            # Get workflow run ID from metadata
-            workflow_run_id = state.metadata.get('workflow_run_id')
-            if not workflow_run_id:
-                logger.error(
-                    "No workflow_run_id in metadata - cannot trigger retry. "
-                    "Ensure GitHub Actions webhook includes workflow_run_id."
-                )
-                
-                self._observe_decision(decision_started)
-                
-                # Fall back to alert
-                state.status = DeploymentStatus.FAILED
-                await asyncio.to_thread(self.save_deployment_state, state)
-                
-                audit_logger.log_manual_intervention_required(
-                    deployment_id=deployment_id,
-                    namespace=namespace,
-                    deployment_name=deployment_name,
-                    version=version,
-                    reason="Cannot retry - missing workflow_run_id in metadata"
-                )
-                await asyncio.to_thread(
-                    self._notify, state, "manual_intervention", "critical",
-                    f"{deployment_name} {version} failed in {namespace}: manual intervention needed",
-                    "The failure webhook carried no workflow_run_id, so the workflow cannot be re-run."
-                )
-                
-                return {
-                    'action': 'alert',
-                    'message': 'Cannot retry - missing workflow_run_id. Manual intervention required.'
-                }
-            
-            # Retry deployment
-            logger.info(
-                f"Retrying deployment (attempt {state.retry_count}/{self.max_retries}) "
-                f"with {backoff_delay}s backoff"
+        diagnosis = None
+        if failure_type not in NON_ROLLBACK_FAILURES:
+            diagnosis = await asyncio.to_thread(
+                self.diagnose_failure, namespace, deployment_name, version
             )
-            
-            audit_logger.log_retry_initiated(
-                deployment_id=deployment_id,
-                namespace=namespace,
-                deployment_name=deployment_name,
-                version=version,
-                retry_count=state.retry_count,
-                backoff_seconds=backoff_delay
-            )
-            
-            self._observe_decision(decision_started)
-            
-            state.status = DeploymentStatus.RETRY_SCHEDULED
-            await asyncio.to_thread(self.save_deployment_state, state)
-            await asyncio.to_thread(
-                self.jobs.enqueue,
-                JOB_RETRY_RERUN,
-                {
-                    'deployment_id': deployment_id,
-                    'workflow_run_id': workflow_run_id,
-                    'retry_count': state.retry_count
-                },
-                backoff_delay,
-                f"{JOB_RETRY_RERUN}:{deployment_id}:{state.retry_count}"
-            )
-            
-            return {
-                'action': 'retry',
-                'retry_count': state.retry_count,
-                'backoff_seconds': backoff_delay,
-                'workflow_run_id': workflow_run_id,
-                'message': (
-                    f'Retry {state.retry_count}/{self.max_retries} scheduled '
-                    f'in {backoff_delay}s'
-                )
-            }
+            if diagnosis:
+                state.diagnosis = diagnosis.reason
+                metrics.failure_diagnoses_total.labels(
+                    namespace=namespace, reason=diagnosis.metric_reason
+                ).inc()
         
-        elif failure_type in NON_ROLLBACK_FAILURES:
-            reason = (
-                f"{failure_type.value} happened before anything was deployed, "
-                f"so there is nothing to roll back"
-            )
-            self._observe_decision(decision_started)
-            return await asyncio.to_thread(self._alert, state, version, reason)
+        rule = self.policy.rule_for(
+            namespace, deployment_name, failure_type.value
+        ).capped(self.max_retries)
+        workflow_run_id = state.metadata.get('workflow_run_id')
+        decision = decide(
+            rule,
+            state.retry_count,
+            can_retry=bool(workflow_run_id),
+            has_rollback_target=bool(state.previous_version) and state.previous_version != version,
+            diagnosis=diagnosis
+        )
+        metrics.policy_decisions_total.labels(
+            failure_type=failure_type.value,
+            action=decision.action.value,
+            reason=decision.reason.value
+        ).inc()
+        audit_logger.log_policy_decision(
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            failure_type=failure_type.value,
+            attempt=state.retry_count,
+            decision=decision.action.value,
+            reason=decision.reason.value,
+            detail=decision.detail,
+            diagnosis=state.diagnosis
+        )
         
-        elif state.previous_version:
+        if decision.action is Action.RETRY:
+            self._observe_decision(decision_started)
+            return await self._schedule_retry(state, rule.max_attempts, workflow_run_id)
+        
+        if decision.action is Action.ROLLBACK:
             blocked = await asyncio.to_thread(self._assess_rollback, state, version)
             self._observe_decision(decision_started)
             if blocked:
                 return blocked
-            
-            logger.warning(
-                f"Max retries exceeded ({state.retry_count}), "
-                f"scheduling rollback to {state.previous_version}"
-            )
-            
-            state.status = DeploymentStatus.ROLLING_BACK
-            await asyncio.to_thread(self.save_deployment_state, state)
-            await asyncio.to_thread(
-                self.jobs.enqueue,
-                JOB_ROLLBACK,
-                {
-                    'deployment_id': deployment_id,
-                    'namespace': namespace,
-                    'deployment_name': deployment_name,
-                    'version': version,
-                    'target_version': state.previous_version
-                },
-                0,
-                f"{JOB_ROLLBACK}:{deployment_id}:{state.retry_count}"
-            )
-            
-            return {
-                'action': 'rollback',
-                'previous_version': state.previous_version,
-                'message': f'Rollback to version {state.previous_version} scheduled'
-            }
+            return await self._schedule_rollback(state, version)
         
+        self._observe_decision(decision_started)
+        return await asyncio.to_thread(
+            self._alert, state, version, self._alert_reason(state, failure_type, decision)
+        )
+    
+    async def _schedule_retry(
+        self,
+        state: DeploymentState,
+        max_attempts: int,
+        workflow_run_id: str
+    ) -> Dict:
+        """Save the retry decision and queue the workflow re-run after its backoff"""
+        backoff_delay = self.calculate_backoff(state.retry_count)
+        logger.info(
+            f"Retrying deployment (attempt {state.retry_count}/{max_attempts}) "
+            f"with {backoff_delay}s backoff"
+        )
+        
+        audit_logger.log_retry_initiated(
+            deployment_id=state.deployment_id,
+            namespace=state.namespace,
+            deployment_name=state.app_name,
+            version=state.version,
+            retry_count=state.retry_count,
+            backoff_seconds=backoff_delay
+        )
+        
+        state.status = DeploymentStatus.RETRY_SCHEDULED
+        await asyncio.to_thread(self.save_deployment_state, state)
+        await asyncio.to_thread(
+            self.jobs.enqueue,
+            JOB_RETRY_RERUN,
+            {
+                'deployment_id': state.deployment_id,
+                'workflow_run_id': workflow_run_id,
+                'retry_count': state.retry_count
+            },
+            backoff_delay,
+            f"{JOB_RETRY_RERUN}:{state.deployment_id}:{state.retry_count}"
+        )
+        
+        return {
+            'action': 'retry',
+            'retry_count': state.retry_count,
+            'backoff_seconds': backoff_delay,
+            'workflow_run_id': workflow_run_id,
+            'message': (
+                f'Retry {state.retry_count}/{max_attempts} scheduled '
+                f'in {backoff_delay}s'
+            )
+        }
+    
+    async def _schedule_rollback(self, state: DeploymentState, version: str) -> Dict:
+        """Save the rollback decision and queue the rollback job, due at once"""
+        logger.warning(
+            f"Scheduling rollback of {state.app_name} {version} to {state.previous_version} "
+            f"after failure {state.retry_count}"
+        )
+        
+        state.status = DeploymentStatus.ROLLING_BACK
+        await asyncio.to_thread(self.save_deployment_state, state)
+        await asyncio.to_thread(
+            self.jobs.enqueue,
+            JOB_ROLLBACK,
+            {
+                'deployment_id': state.deployment_id,
+                'namespace': state.namespace,
+                'deployment_name': state.app_name,
+                'version': version,
+                'target_version': state.previous_version,
+                'verify_timeout_seconds': self.policy.rollback.verify_timeout_seconds
+            },
+            0,
+            f"{JOB_ROLLBACK}:{state.deployment_id}:{state.retry_count}"
+        )
+        
+        return {
+            'action': 'rollback',
+            'previous_version': state.previous_version,
+            'message': f'Rollback to version {state.previous_version} scheduled'
+        }
+    
+    @staticmethod
+    def _alert_reason(
+        state: DeploymentState,
+        failure_type: FailureType,
+        decision: Decision
+    ) -> str:
+        """The sentence that tells a human why Mana is not recovering by itself"""
+        name = failure_type.value
+        if decision.reason is Reason.NO_ROLLBACK_TARGET:
+            text = (
+                "The last successful version is the failed version, so there is "
+                "nothing to roll back to"
+                if state.previous_version and state.previous_version == state.version
+                else "No previous version is known, so there is nothing to roll back to"
+            )
+        elif failure_type in NON_ROLLBACK_FAILURES:
+            text = (
+                f"{name} happened before anything was deployed, so there is "
+                f"nothing to roll back"
+            )
+        elif decision.reason is Reason.RETRY_UNAVAILABLE:
+            text = "Cannot retry - the failure webhook carried no workflow_run_id"
+        elif decision.reason is Reason.DETERMINISTIC:
+            text = f"{decision.detail}, and the policy does not allow a rollback"
+        elif decision.reason is Reason.RETRIES_EXHAUSTED:
+            text = f"{name} retries are used up and the policy does not allow a rollback"
         else:
-            # No previous version or other issues - alert
-            logger.critical(
-                f"Cannot auto-recover deployment {deployment_id} - "
-                f"no previous version available"
-            )
-            self._observe_decision(decision_started)
-            state.status = DeploymentStatus.FAILED
-            await asyncio.to_thread(self.save_deployment_state, state)
-            
-            audit_logger.log_manual_intervention_required(
-                deployment_id=deployment_id,
-                namespace=namespace,
-                deployment_name=deployment_name,
-                version=version,
-                reason="No previous version available for rollback"
-            )
-            await asyncio.to_thread(
-                self._notify, state, "manual_intervention", "critical",
-                f"{deployment_name} {version} failed in {namespace}: manual intervention needed",
-                "No previous version is known, so there is nothing to roll back to."
-            )
-            
-            return {
-                'action': 'alert',
-                'message': 'No previous version available - manual intervention required'
-            }
+            text = f"The policy for {name} is to alert"
+        if state.diagnosis and state.diagnosis not in text:
+            text += f" (diagnosis: {state.diagnosis})"
+        return text
     
     @staticmethod
     def _observe_decision(started: float) -> None:

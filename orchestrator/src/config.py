@@ -57,6 +57,7 @@ class OrchestratorConfig:
     alert_github_status: bool = True
     
     policy_file: str = ''
+    health_poll_seconds: float = 5.0
     
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
@@ -111,7 +112,8 @@ class OrchestratorConfig:
             alert_github_status=os.getenv('ALERT_GITHUB_STATUS', 'true').lower() != 'false',
             
             # Recovery policy
-            policy_file=os.getenv('POLICY_FILE', '')
+            policy_file=os.getenv('POLICY_FILE', ''),
+            health_poll_seconds=float(os.getenv('HEALTH_POLL_SECONDS', '5'))
         )
     
     def redis_client_kwargs(self) -> Dict[str, Any]:
@@ -151,6 +153,9 @@ class OrchestratorConfig:
         
         if self.health_check_port < 1 or self.health_check_port > 65535:
             raise ValueError("health_check_port must be between 1-65535")
+        
+        if self.health_poll_seconds <= 0:
+            raise ValueError("health_poll_seconds must be > 0")
         
         if self.job_lease_seconds < 3:
             raise ValueError("job_lease_seconds must be >= 3")

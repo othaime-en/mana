@@ -187,3 +187,28 @@ async def test_a_job_that_never_succeeds_ends_as_a_failed_deployment(real_redis)
     await task
 
     assert orch.jobs.stats().pending == orch.jobs.stats().inflight == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_health_check_rolls_back_at_once_without_any_backoff(real_redis):
+    cluster = Cluster()
+    orch = replica(real_redis, cluster)
+    orch.initial_backoff = 30.0
+    worker = scheduler_for(orch)
+    task = asyncio.create_task(worker.run())
+    started = time.monotonic()
+
+    decision = await orch.handle_deployment_failure(
+        "d1", "production", "sample-app", "v2", FailureType.HEALTH_CHECK_FAILURE, {"workflow_run_id": "9"}
+    )
+    settled = await until(
+        lambda: orch.get_deployment_state("d1").status is DeploymentStatus.ROLLED_BACK
+    )
+    elapsed = time.monotonic() - started
+    await worker.stop(5)
+    await task
+
+    assert decision["action"] == "rollback"
+    assert settled
+    assert elapsed < 5
+    assert cluster.patches == [("d1", "v1")]

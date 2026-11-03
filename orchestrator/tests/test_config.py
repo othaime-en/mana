@@ -270,3 +270,22 @@ class TestSchedulerSettings:
 
         with pytest.raises(ValueError):
             OrchestratorConfig.from_env().validate()
+
+
+class TestHealthPoll:
+    def test_default_poll_interval(self, monkeypatch):
+        monkeypatch.delenv('HEALTH_POLL_SECONDS', raising=False)
+
+        assert OrchestratorConfig.from_env().health_poll_seconds == 5.0
+
+    def test_poll_interval_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv('HEALTH_POLL_SECONDS', '2')
+
+        assert OrchestratorConfig.from_env().health_poll_seconds == 2.0
+
+    @pytest.mark.parametrize('value', ['0', '-1'])
+    def test_poll_interval_must_be_positive(self, monkeypatch, value):
+        monkeypatch.setenv('HEALTH_POLL_SECONDS', value)
+
+        with pytest.raises(ValueError, match='health_poll_seconds must be > 0'):
+            OrchestratorConfig.from_env().validate()

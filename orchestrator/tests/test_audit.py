@@ -280,6 +280,28 @@ class TestPolicyDecisionAudit:
         }
 
 
+class TestGuardAudit:
+    def test_a_frozen_or_refused_version_is_logged_with_its_outcome(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_version_denied(
+                'd1', 'production', 'sample-app', 'v2', outcome='refused', reason='rolled back'
+            )
+        
+        event = caplog.records[-1].audit_event
+        assert event['action'] == 'version_denied'
+        assert event['details'] == {'outcome': 'refused', 'reason': 'rolled back'}
+    
+    def test_an_open_circuit_breaker_is_logged_with_the_count(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_circuit_breaker_open(
+                'd1', 'production', 'sample-app', 'v2', rollbacks=3, window_seconds=3600
+            )
+        
+        event = caplog.records[-1].audit_event
+        assert event['action'] == 'circuit_breaker_open'
+        assert event['details'] == {'rollbacks': 3, 'window_seconds': 3600}
+
+
 class TestAuditAction:
     """Test audit action enum"""
     

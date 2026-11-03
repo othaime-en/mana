@@ -20,6 +20,7 @@ from src.utils import get_audit_logger, AuditAction, split_image_reference, with
 from src.alerts import Alert, Alerter, GitHubStatusChannel, SlackChannel, JOB_NOTIFY
 from src.config import get_config
 from src.diagnosis import Diagnosis, diagnose
+from src.guards import Guards
 from src.jobs import Job, JobDeferred, JobQueue, PermanentJobError
 from src.locks import AppLocks
 from src.policy import Action, Decision, Reason, decide, load_policy
@@ -276,6 +277,11 @@ class SelfHealingOrchestrator:
                 "github_integration": bool(self.github_token and self.github_repo)
             }
         )
+    
+    @property
+    def guards(self) -> Guards:
+        """Deny-list and circuit breaker over the current Redis client"""
+        return Guards(self.redis_client)
     
     def calculate_backoff(self, retry_count: int) -> float:
         """
@@ -1230,6 +1236,7 @@ class SelfHealingOrchestrator:
             if success:
                 state.status = DeploymentStatus.ROLLED_BACK
                 self.save_deployment_state(state)
+                self._remember_rollback(state, payload["version"])
                 metrics.rollbacks_total.labels(
                     namespace=namespace,
                     reason=state.failure_type.value if state.failure_type else "unknown"
@@ -1422,6 +1429,10 @@ class SelfHealingOrchestrator:
             return await self._schedule_retry(state, rule.max_attempts, workflow_run_id)
         
         if decision.action is Action.ROLLBACK:
+            paused = await asyncio.to_thread(self._circuit_breaker_reason, state)
+            if paused:
+                self._observe_decision(decision_started)
+                return await asyncio.to_thread(self._alert, state, version, paused)
             blocked = await asyncio.to_thread(self._assess_rollback, state, version)
             self._observe_decision(decision_started)
             if blocked:
@@ -1508,6 +1519,122 @@ class SelfHealingOrchestrator:
             'action': 'rollback',
             'previous_version': state.previous_version,
             'message': f'Rollback to version {state.previous_version} scheduled'
+        }
+    
+    def _circuit_breaker_reason(self, state: DeploymentState) -> Optional[str]:
+        """The reason automatic rollback is paused for this application, or None"""
+        limits = self.policy.circuit_breaker
+        breaker = self.guards.breaker(
+            state.namespace, state.app_name, limits.max_rollbacks, limits.window_seconds
+        )
+        if not breaker.open:
+            return None
+        metrics.circuit_breaker_trips_total.labels(namespace=state.namespace).inc()
+        audit_logger.log_circuit_breaker_open(
+            deployment_id=state.deployment_id,
+            namespace=state.namespace,
+            deployment_name=state.app_name,
+            version=state.version,
+            rollbacks=breaker.rollbacks,
+            window_seconds=breaker.window_seconds
+        )
+        return (
+            f"Circuit breaker open: {state.app_name} was rolled back {breaker.rollbacks} "
+            f"times in the last {breaker.window_seconds // 60} minutes, so automatic "
+            f"rollback is paused until the rollbacks age out of that window"
+        )
+    
+    def _remember_rollback(self, state: DeploymentState, failed_version: str) -> None:
+        """Count the rollback for the circuit breaker and freeze the failed version"""
+        settings = self.policy.rollback
+        try:
+            self.guards.record_rollback(
+                state.namespace, state.app_name, state.deployment_id,
+                self.policy.circuit_breaker.window_seconds
+            )
+            if not settings.freeze_failed_version:
+                return
+            reason = (
+                f"rolled back after "
+                f"{state.failure_type.value if state.failure_type else 'a failure'}"
+            )
+            self.guards.deny(
+                state.namespace, state.app_name, failed_version,
+                settings.deny_ttl_seconds, reason, state.deployment_id
+            )
+        except redis.RedisError as e:
+            logger.error(f"Could not record the rollback of {state.deployment_id} in the guards: {e}")
+            return
+        metrics.version_denials_total.labels(namespace=state.namespace, outcome="frozen").inc()
+        audit_logger.log_version_denied(
+            deployment_id=state.deployment_id,
+            namespace=state.namespace,
+            deployment_name=state.app_name,
+            version=failed_version,
+            outcome="frozen",
+            reason=reason
+        )
+    
+    def check_version_denied(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        metadata: Optional[Dict] = None
+    ) -> Optional[Dict]:
+        """
+        The deny-list entry when a pipeline starts deploying a frozen version
+
+        Counts, audits and alerts the refusal. Nothing is persisted for the
+        refused deployment, so it never shows as active or counts as an outcome.
+        """
+        entry = self.guards.denied(namespace, deployment_name, version)
+        if entry is None:
+            return None
+        metrics.version_denials_total.labels(namespace=namespace, outcome="refused").inc()
+        audit_logger.log_version_denied(
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            outcome="refused",
+            reason=entry["reason"]
+        )
+        refused = DeploymentState(
+            deployment_id=deployment_id,
+            namespace=namespace,
+            app_name=deployment_name,
+            version=version,
+            status=DeploymentStatus.FAILED,
+            previous_version=None,
+            retry_count=0,
+            failure_type=None,
+            timestamp=time.time(),
+            metadata=dict(metadata or {})
+        )
+        self._notify(
+            refused, "version_denied", "warning",
+            f"{deployment_name} {version} was refused in {namespace}",
+            f"{version} was rolled back earlier ({entry['reason']}) and is on the deny-list. "
+            f"The pipeline must not deploy it again."
+        )
+        return entry
+    
+    def get_automation_status(self, namespace: str, deployment_name: str) -> Dict:
+        """Circuit breaker and deny-list state for one application"""
+        limits = self.policy.circuit_breaker
+        breaker = self.guards.breaker(
+            namespace, deployment_name, limits.max_rollbacks, limits.window_seconds
+        )
+        return {
+            'circuit_breaker': {
+                'open': breaker.open,
+                'rollbacks_in_window': breaker.rollbacks,
+                'max_rollbacks': breaker.max_rollbacks,
+                'window_seconds': breaker.window_seconds
+            },
+            'denied_versions': self.guards.denied_versions(namespace, deployment_name)
         }
     
     @staticmethod

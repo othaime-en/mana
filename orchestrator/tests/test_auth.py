@@ -222,6 +222,7 @@ OPERATOR_ROUTES = [
     ("GET", "/deployment/deploy-1", None),
     ("GET", "/deployments/recent", None),
     ("GET", "/deployments/production/sample-app/status", None),
+    ("DELETE", "/denied-versions/production/sample-app/v2", None),
 ]
 
 

@@ -146,6 +146,19 @@ groups:
           description: "95th percentile time from the first failure to a verified rollback is {{ $value | humanizeDuration }}. Target: under 60 seconds. Check the verification timeout in the policy, the image pull time on the nodes and the health poll interval."
           runbook_url: "https://docs.example.com/runbooks/slow-rollback-recovery"
 
+      # Critical: Automatic rollback paused by the circuit breaker
+      - alert: CircuitBreakerOpen
+        expr: |
+          sum by (namespace) (increase(mana_circuit_breaker_trips_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "Automatic rollback is paused in {{ $labels.namespace }}"
+          description: "An application in {{ $labels.namespace }} rolled back more often than the circuit breaker allows, so a failure was left to a person instead of being rolled back again. Look at GET /deployments/<namespace>/<app>/status for the breaker and the frozen versions."
+          runbook_url: "https://docs.example.com/runbooks/circuit-breaker-open"
+
       # Warning: High webhook failure rate
       - alert: HighWebhookFailureRate
         expr: |

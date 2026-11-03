@@ -374,11 +374,12 @@ async def test_deployment_status_is_json_and_not_shadowed_by_metrics(api):
     replicas = {"replicas": 3, "ready_replicas": 3}
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch.object(api.orchestrator, "get_deployment_metrics", return_value=replicas) as read:
+        with patch.object(api.orchestrator, "get_deployment_metrics", return_value=replicas) as read, \
+             patch.object(api.orchestrator, "get_automation_status", return_value={"circuit_breaker": {}}):
             response = await client.get("/deployments/production/sample-app/status")
 
     assert response.status_code == 200
-    assert response.json() == replicas
+    assert response.json() == {**replicas, "automation": {"circuit_breaker": {}}}
     read.assert_called_once_with("production", "sample-app")
 
 

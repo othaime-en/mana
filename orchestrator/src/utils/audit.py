@@ -28,6 +28,8 @@ class AuditAction(Enum):
     STATE_RETRIEVED = "state_retrieved"
     ALERT_SENT = "alert_sent"
     POLICY_DECISION = "policy_decision"
+    VERSION_DENIED = "version_denied"
+    CIRCUIT_BREAKER_OPEN = "circuit_breaker_open"
     MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
 
 
@@ -373,6 +375,46 @@ class AuditLogger:
                 "detail": detail,
                 "diagnosis": diagnosis
             }
+        )
+    
+    def log_version_denied(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        outcome: str,
+        reason: str
+    ):
+        """Log a version being frozen after a rollback, or refused because it is frozen"""
+        self.log_event(
+            action=AuditAction.VERSION_DENIED,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=True,
+            details={"outcome": outcome, "reason": reason}
+        )
+    
+    def log_circuit_breaker_open(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        rollbacks: int,
+        window_seconds: int
+    ):
+        """Log automatic rollback being paused because the application rolled back too often"""
+        self.log_event(
+            action=AuditAction.CIRCUIT_BREAKER_OPEN,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=True,
+            details={"rollbacks": rollbacks, "window_seconds": window_seconds}
         )
     
     def log_manual_intervention_required(

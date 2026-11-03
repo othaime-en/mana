@@ -96,6 +96,9 @@ class FakeRedis:
     def zadd(self, key, mapping):
         self.sorted_sets.setdefault(key, {}).update(mapping)
 
+    def zcard(self, key):
+        return len(self.sorted_sets.get(key, {}))
+
     def zrem(self, key, *members):
         entries = self.sorted_sets.get(key, {})
         return sum(1 for member in members if entries.pop(member, None) is not None)

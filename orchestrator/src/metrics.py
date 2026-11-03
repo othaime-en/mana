@@ -64,6 +64,16 @@ failure_diagnoses_total = Counter(
     'Failed rollouts diagnosed from pod and Deployment signals',
     ['namespace', 'reason']
 )
+version_denials_total = Counter(
+    'mana_version_denials_total',
+    'Versions frozen after a rollback (frozen) and deployments of a frozen version refused (refused)',
+    ['namespace', 'outcome']
+)
+circuit_breaker_trips_total = Counter(
+    'mana_circuit_breaker_trips_total',
+    'Rollbacks not scheduled because the application already rolled back too often',
+    ['namespace']
+)
 health_check_duration_seconds = Histogram(
     'health_check_duration_seconds',
     'Health check duration in seconds',

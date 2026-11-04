@@ -390,6 +390,16 @@ resource "kubernetes_deployment" "orchestrator" {
           }
 
           env {
+            name  = "WATCHER_ENABLED"
+            value = tostring(var.watcher_enabled)
+          }
+
+          env {
+            name  = "WATCHER_NAMESPACES"
+            value = join(",", var.watcher_namespaces)
+          }
+
+          env {
             name = "SLACK_WEBHOOK_URL"
             value_from {
               secret_key_ref {

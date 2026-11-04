@@ -98,6 +98,10 @@ spec:
           value: "60"
         - name: SHUTDOWN_GRACE_SECONDS
           value: "30"
+        - name: WATCHER_ENABLED
+          value: "true"
+        - name: WATCHER_NAMESPACES
+          value: "production,staging"
         - name: SLACK_WEBHOOK_URL
           valueFrom:
             secretKeyRef:

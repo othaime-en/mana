@@ -41,7 +41,7 @@ Without the first two (and without `AUTH_DISABLED=true`) the process exits at st
 
 | Variable             | Default | Constraint          | Description                                                          |
 | -------------------- | ------- | ------------------- | -------------------------------------------------------------------- |
-| `MAX_RETRIES`        | `3`     | `>= 1`              | Number of failures answered with a retry; the next failure rolls back |
+| `MAX_RETRIES`        | `3`     | `>= 1`              | Ceiling on the retries of every rule in the [recovery policy](recovery-policy.md) |
 | `INITIAL_BACKOFF`    | `10.0`  | `> 0`               | Seconds to wait before the first retry                               |
 | `BACKOFF_MULTIPLIER` | `2.0`   | `> 1.0`             | Growth factor between retries                                        |
 | `MAX_BACKOFF`        | `300.0` | `> INITIAL_BACKOFF` | Upper bound on any single delay, in seconds                          |
@@ -59,14 +59,9 @@ delay(n) = min(INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(n-1), MAX_BACKOFF)
 | 3     | 40 s                    | 8 s                     | 270 s                       |
 | 4     | 80 s                    | 16 s                    | 600 s (capped)              |
 
-**Choosing values.** The decision rule is retry while `failure_count <= MAX_RETRIES`, otherwise roll back if a previous version exists and the failed version is the one running (see [Data Flow](../architecture/data-flow.md#the-decision-rule)):
+**Choosing values.** Which failures are retried, how often, and when MANA rolls back at once is set by the [recovery policy](recovery-policy.md). `MAX_RETRIES` only caps the retries of every rule, so `MAX_RETRIES=1` allows at most one retry whatever the policy file says. `ROLLBACK_THRESHOLD` was removed; if it is still set, the orchestrator logs a deprecation warning and ignores it.
 
-- `MAX_RETRIES=3` (default): three retries, rollback on the fourth failure.
-- `MAX_RETRIES=1`: one retry, rollback on the second failure. Good for fast-moving staging environments.
-- `MAX_RETRIES=0` is rejected by validation, so at least one retry is always attempted before a rollback. There is currently no "roll back immediately" mode.
-- `ROLLBACK_THRESHOLD` was removed. If it is still set, the orchestrator logs a deprecation warning and ignores it.
-
-The worst-case time spent retrying before a rollback is the sum of the backoff delays plus the time each re-run takes. With the defaults that is 70 s of backoff alone. If your target MTTR is under a minute, lower `INITIAL_BACKOFF` and `MAX_RETRIES`.
+With the built-in policy a health check failure is rolled back on the first failure, with no backoff and no re-run. Backoff only applies to the failures that are retried (a build failure, a deployment failure, a timeout). Rollbacks are verified every `HEALTH_POLL_SECONDS` (default `5`) for at most the policy's `rollback.verify_timeout_seconds`.
 
 ### Job scheduler
 
@@ -213,6 +208,9 @@ HEALTH_CHECK_TIMEOUT=5
 | `max_retries must be >= 1`                  | `MAX_RETRIES` is 0 or negative                           |
 | `initial_backoff must be > 0`               | `INITIAL_BACKOFF` is 0 or negative                       |
 | `max_backoff must be > initial_backoff`     | `MAX_BACKOFF` is less than or equal to `INITIAL_BACKOFF` |
+| `health_poll_seconds must be > 0`           | `HEALTH_POLL_SECONDS` is 0 or negative                   |
+| `POLICY_FILE not found: ...`                | `POLICY_FILE` names a file that does not exist           |
+| `WATCHER_NAMESPACES ...`                    | The watcher is on and a namespace name is empty or invalid |
 | `job_lease_seconds must be >= 3`            | `JOB_LEASE_SECONDS` is below 3                           |
 | `scheduler_poll_seconds must be > 0`        | `SCHEDULER_POLL_SECONDS` is 0 or negative                |
 | `scheduler_concurrency must be >= 1`        | `SCHEDULER_CONCURRENCY` is below 1                       |

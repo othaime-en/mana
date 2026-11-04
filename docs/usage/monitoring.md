@@ -32,6 +32,13 @@ Configuration files are in `monitoring/` (see [Components](../architecture/compo
 | `webhook_requests_total`             | counter   | `endpoint`, `code`           | Requests to `/webhook/*` by HTTP status                                                                      |
 | `webhook_errors_total`               | counter   | `endpoint`, `reason`         | Webhook requests answered with an error (`validation` for 422, `server_error` for 5xx, `client_error`)      |
 | `redis_connection_errors_total`      | counter   |                              | Redis calls that failed with a connection or timeout error                                                   |
+| `mana_policy_decisions_total`        | counter   | `failure_type`, `action`, `reason` | Recovery decisions of the [policy](../configuration/recovery-policy.md): action taken and why |
+| `mana_failure_diagnoses_total`       | counter   | `namespace`, `reason`        | Failed rollouts diagnosed from pods and the Deployment (`CrashLoopBackOff`, `OOMKilled`, ..., `other`) |
+| `mana_detection_duration_seconds`    | histogram | `namespace`, `app`           | First `in_progress` event to the first failure of a deployment, observed once per deployment |
+| `mana_version_denials_total`         | counter   | `namespace`, `outcome`       | Versions frozen after a rollback (`frozen`) and deployments of a frozen version refused (`refused`) |
+| `mana_circuit_breaker_trips_total`   | counter   | `namespace`                  | Rollbacks not scheduled because the application already rolled back too often |
+| `mana_watcher_scans_total`           | counter   | `outcome`                    | Watcher passes over one namespace (`ok` or `error` when Deployments cannot be listed) |
+| `mana_watcher_detections_total`      | counter   | `namespace`, `reason`        | Stuck rollouts found by the watcher (`progress_deadline_exceeded`, `no_progress`) |
 
 A failure for a deployment that is already `failed` (for example a fifth failure webhook) is not counted again, and a re-run that reopens a finished deployment and settles again is counted again. Build and test failures reported with `namespace: ci` are counted as `failed` in that namespace (CORE-14).
 
@@ -93,7 +100,7 @@ sum(rate(kube_pod_container_status_restarts_total{namespace="production"}[15m]))
 
 ### Audit events
 
-Every significant orchestrator action produces an audit event (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `rollback_skipped`, `health_check_*`, `state_saved`, `manual_intervention_required`). Each carries a UTC timestamp, deployment ID, namespace, version and a `success` flag, plus action-specific details.
+Every significant orchestrator action produces an audit event (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `rollback_skipped`, `policy_decision`, `version_denied`, `circuit_breaker_open`, `health_check_*`, `state_saved`, `manual_intervention_required`). Each carries a UTC timestamp, deployment ID, namespace, version and a `success` flag, plus action-specific details.
 
 ```bash
 kubectl -n orchestrator logs -l app=orchestrator | grep "AUDIT:"
@@ -137,7 +144,7 @@ Four Grafana dashboards live in `monitoring/grafana/dashboards/`:
 
 | Dashboard                 | Shows                                                                                                                                |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **Self-Healing Overview** | Success rate, rollback and retry activity, failed deployments, MTTR and error budget, orchestrator health, pod restarts, recent logs, and a **Reliability** row: job queue depth and the wait of the oldest due job, job outcomes, GitHub API requests, duplicate webhook deliveries, alerts sent |
+| **Self-Healing Overview** | Success rate, rollback and retry activity, failed deployments, MTTR and error budget, orchestrator health, pod restarts, recent logs, and a **Reliability** row: job queue depth and the wait of the oldest due job, job outcomes, GitHub API requests, duplicate webhook deliveries, alerts sent, and a **Recovery Policy** row: policy decisions, failure diagnoses, detection time, rollback recovery p95 against the 60 s target, deny-list activity, circuit breaker trips, watcher detections and scans |
 | **Deployment Metrics**    | Per-namespace deployment and rollback statistics, durations, SLO and error budget, recovery time, health check results and webhook traffic |
 | **Application Metrics**   | Request rate, error rate, latency percentiles, resource usage of the sample app                                                      |
 | **Infrastructure**        | Node CPU and memory, cluster capacity, quotas                                                                                        |
@@ -169,7 +176,7 @@ Alert rules are in `monitoring/prometheus/alerts.yml` and are routed by Alertman
 Highlights (full table with thresholds in the [Configuration Reference](../reference/configuration.md#alert-thresholds)):
 
 - **Deployments:** `HighRollbackRate`, `DeploymentFailureRate`, `DeploymentSuccessRateBelowSLO`, `DeploymentReplicasMismatch`, `PodCrashLooping`
-- **Orchestrator:** `OrchestratorDown`, `SlowRollbackDecision`, `HighWebhookFailureRate`, `RedisConnectionFailures`, `SchedulerStalled`, `JobsDeadLettered`, `GitHubRerunFailing`, `AlertDeliveryFailing`
+- **Orchestrator:** `OrchestratorDown`, `SlowRollbackDecision`, `HighWebhookFailureRate`, `RedisConnectionFailures`, `SchedulerStalled`, `JobsDeadLettered`, `GitHubRerunFailing`, `AlertDeliveryFailing`, `SlowRollbackRecovery`, `CircuitBreakerOpen`, `WatcherScanFailing`
 - **Application:** `HighErrorRate`, `SlowResponseTime`, `ApplicationDown`, memory and CPU
 - **Infrastructure and monitoring:** node readiness, disk, scrape failures, Grafana/Loki down
 

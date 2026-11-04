@@ -36,7 +36,7 @@ Changes made with `kubectl set env` are overwritten the next time you `kubectl a
 | Area               | Variables                                                        | What it controls                                                                    |
 | ------------------ | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | Redis              | `REDIS_HOST`, `REDIS_PORT`                                       | Where state is stored                                                               |
-| Retry and rollback | `MAX_RETRIES`                                                    | How many failures are retried before rollback                                       |
+| Recovery policy    | `POLICY_FILE`, `MAX_RETRIES`                                     | What happens per failure type; `MAX_RETRIES` caps the retries                        |
 | Backoff            | `INITIAL_BACKOFF`, `BACKOFF_MULTIPLIER`, `MAX_BACKOFF`           | Delay before each retry                                                             |
 | Health checks      | `HEALTH_CHECK_PORT`, `HEALTH_CHECK_PATH`, `HEALTH_CHECK_TIMEOUT` | How the application's health endpoint is called                                     |
 | GitHub             | `GITHUB_TOKEN`, `GITHUB_REPO`                                    | Whether retries can trigger workflow re-runs                                        |
@@ -59,11 +59,11 @@ Changes made with `kubectl set env` are overwritten the next time you `kubectl a
 
 ## Understanding the Key Settings
 
-**Retries versus rollback.** Retries are decided first: while the failure count for a deployment ID is `<= MAX_RETRIES`, MANA schedules a re-run. Once it is higher, MANA rolls back if a previous version is known and the failed version is the one running. With the default (`3`) that means three retries and a rollback on the fourth failure. `MAX_RETRIES` is the only setting that decides when rollback starts; a leftover `ROLLBACK_THRESHOLD` is ignored and logged as deprecated. See [Data Flow](../architecture/data-flow.md#the-decision-rule).
+**Retries versus rollback.** The [recovery policy](recovery-policy.md) decides per failure type: post-deploy failures (`health_check_failure`, `smoke_test_failure`) roll back at once, `deployment_failure` and `timeout` retry once and then roll back, `test_failure` only alerts. A deterministic diagnosis (a crash loop, an out-of-memory kill) skips the retries. `MAX_RETRIES` is a ceiling on every retry rule; a leftover `ROLLBACK_THRESHOLD` is ignored and logged as deprecated. See [Data Flow](../architecture/data-flow.md#the-decision-rule).
 
 **Backoff.** The delay before retry _n_ is `min(INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(n-1), MAX_BACKOFF)`: 10, 20, 40 seconds by default. There is no jitter.
 
-**Time to recovery.** Retries cost backoff time plus the time for each pipeline re-run. If your goal is a short MTTR, lower `MAX_RETRIES` and `INITIAL_BACKOFF`; if failures are usually flaky infrastructure, raise them.
+**Time to recovery.** A rollback taken on the first failure costs no backoff and no pipeline re-run, only the verification (`HEALTH_POLL_SECONDS`, `rollback.verify_timeout_seconds`). Retries cost backoff plus the time of each re-run, so keep them for failures that are often transient. Measure it with `make demo`.
 
 **Health checks.** Verification needs both Kubernetes readiness and an HTTP 200 with `{"status": "healthy"}` from the configured path on the configured port. If your application listens elsewhere or answers differently, change `HEALTH_CHECK_PORT` / `HEALTH_CHECK_PATH` or adapt the app.
 

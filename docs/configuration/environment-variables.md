@@ -21,13 +21,14 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | `WEBHOOK_SECRET`       | secret | unset       | yes            | HMAC key for `POST /webhook/deployment`; 32 characters or more. Comma-separated values are all accepted, which allows rotation |
 | `API_KEY`              | secret | unset       | yes            | Key for the operator endpoints, sent as `X-API-Key`; 32 characters or more. Comma-separated values are all accepted |
 | `AUTH_DISABLED`        | bool   | `false`     | no             | `true` turns every authentication check off and logs at CRITICAL. Local development only |
-| `MAX_RETRIES`          | int    | `3`         | no             | Failures answered with a retry before rolling back. Must be `>= 1`          |
+| `MAX_RETRIES`          | int    | `3`         | no             | Ceiling on every retry rule of the [recovery policy](recovery-policy.md). Must be `>= 1` |
 | `INITIAL_BACKOFF`      | float  | `10.0`      | no             | Seconds before the first retry. Must be `> 0`                               |
 | `MAX_BACKOFF`          | float  | `300.0`     | no             | Cap on any retry delay. Must be `> INITIAL_BACKOFF`                         |
 | `BACKOFF_MULTIPLIER`   | float  | `2.0`       | no             | Delay growth factor. Must be `> 1.0`                                        |
 | `HEALTH_CHECK_TIMEOUT` | int    | `5`         | no             | Per-request HTTP timeout (seconds) when probing a pod. Must be `> 0`        |
 | `HEALTH_CHECK_PORT`    | int    | `5000`      | no             | Application port inside the pod. `1` to `65535`                             |
 | `HEALTH_CHECK_PATH`    | string | `/health`   | no             | Application health path                                                     |
+| `HEALTH_POLL_SECONDS`  | float  | `5`         | no             | How often a rollout is checked while a rollback is verified. Must be `> 0`  |
 | `LOG_LEVEL`            | string | `INFO`      | no             | `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG` (any case); invalid values stop startup |
 | `ENABLE_AUDIT_LOGGING` | bool   | `true`      | no             | `false` silences audit events; they are otherwise independent of `LOG_LEVEL` |
 | `JOB_LEASE_SECONDS`    | float  | `60`        | no             | How long a worker owns a job (and a per-app lock) without renewing it. A job whose worker died is picked up by another replica after this long. Must be `>= 3` |
@@ -37,6 +38,11 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | `SHUTDOWN_GRACE_SECONDS` | float | `30`       | no             | Time a stopping replica waits for running jobs. Keep it below the pod's `terminationGracePeriodSeconds` (45) |
 | `SLACK_WEBHOOK_URL`    | secret | unset       | no             | Slack incoming webhook for alerts; must be `https://`. Alerts to Slack are off when unset |
 | `ALERT_GITHUB_STATUS`  | bool   | `true`      | no             | Mark the failing commit with a `mana/recovery` status. Needs `GITHUB_TOKEN` and `GITHUB_REPO`; the token needs commit-status write access |
+| `POLICY_FILE`          | path   | unset       | no             | [Recovery policy](recovery-policy.md) file; the built-in policy is used when unset. The file must exist and be valid |
+| `WATCHER_ENABLED`      | bool   | `false`     | no             | Detect stuck rollouts of Deployments labelled `mana.io/managed=true` from the cluster |
+| `WATCHER_NAMESPACES`   | string | `production,staging` | no    | Comma-separated namespaces the watcher scans; each needs the orchestrator Role |
+| `WATCHER_INTERVAL_SECONDS` | float | `15`    | no             | Seconds between scans. Must be `> 0`                                        |
+| `WATCHER_STUCK_SECONDS` | float | `120`      | no             | Seconds without rollout progress before a rollout counts as stuck. Must be `> 0` |
 | `GITHUB_TOKEN`         | secret | unset       | for retries    | Token with permission to re-run workflows                                   |
 | `GITHUB_REPO`          | string | unset       | for retries    | `owner/repo` that owns the workflow                                         |
 | `PORT`                 | int    | `8000`      | no             | Listen port for `python -m src.api` only; the container uses a fixed `8000` |
@@ -55,6 +61,12 @@ Read in `sample-app/src/config.py`.
 | `DEBUG`          | bool   | `false`       | Debug mode and verbose error responses                                                                           |
 | `FAILURE_RATE`   | float  | `0.0`         | Probability (0.0 to 1.0) that `/` and `/api/data` return 500                                                     |
 | `STARTUP_TIME`   | int    | `0`           | Seconds `/ready` returns 503 after start. `>= 0`                                                                 |
+| `ENABLE_FAULT_INJECTION` | bool | `false`    | [Fault injection](sample-app.md#fault-injection) master switch; every mode below is refused without it |
+| `FAIL_ON_START`  | bool   | `false`       | Crash while importing the app (CrashLoopBackOff)                                              |
+| `FAIL_HEALTH_AFTER` | int | unset         | `/health` answers 500 this many seconds after start                                           |
+| `READY_NEVER`    | bool   | `false`       | `/ready` always answers 503                                                                   |
+| `LEAK_MB_PER_S`  | float  | `0`           | Hold this many MB more every second until `LEAK_MAX_MB` (default `2048`)                      |
+| `LATENCY_MS`     | int    | `0`           | Delay `/` and `/api/data` by this many milliseconds                                           |
 | `WORKERS`        | int    | `4`           | Parsed only; image uses 2 Gunicorn workers. `>= 1`                                                               |
 | `TIMEOUT`        | int    | `30`          | Parsed only; image uses `--timeout 120`                                                                          |
 | `KEEPALIVE`      | int    | `5`           | Parsed only                                                                                                      |

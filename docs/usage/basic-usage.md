@@ -15,7 +15,7 @@ MANA is **event-driven**, not a monitoring loop:
 
 1. **Receive.** Your pipeline posts a webhook when a deployment starts, succeeds or fails.
 2. **Record.** On success, the version is stored as the rollback target. On failure, the failure count for that deployment ID is incremented.
-3. **Decide.** Retry (while the count is within `MAX_RETRIES`), roll back (once it exceeds the limits and a previous version exists), or alert.
+3. **Decide.** The [recovery policy](../configuration/recovery-policy.md) chooses per failure type: retry, roll back at once, or alert. A health check failure rolls back on the first failure.
 4. **Act.** A retry asks GitHub to re-run the workflow after a backoff. A rollback patches the Deployment back to the last good image tag.
 5. **Verify.** A rollback is only reported successful after all replicas are ready and each pod's health endpoint answers.
 6. **Log.** Every step is written to the audit log and counted in Prometheus metrics.
@@ -172,7 +172,7 @@ The delay before retry _n_ is `min(INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(n-1), 
 | 5           | 160 s       |
 | 6 and later | 300 s (cap) |
 
-There is no jitter. With the default `MAX_RETRIES=3`, only the first three delays are used before a rollback becomes possible. Tune with [Orchestrator Configuration](../configuration/orchestrator.md#retry-and-rollback-policy).
+There is no jitter. Backoff applies only to failures the policy retries, and `MAX_RETRIES` caps how many delays are used. Tune with [Orchestrator Configuration](../configuration/orchestrator.md#retry-and-rollback-policy).
 
 ## Reading the Audit Log
 

@@ -139,3 +139,17 @@ docker compose up sample-app      # docker-compose.yml sets FAILURE_RATE=0.1
 ```
 
 Run the tests with `cd sample-app && pytest tests/ -v --cov=src`.
+
+## Fault injection
+
+`FAILURE_RATE` only breaks user endpoints. These modes produce the failures MANA exists to recover from. Every one is refused at start-up unless `ENABLE_FAULT_INJECTION=true`, so a stray variable cannot break a real deployment.
+
+| Variable            | Behaviour                                                         | What MANA sees                                          |
+| ------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
+| `FAIL_ON_START`     | The app raises while it is imported; the container crashes        | `CrashLoopBackOff`, a deterministic diagnosis           |
+| `FAIL_HEALTH_AFTER` | `/health` answers 500 this many seconds after start               | `health_check_failure`                                  |
+| `READY_NEVER`       | `/ready` always answers 503                                       | The rollout never completes                             |
+| `LEAK_MB_PER_S`     | Holds more memory every second, up to `LEAK_MAX_MB` (default 2048) | `OOMKilled` once the container limit is reached         |
+| `LATENCY_MS`        | Delays `/` and `/api/data`; the probes are not delayed            | Nothing yet: it needs post-deploy verification (FEAT-06) |
+
+`GET /api/config` lists the active modes under `fault_injection`. `make demo MODE=crash|unhealthy|unready|oom` deploys a broken version with one of them and times the rollback.

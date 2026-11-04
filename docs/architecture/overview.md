@@ -34,10 +34,12 @@ This page explains the design at a high level. Details are in [Components](compo
 
 1. The pipeline deploys a new version and posts `POST /webhook/deployment` with `status` of `in_progress`, `success` or `failed`.
 2. On **success**, the orchestrator records the version as the new rollback target.
-3. On **failure**, it increments the retry count for that deployment ID and applies the rule:
-   - up to `MAX_RETRIES` failures: schedule a GitHub Actions re-run after an exponential backoff;
-   - after that, if a previous version is known and the failed version is the one running: patch the Deployment back to the last good version and verify health;
-   - if neither is possible (no previous version, rollback unhealthy): raise an alert (`manual_intervention_required`).
+3. On **failure**, it increments the failure count for that deployment ID, diagnoses the cause from the pods, and applies the [recovery policy](../configuration/recovery-policy.md) for the failure type:
+   - **retry**: schedule a GitHub Actions re-run after an exponential backoff (for failures worth retrying, up to the rule's attempts and `MAX_RETRIES`);
+   - **rollback**: if a previous version is known and the failed version is the one running, patch the Deployment back to the last good version and verify health. Post-deploy failures such as a failed health check take this path on the first failure;
+   - **alert**: raise `manual_intervention_required` when the policy says so, when no rollback is possible, or when the circuit breaker is open.
+
+   A watcher can also detect stuck rollouts from the cluster without a webhook, and a rolled-back version is denied for later deployments.
 4. Every step is written to the audit log, and Prometheus counters are updated.
 
 The step-by-step version, with the decision table, is in [Data Flow](data-flow.md).

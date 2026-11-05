@@ -8,7 +8,7 @@ import time
 import requests
 import asyncio
 from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, asdict, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 import redis
 import json
@@ -145,6 +145,7 @@ class DeploymentState:
     first_failure_at: Optional[float] = None
     finished_at: Optional[float] = None
     diagnosis: Optional[str] = None
+    attempts: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -1381,8 +1382,12 @@ class SelfHealingOrchestrator:
                 namespace, deployment_name, state.started_at, state.first_failure_at
             )
         
+        if not state.attempts and state.retry_count and state.failure_type:
+            state.attempts = {state.failure_type.value: state.retry_count}
         state.retry_count += 1
         state.failure_type = failure_type
+        attempt = state.attempts.get(failure_type.value, 0) + 1
+        state.attempts[failure_type.value] = attempt
         
         diagnosis = None
         if failure_type not in NON_ROLLBACK_FAILURES:
@@ -1401,7 +1406,7 @@ class SelfHealingOrchestrator:
         workflow_run_id = state.metadata.get('workflow_run_id')
         decision = decide(
             rule,
-            state.retry_count,
+            attempt,
             can_retry=bool(workflow_run_id),
             has_rollback_target=bool(state.previous_version) and state.previous_version != version,
             diagnosis=diagnosis
@@ -1417,7 +1422,7 @@ class SelfHealingOrchestrator:
             deployment_name=deployment_name,
             version=version,
             failure_type=failure_type.value,
-            attempt=state.retry_count,
+            attempt=attempt,
             decision=decision.action.value,
             reason=decision.reason.value,
             detail=decision.detail,
@@ -1426,7 +1431,7 @@ class SelfHealingOrchestrator:
         
         if decision.action is Action.RETRY:
             self._observe_decision(decision_started)
-            return await self._schedule_retry(state, rule.max_attempts, workflow_run_id)
+            return await self._schedule_retry(state, attempt, rule.max_attempts, workflow_run_id)
         
         if decision.action is Action.ROLLBACK:
             paused = await asyncio.to_thread(self._circuit_breaker_reason, state)
@@ -1447,13 +1452,14 @@ class SelfHealingOrchestrator:
     async def _schedule_retry(
         self,
         state: DeploymentState,
+        attempt: int,
         max_attempts: int,
         workflow_run_id: str
     ) -> Dict:
         """Save the retry decision and queue the workflow re-run after its backoff"""
-        backoff_delay = self.calculate_backoff(state.retry_count)
+        backoff_delay = self.calculate_backoff(attempt)
         logger.info(
-            f"Retrying deployment (attempt {state.retry_count}/{max_attempts}) "
+            f"Retrying deployment (attempt {attempt}/{max_attempts}) "
             f"with {backoff_delay}s backoff"
         )
         
@@ -1486,7 +1492,7 @@ class SelfHealingOrchestrator:
             'backoff_seconds': backoff_delay,
             'workflow_run_id': workflow_run_id,
             'message': (
-                f'Retry {state.retry_count}/{max_attempts} scheduled '
+                f'Retry {attempt}/{max_attempts} scheduled '
                 f'in {backoff_delay}s'
             )
         }

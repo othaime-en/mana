@@ -1,5 +1,6 @@
 """The recovery path driven by the policy: fast rollback, diagnosis, fallbacks"""
 
+import json
 import logging
 import time
 from types import SimpleNamespace as NS
@@ -310,3 +311,93 @@ class TestRollbackVerification:
                 orch.check_deployment_health(NS_NAME, "sample-app", timeout=30)
 
         sleep.assert_called_once_with(2.5)
+
+
+class TestAttemptsPerFailureType:
+    """A rule's max_attempts counts failures of its own type (CORE-19)"""
+
+    @pytest.mark.asyncio
+    async def test_another_type_does_not_use_up_the_attempts(self, orch):
+        results = [
+            await fail(orch, FailureType.BUILD_FAILURE),
+            await fail(orch, FailureType.DEPLOYMENT_FAILURE),
+            await fail(orch, FailureType.DEPLOYMENT_FAILURE),
+        ]
+
+        assert [r["action"] for r in results] == ["retry", "retry", "rollback"]
+
+    @pytest.mark.asyncio
+    async def test_the_state_keeps_both_the_total_and_the_per_type_counts(self, orch):
+        await fail(orch, FailureType.BUILD_FAILURE)
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        state = orch.get_deployment_state("d1")
+
+        assert state.retry_count == 3
+        assert state.attempts == {"build_failure": 1, "deployment_failure": 2}
+
+    @pytest.mark.asyncio
+    async def test_the_backoff_and_message_follow_the_type_not_the_total(self, orch):
+        orch.policy = retry_policy(attempts=3)
+        await fail(orch, FailureType.BUILD_FAILURE)
+
+        result = await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        assert result["backoff_seconds"] == orch.initial_backoff
+        assert result["message"].startswith("Retry 1/3")
+        assert result["retry_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_policy_decision_audits_the_attempt_of_its_type(self, orch, caplog):
+        await fail(orch, FailureType.BUILD_FAILURE)
+
+        with caplog.at_level(logging.INFO):
+            await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        decision = [r for r in caplog.records if "AUDIT: policy_decision" in r.getMessage()][-1]
+        assert decision.audit_event["details"]["attempt"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_state_saved_before_attempts_existed_is_backfilled(self, orch):
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+        state = orch.get_deployment_state("d1")
+        state.attempts = {}
+        state.retry_count = 1
+        orch.save_deployment_state(state)
+
+        second = await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        assert second["action"] == "rollback"
+        assert orch.get_deployment_state("d1").attempts == {"deployment_failure": 2}
+
+    @pytest.mark.asyncio
+    async def test_a_backfilled_state_does_not_charge_a_new_type_for_old_failures(self, orch):
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+        state = orch.get_deployment_state("d1")
+        state.attempts = {}
+        orch.save_deployment_state(state)
+
+        result = await fail(orch, FailureType.BUILD_FAILURE)
+
+        assert result["action"] == "retry"
+        assert orch.get_deployment_state("d1").attempts == {"deployment_failure": 1, "build_failure": 1}
+
+    def test_an_old_state_document_without_attempts_loads(self, orch):
+        raw = json.dumps({
+            "deployment_id": "d1", "namespace": "production", "app_name": "sample-app", "version": "v2",
+            "status": "failed", "previous_version": "v1", "retry_count": 2,
+            "failure_type": "deployment_failure", "timestamp": 1.0, "metadata": {},
+        })
+
+        state = orch._decode_state(raw)
+
+        assert state.attempts == {} and state.retry_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_rerun_keeps_the_per_type_counts(self, orch):
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        orch.record_deployment_started("d1", NS_NAME, "sample-app", "v2")
+
+        assert orch.get_deployment_state("d1").attempts == {"deployment_failure": 1}

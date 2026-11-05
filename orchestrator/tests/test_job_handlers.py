@@ -173,7 +173,7 @@ class TestRollbackJob:
 
         rollback = self.run(orchestrator)
 
-        rollback.assert_called_once_with("production", "sample-app", "v1", deployment_id="d1")
+        rollback.assert_called_once_with("production", "sample-app", "v1", deployment_id="d1", timeout=300)
         assert stored(orchestrator).status is DeploymentStatus.ROLLED_BACK
         assert stored(orchestrator).finished_at is not None
         assert metrics.rollbacks_total.labels(

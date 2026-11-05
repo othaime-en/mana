@@ -13,6 +13,7 @@ import pytest
 from src.jobs import JobQueue, Scheduler
 from src.locks import AppLocks
 from src.orchestrator import DeploymentStatus, FailureType, SelfHealingOrchestrator
+from src.policy import DEFAULT_POLICY, Policy
 
 
 class Cluster:
@@ -187,3 +188,63 @@ async def test_a_job_that_never_succeeds_ends_as_a_failed_deployment(real_redis)
     await task
 
     assert orch.jobs.stats().pending == orch.jobs.stats().inflight == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_health_check_rolls_back_at_once_without_any_backoff(real_redis):
+    cluster = Cluster()
+    orch = replica(real_redis, cluster)
+    orch.initial_backoff = 30.0
+    worker = scheduler_for(orch)
+    task = asyncio.create_task(worker.run())
+    started = time.monotonic()
+
+    decision = await orch.handle_deployment_failure(
+        "d1", "production", "sample-app", "v2", FailureType.HEALTH_CHECK_FAILURE, {"workflow_run_id": "9"}
+    )
+    settled = await until(
+        lambda: orch.get_deployment_state("d1").status is DeploymentStatus.ROLLED_BACK
+    )
+    elapsed = time.monotonic() - started
+    await worker.stop(5)
+    await task
+
+    assert decision["action"] == "rollback"
+    assert settled
+    assert elapsed < 5
+    assert cluster.patches == [("d1", "v1")]
+
+
+@pytest.mark.asyncio
+async def test_repeated_bad_versions_are_frozen_and_then_pause_automation(real_redis):
+    cluster = Cluster(live="v2")
+    orch = replica(real_redis, cluster)
+    orch.policy = Policy.model_validate({**DEFAULT_POLICY, "circuit_breaker": {"max_rollbacks": 2}})
+    worker = scheduler_for(orch)
+    task = asyncio.create_task(worker.run())
+
+    async def bad_release(version, deployment_id):
+        cluster.live = version
+        await orch.handle_deployment_failure(
+            deployment_id, "production", "sample-app", version,
+            FailureType.HEALTH_CHECK_FAILURE, {"workflow_run_id": "9"},
+        )
+        return await until(
+            lambda: orch.get_deployment_state(deployment_id).status is DeploymentStatus.ROLLED_BACK
+        )
+
+    assert await bad_release("v2", "d1")
+    assert await bad_release("v3", "d2")
+    refused = orch.check_version_denied("d3", "production", "sample-app", "v2")
+    cluster.live = "v4"
+    paused = await orch.handle_deployment_failure(
+        "d4", "production", "sample-app", "v4", FailureType.HEALTH_CHECK_FAILURE, {"workflow_run_id": "9"}
+    )
+    await worker.stop(5)
+    await task
+
+    assert refused["deployment_id"] == "d1"
+    assert paused["action"] == "alert"
+    assert "Circuit breaker open" in paused["message"]
+    assert [target for _, target in cluster.patches] == ["v1", "v1"]
+    assert orch.guards.denied("production", "sample-app", "v4") is None

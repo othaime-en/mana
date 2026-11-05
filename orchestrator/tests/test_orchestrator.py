@@ -11,7 +11,7 @@ from src.orchestrator import (
 )
 import time
 
-from tests.fakes import FakeJobQueue, FakeLocks
+from tests.fakes import FakeJobQueue, FakeLocks, retry_policy
 
 
 @pytest.fixture
@@ -275,6 +275,8 @@ class TestEnhancedFailureHandling:
             metadata={}
         )
         
+        orchestrator.policy = retry_policy(attempts=3)
+        
         with patch.object(orchestrator, 'get_deployment_state', return_value=state), \
              patch.object(orchestrator, 'save_deployment_state'):
             
@@ -505,7 +507,7 @@ def container(name, image):
 
 
 class TestRollbackAfterRetries:
-    """MAX_RETRIES alone decides when retrying stops and rollback starts"""
+    """The policy decides how often to retry; MAX_RETRIES is a ceiling on it"""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('max_retries,failures,expected', [
@@ -517,6 +519,7 @@ class TestRollbackAfterRetries:
         self, orchestrator, max_retries, failures, expected
     ):
         orchestrator.max_retries = max_retries
+        orchestrator.policy = retry_policy(attempts=10)
         store = {}
 
         def save(state):

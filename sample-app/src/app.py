@@ -6,6 +6,7 @@ from functools import wraps
 from typing import Tuple, Any
 import traceback
 
+from src import faults
 from src.config import get_config
 from src.utils import (
     setup_logging,
@@ -16,6 +17,7 @@ from src.utils import (
 )
 
 config = get_config()
+faults.check_start(config)
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -38,6 +40,8 @@ if not hasattr(app, "start_time"):
 
 # Setup graceful shutdown
 shutdown_manager = get_shutdown_manager()
+
+faults.start_memory_leak(config)
 
 
 # Request lifecycle middleware
@@ -140,6 +144,7 @@ def simulate_failure(func):
 
     @wraps(func)
     def wrapper(*args, **kwargs):
+        faults.add_latency(config)
         if random.random() < config.failure_rate:
             logger.error(
                 f"Simulated failure in {func.__name__}",
@@ -162,6 +167,13 @@ def health():
     Health check endpoint for Kubernetes liveness probe.
     Returns 200 if application is running.
     """
+    if faults.health_is_failing(config, time.time() - app.start_time):
+        return error_response(
+            error_code="SIMULATED_UNHEALTHY",
+            message="Simulated health failure (FAIL_HEALTH_AFTER)",
+            status_code=500,
+        )
+
     return jsonify(
         {
             "status": "healthy",
@@ -181,6 +193,13 @@ def ready():
     current_time = time.time()
     app_start = getattr(app, "start_time", current_time)
     uptime = current_time - app_start
+
+    if config.ready_never:
+        return error_response(
+            error_code="NOT_READY",
+            message="Simulated readiness failure (READY_NEVER)",
+            status_code=503,
+        )
 
     # Check if startup grace period has passed
     if uptime < config.startup_time:
@@ -283,6 +302,7 @@ def get_config_info():
             "environment": config.environment,
             "debug": config.debug,
             "metrics_enabled": config.enable_metrics,
+            "fault_injection": config.active_faults(),
             "request_id": g.request_id,
         }
     )

@@ -132,6 +132,7 @@ SRC = ROOT / "orchestrator" / "src"
 
 API_CALLS = {
     "read_namespaced_deployment": ("apps", "deployments", "get"),
+    "list_namespaced_deployment": ("apps", "deployments", "list"),
     "patch_namespaced_deployment": ("apps", "deployments", "patch"),
     "list_namespaced_replica_set": ("apps", "replicasets", "list"),
     "list_namespaced_pod": ("", "pods", "list"),
@@ -186,7 +187,7 @@ def test_role_grants_exactly_what_the_code_calls(namespace):
 
 def test_terraform_roles_match_the_manifest_rules():
     text = (ROOT / "terraform" / "modules" / "orchestrator" / "main.tf").read_text()
-    for verbs in ('["get", "patch"]', '["list"]'):
+    for verbs in ('["get", "list", "patch"]', '["list"]'):
         assert verbs in text
     for forbidden in ('"update"', '"watch"', '"*"', '"create"', '"delete"'):
         assert forbidden not in text.split('resource "kubernetes_role" "orchestrator"')[1].split("resource \"kubernetes_config_map\"")[0]
@@ -381,3 +382,39 @@ def test_terraform_mirrors_the_durability_changes():
     for module in ("orchestrator", "sample-app"):
         text = (modules / module / "main.tf").read_text()
         assert 'max_unavailable = "1"' in text and "min_available" not in text
+
+
+def test_the_sample_app_opts_in_to_cluster_side_watching():
+    labels = workload("sample-app")["metadata"]["labels"]
+
+    assert labels["mana.io/managed"] == "true"
+
+
+def container_env(name: str) -> dict:
+    containers = pod_spec(name)["containers"]
+    return {item["name"]: item.get("value") for item in containers[0]["env"]}
+
+
+def test_the_watcher_only_scans_namespaces_the_role_covers():
+    env = container_env("orchestrator")
+    roles = [doc for doc in documents(ROOT / "orchestrator" / "k8s" / "rbac.yaml") if doc["kind"] == "Role"]
+    covered = {role["metadata"]["namespace"] for role in roles}
+
+    assert env["WATCHER_ENABLED"] == "true"
+    assert set(env["WATCHER_NAMESPACES"].split(",")) <= covered
+
+
+def test_terraform_enables_the_watcher_like_the_manifests():
+    text = (ROOT / "terraform" / "modules" / "orchestrator" / "main.tf").read_text()
+    variables = (ROOT / "terraform" / "modules" / "orchestrator" / "variables.tf").read_text()
+
+    assert 'name  = "WATCHER_ENABLED"' in text and "tostring(var.watcher_enabled)" in text
+    assert 'name  = "WATCHER_NAMESPACES"' in text and 'join(",", var.watcher_namespaces)' in text
+    assert 'default     = ["production", "staging"]' in variables
+
+
+def test_terraform_labels_the_sample_app_for_the_watcher():
+    text = (ROOT / "terraform" / "modules" / "sample-app" / "main.tf").read_text()
+    deployment_metadata = text.split('resource "kubernetes_deployment" "sample_app"')[1].split("spec {")[0]
+
+    assert '"mana.io/managed" = "true"' in deployment_metadata

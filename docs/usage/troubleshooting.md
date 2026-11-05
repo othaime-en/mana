@@ -190,7 +190,7 @@ The role needs `get/list/watch/update/patch` on Deployments and ReplicaSets and 
 
 | `message`                                                               | Meaning                                                                                                                                                          | Fix                                                                                                                                                   |
 | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Cannot retry - missing workflow_run_id. Manual intervention required.` | The failure webhook carried no `metadata.workflow_run_id` and no earlier webhook for this deployment ID stored one | Include `metadata.workflow_run_id` on the failure webhook (the shipped deploy workflow does; the build-stage webhook does not) |
+| `Cannot retry - the failure webhook carried no workflow_run_id` | A failure that cannot roll back (a build failure) was reported without `metadata.workflow_run_id`, so it cannot be retried; failures that can roll back continue with their rule's follow-up | Fix the build; the shipped deploy workflow always sends the run ID |
 | `No previous version available - manual intervention required`          | No `last_successful:<ns>:<app>` key and no versioned ReplicaSet                                                                                                  | Report a `success` webhook for a good deployment; label pods with `version`                                                                           |
 | `Rollback failed - manual intervention required`                        | The rolled-back Deployment did not become healthy in time                                                                                                        | [Rollbacks not succeeding](#rollbacks-not-succeeding)                                                                                                 |
 
@@ -208,18 +208,20 @@ Each of these also writes a `manual_intervention_required` audit event.
 
 ### Rollbacks not happening
 
-A rollback needs: the failure count to exceed `MAX_RETRIES`, a known previous version, and the failed version to be the one running.
+A rollback needs: a policy rule that rolls back for this failure type (and, for a retry rule, its attempts used up), a known previous version that is not the failed version, the failed version to be the one running, and the circuit breaker to be closed.
 
 ```bash
-curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/config | jq '{max_retries}'
-curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/<id> | jq '{status, retry_count, previous_version}'
+curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/<id> | jq '{status, retry_count, failure_type, previous_version, diagnosis}'
+curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployments/<ns>/<app>/status | jq .automation
 kubectl -n orchestrator exec redis-0 -- redis-cli get last_successful:<ns>:<app>
 ```
 
-- With the defaults, rollback starts on the **fourth** failure for the same deployment ID.
+- Look for the `policy_decision` audit event of the deployment: its `reason` says why (`retries_exhausted`, `deterministic_failure`, `no_rollback_target`, ...). See [Recovery Policy](../configuration/recovery-policy.md).
 - A `skip` answer means another version is live, so there was nothing to roll back; `alert` for a build or test failure means nothing was deployed.
+- `Circuit breaker open` in the alert means the application was rolled back `circuit_breaker.max_rollbacks` times inside the window; automatic rollback resumes when they age out.
+- A version that was rolled back is on the deny-list: its next deployment is refused until `deny_ttl_seconds` pass or you call `DELETE /denied-versions/<ns>/<app>/<version>`.
 - If every attempt uses a new deployment ID the count never grows.
-- To roll back immediately, use `POST /rollback`.
+- To roll back immediately by hand, use `POST /rollback`.
 - The automatic rollback is a queued job: `action: rollback` means *scheduled*. Poll `GET /deployment/<id>` for `rolled_back`; if it stays `rolling_back`, check `mana:jobs:pending` / `mana:jobs:inflight` and whether another rollback holds `mana:lock:rollback:<ns>:<app>` (the job waits for it).
 
 ### Rollbacks not succeeding
@@ -316,10 +318,10 @@ The version in `last_successful:<namespace>:<app>` (the last `success` webhook).
 No. GitHub (`GITHUB_TOKEN`, `GITHUB_REPO`) is only used to re-run workflows for retries.
 
 **How many failures before a rollback?**
-By default four failures for the same deployment ID: three retries, then rollback.
+It depends on the failure type. By default a health check or smoke test failure rolls back on the first failure, a deployment failure or timeout on the second, and a test failure never rolls back. Change it in the [recovery policy](../configuration/recovery-policy.md).
 
 **Why did my first failure return `alert`?**
-The failure webhook had no `metadata.workflow_run_id`, so a retry cannot be scheduled. The ID is read from the webhook that reports the failure (or from earlier state for the same deployment ID).
+The policy says so for that failure type (`test_failure`, a build failure that cannot be retried), the rollback was not possible (no previous version, or it is the failed version itself), or the circuit breaker is open. The `message` in `action_taken` and the `policy_decision` audit event name the reason. A missing `metadata.workflow_run_id` no longer causes an alert for failures that can roll back: the rule continues with its follow-up.
 
 **Can I run MANA without Redis?**
 No. Startup fails without it.

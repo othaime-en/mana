@@ -13,7 +13,7 @@ resource "kubernetes_deployment" "sample_app" {
   metadata {
     name      = local.app_name
     namespace = var.namespace
-    labels    = local.labels
+    labels    = merge(local.labels, { "mana.io/managed" = "true" })
     annotations = {
       "deployment.kubernetes.io/revision" = "1"
     }

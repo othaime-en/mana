@@ -34,6 +34,18 @@ variable "max_retries" {
   default     = 3
 }
 
+variable "watcher_enabled" {
+  description = "Detect stuck rollouts of Deployments labelled mana.io/managed=true from the cluster"
+  type        = bool
+  default     = true
+}
+
+variable "watcher_namespaces" {
+  description = "Namespaces the watcher scans; each needs the orchestrator Role (see managed_namespaces)"
+  type        = list(string)
+  default     = ["production", "staging"]
+}
+
 variable "resources" {
   description = "Resource requests and limits"
   type = object({

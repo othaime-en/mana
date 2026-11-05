@@ -4,6 +4,7 @@ Configuration management for orchestrator
 
 import logging
 import os
+import re
 from typing import Any, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -56,6 +57,18 @@ class OrchestratorConfig:
     slack_webhook_url: Optional[str] = field(default=None, repr=False)
     alert_github_status: bool = True
     
+    policy_file: str = ''
+    health_poll_seconds: float = 5.0
+    
+    watcher_enabled: bool = False
+    watcher_namespaces: str = 'production,staging'
+    watcher_interval_seconds: float = 15.0
+    watcher_stuck_seconds: float = 120.0
+    
+    def watched_namespaces(self) -> list:
+        """The namespaces the watcher scans, from the comma-separated setting"""
+        return [name.strip() for name in self.watcher_namespaces.split(',') if name.strip()]
+    
     @classmethod
     def from_env(cls) -> 'OrchestratorConfig':
         """Load configuration from environment variables"""
@@ -106,7 +119,17 @@ class OrchestratorConfig:
             
             # Alert delivery
             slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL') or None,
-            alert_github_status=os.getenv('ALERT_GITHUB_STATUS', 'true').lower() != 'false'
+            alert_github_status=os.getenv('ALERT_GITHUB_STATUS', 'true').lower() != 'false',
+            
+            # Recovery policy
+            policy_file=os.getenv('POLICY_FILE', ''),
+            health_poll_seconds=float(os.getenv('HEALTH_POLL_SECONDS', '5')),
+            
+            # Cluster-side detection of stuck rollouts
+            watcher_enabled=os.getenv('WATCHER_ENABLED', 'false').lower() == 'true',
+            watcher_namespaces=os.getenv('WATCHER_NAMESPACES', 'production,staging'),
+            watcher_interval_seconds=float(os.getenv('WATCHER_INTERVAL_SECONDS', '15')),
+            watcher_stuck_seconds=float(os.getenv('WATCHER_STUCK_SECONDS', '120'))
         )
     
     def redis_client_kwargs(self) -> Dict[str, Any]:
@@ -147,6 +170,9 @@ class OrchestratorConfig:
         if self.health_check_port < 1 or self.health_check_port > 65535:
             raise ValueError("health_check_port must be between 1-65535")
         
+        if self.health_poll_seconds <= 0:
+            raise ValueError("health_poll_seconds must be > 0")
+        
         if self.job_lease_seconds < 3:
             raise ValueError("job_lease_seconds must be >= 3")
         
@@ -164,6 +190,23 @@ class OrchestratorConfig:
         
         if self.slack_webhook_url and not self.slack_webhook_url.startswith('https://'):
             raise ValueError("SLACK_WEBHOOK_URL must be an https:// URL")
+        
+        if self.watcher_interval_seconds <= 0:
+            raise ValueError("watcher_interval_seconds must be > 0")
+        
+        if self.watcher_stuck_seconds <= 0:
+            raise ValueError("watcher_stuck_seconds must be > 0")
+        
+        if self.watcher_enabled:
+            names = self.watched_namespaces()
+            if not names:
+                raise ValueError("WATCHER_NAMESPACES must name at least one namespace")
+            for name in names:
+                if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name):
+                    raise ValueError(f"WATCHER_NAMESPACES has an invalid namespace: {name!r}")
+        
+        if self.policy_file and not os.path.isfile(self.policy_file):
+            raise ValueError(f"POLICY_FILE not found: {self.policy_file}")
         
         if self.redis_tls_ca_file and not self.redis_tls:
             raise ValueError("redis_tls_ca_file requires REDIS_TLS=true")

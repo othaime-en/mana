@@ -222,6 +222,7 @@ OPERATOR_ROUTES = [
     ("GET", "/deployment/deploy-1", None),
     ("GET", "/deployments/recent", None),
     ("GET", "/deployments/production/sample-app/status", None),
+    ("DELETE", "/denied-versions/production/sample-app/v2", None),
 ]
 
 
@@ -297,12 +298,13 @@ def delivery_total(outcome):
 
 @pytest.fixture
 def recovery(api):
-    from tests.fakes import FakeJobQueue, FakeLocks, FakeRedis
+    from tests.fakes import FakeJobQueue, FakeLocks, FakeRedis, retry_policy
 
     jobs = FakeJobQueue()
     with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
          patch.object(api.orchestrator, "jobs", jobs), \
          patch.object(api.orchestrator, "locks", FakeLocks()), \
+         patch.object(api.orchestrator, "policy", retry_policy()), \
          patch.object(api.orchestrator, "get_previous_version", return_value="v0"):
         yield jobs
 

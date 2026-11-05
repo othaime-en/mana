@@ -29,7 +29,7 @@ resource "kubernetes_role" "orchestrator" {
   rule {
     api_groups = ["apps"]
     resources  = ["deployments"]
-    verbs      = ["get", "patch"]
+    verbs      = ["get", "list", "patch"]
   }
 
   rule {
@@ -387,6 +387,16 @@ resource "kubernetes_deployment" "orchestrator" {
           env {
             name  = "SHUTDOWN_GRACE_SECONDS"
             value = "30"
+          }
+
+          env {
+            name  = "WATCHER_ENABLED"
+            value = tostring(var.watcher_enabled)
+          }
+
+          env {
+            name  = "WATCHER_NAMESPACES"
+            value = join(",", var.watcher_namespaces)
           }
 
           env {

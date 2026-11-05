@@ -193,7 +193,7 @@ async def test_first_failed_webhook_retries_when_workflow_run_id_sent(api):
             )
             failed = await client.post(
                 "/webhook/deployment",
-                json=webhook_body("failed", metadata, "health_check_failure"),
+                json=webhook_body("failed", metadata, "deployment_failure"),
             )
             await asyncio.sleep(0)
             state = await client.get("/deployment/deploy-first-failure")
@@ -238,14 +238,15 @@ async def post_webhook(api, body):
 
 
 @pytest.mark.asyncio
-async def test_smoke_test_failure_is_accepted_and_handled(api):
-    response = await post_webhook(
-        api,
-        webhook_body("failed", {"workflow_run_id": "1"}, "smoke_test_failure"),
-    )
+async def test_smoke_test_failure_is_accepted_and_rolls_back_at_once(api):
+    with patch.object(api.orchestrator, "get_live_version", return_value="1.0.0"):
+        response = await post_webhook(
+            api,
+            webhook_body("failed", {"workflow_run_id": "1"}, "smoke_test_failure"),
+        )
 
     assert response.status_code == 200
-    assert response.json()["action_taken"]["action"] == "retry"
+    assert response.json()["action_taken"]["action"] == "rollback"
 
 
 @pytest.mark.asyncio
@@ -373,11 +374,12 @@ async def test_deployment_status_is_json_and_not_shadowed_by_metrics(api):
     replicas = {"replicas": 3, "ready_replicas": 3}
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        with patch.object(api.orchestrator, "get_deployment_metrics", return_value=replicas) as read:
+        with patch.object(api.orchestrator, "get_deployment_metrics", return_value=replicas) as read, \
+             patch.object(api.orchestrator, "get_automation_status", return_value={"circuit_breaker": {}}):
             response = await client.get("/deployments/production/sample-app/status")
 
     assert response.status_code == 200
-    assert response.json() == replicas
+    assert response.json() == {**replicas, "automation": {"circuit_breaker": {}}}
     read.assert_called_once_with("production", "sample-app")
 
 
@@ -569,3 +571,42 @@ async def test_health_reports_503_when_degraded_and_200_when_healthy(api):
 
     assert (healthy.status_code, healthy.json()["status"]) == (200, "healthy")
     assert (degraded.status_code, degraded.json()["status"], degraded.json()["redis"]) == (503, "degraded", "unhealthy")
+
+
+def test_the_watcher_is_built_only_when_enabled(api, monkeypatch):
+    monkeypatch.setattr(api._config, "watcher_enabled", False)
+    assert api.build_watcher() is None
+
+    monkeypatch.setattr(api._config, "watcher_enabled", True)
+    monkeypatch.setattr(api._config, "watcher_namespaces", "production,staging")
+    watcher = api.build_watcher()
+
+    assert watcher._namespaces == ["production", "staging"]
+    assert (watcher._interval, watcher._stuck_seconds) == (
+        api._config.watcher_interval_seconds, api._config.watcher_stuck_seconds
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_enabled_watcher_runs_for_the_life_of_the_app_and_stops_with_it(api, monkeypatch):
+    runs = []
+
+    class FakeWatcher:
+        def __init__(self):
+            self.stopped = asyncio.Event()
+
+        async def run(self):
+            runs.append("started")
+            await self.stopped.wait()
+            runs.append("stopped")
+
+        def stop(self):
+            self.stopped.set()
+
+    monkeypatch.setattr(api, "build_watcher", lambda: FakeWatcher())
+
+    async with api.lifespan(api.app):
+        await asyncio.sleep(0.05)
+        assert runs == ["started"]
+
+    assert runs == ["started", "stopped"]

@@ -14,7 +14,7 @@ export MANA=http://localhost:8000
 | Endpoints | Credential |
 | --------- | ---------- |
 | `POST /webhook/deployment` | `X-Mana-Timestamp` (Unix seconds) and `X-Mana-Signature`: `sha256=` followed by the hex HMAC-SHA256 of `<timestamp>.<raw body>` with `WEBHOOK_SECRET`. The timestamp must be within 300 seconds of the server clock |
-| `POST /rollback`, `POST /health-check`, `GET /deployment/{id}`, `GET /deployments/recent`, `GET /deployments/{ns}/{name}/status`, `GET /config` | `X-API-Key` equal to one of the configured `API_KEY` values |
+| `POST /rollback`, `POST /health-check`, `GET /deployment/{id}`, `GET /deployments/recent`, `GET /deployments/{ns}/{name}/status`, `DELETE /denied-versions/{ns}/{name}/{version}`, `GET /config` | `X-API-Key` equal to one of the configured `API_KEY` values |
 | `GET /`, `GET /health`, `GET /livez`, `GET /readyz`, `GET /metrics`, `/docs`, `/redoc`, `/openapi.json` | none (probes and Prometheus; restrict them with the NetworkPolicy) |
 
 A missing or wrong credential returns `401` with a generic body. The signature is checked before the payload, so a forged request never reaches validation. `WEBHOOK_SECRET` and `API_KEY` accept comma-separated lists: add the new value, update the clients, then remove the old one. A captured, valid webhook can be replayed for up to five minutes; idempotency keys are planned (CORE-06).
@@ -50,6 +50,7 @@ The examples below use `$MANA_API_KEY` for operator endpoints and show the webho
 | `GET`  | `/deployment/{deployment_id}`                       | Fetch one stored deployment state                                                                 |
 | `GET`  | `/deployments/recent`                               | List recent deployment states                                                                     |
 | `GET`  | `/deployments/{namespace}/{deployment_name}/status` | Replica counts and conditions                                                                     |
+| `DELETE` | `/denied-versions/{namespace}/{deployment_name}/{version}` | Take a version off the deny-list                                                         |
 | `GET`  | `/config`                                           | Effective orchestrator configuration                                                              |
 | `GET`  | `/metrics`                                          | Prometheus metrics                                                                                |
 
@@ -152,7 +153,7 @@ curl -s -X POST $MANA/webhook/deployment \
     "retry_count": 1,
     "backoff_seconds": 10.0,
     "workflow_run_id": "9876543210",
-    "message": "Retry 1/3 scheduled in 10.0s"
+    "message": "Retry 1/1 scheduled in 10.0s"
   }
 }
 ```
@@ -164,7 +165,7 @@ curl -s -X POST $MANA/webhook/deployment \
   "action_taken": {
     "action": "rollback",
     "previous_version": "v0f9e8d7-1759990000",
-    "message": "Rolled back to version v0f9e8d7-1759990000"
+    "message": "Rollback to version v0f9e8d7-1759990000 scheduled"
   }
 }
 ```
@@ -197,7 +198,9 @@ curl -s -X POST $MANA/webhook/deployment \
 }
 ```
 
-**`status=in_progress`** (HTTP 200): `{"status": "acknowledged", "deployment_id": "deploy-123"}`
+**`status=in_progress`** (HTTP 200): `{"status": "acknowledged", "deployment_id": "deploy-123"}`.
+
+When the version was rolled back earlier and is on the deny-list, the answer is `{"status": "denied", "deployment_id": ..., "message": ..., "reason": "rolled back after health_check_failure", "denied_since": <unix time>}` (HTTP 200). Nothing is stored for the refused deployment. `scripts/notify-orchestrator.sh` exits 3 on it and the deploy workflow stops before deploying. See [Recovery Policy](../configuration/recovery-policy.md#circuit-breaker-and-deny-list).
 
 ### Errors
 
@@ -421,3 +424,33 @@ The shipped workflows call `scripts/notify-orchestrator.sh` with everything in `
 ```
 
 The script builds the JSON with `jq`, signs it, validates `status` and `failure_type`, and sets a timeout longer than the rollback health wait. See [CI/CD Integration](../usage/cicd-integration.md) for the full setup.
+
+---
+
+## `DELETE /denied-versions/{namespace}/{deployment_name}/{version}`
+
+Requires `X-API-Key`. Takes a version off the deny-list so a pipeline may deploy it again. A version is denied after a verified rollback (see the [recovery policy](../configuration/recovery-policy.md#circuit-breaker-and-deny-list)).
+
+```bash
+curl -s -X DELETE -H "X-API-Key: $MANA_API_KEY" $MANA/denied-versions/production/sample-app/v1a2b3c4
+```
+
+Answers `200` with `{"status": "allowed", ...}`, `404` when the version is not on the list, and `503` when Redis is unavailable.
+
+## Automation state in `GET /deployments/{namespace}/{deployment_name}/status`
+
+The replica status is followed by an `automation` object:
+
+```json
+{
+  "automation": {
+    "circuit_breaker": {"open": false, "rollbacks_in_window": 1, "max_rollbacks": 3, "window_seconds": 3600},
+    "denied_versions": [
+      {"version": "v1a2b3c4", "since": 1790000000.0, "expires_at": 1790604800.0,
+       "reason": "rolled back after health_check_failure", "deployment_id": "deploy-123-production"}
+    ]
+  }
+}
+```
+
+`GET /deployment/{id}` also returns `diagnosis` (for example `CrashLoopBackOff`, or `null`).

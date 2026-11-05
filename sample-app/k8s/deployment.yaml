@@ -6,6 +6,7 @@ metadata:
   labels:
     app: sample-app
     version: "1.0.0"
+    mana.io/managed: "true"
   annotations:
     deployment.kubernetes.io/revision: "1"
 spec:

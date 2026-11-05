@@ -53,30 +53,35 @@ The important side effect is `last_successful:<namespace>:<app_name>`. That valu
 
 ### The decision rule
 
-After incrementing `retry_count`, `handle_deployment_failure()` evaluates these conditions **in order**:
+After incrementing `retry_count` (the number of failures for this deployment ID), `handle_deployment_failure()` gathers the facts and calls the pure function `decide()` from `src/policy.py`:
 
-1. **Retry**: `retry_count <= MAX_RETRIES`
-   - Requires `workflow_run_id` in the state's `metadata`, which is filled from the failure webhook's own `metadata` and from earlier state for the same deployment ID. If it is missing, the result is **alert** instead.
-   - Backoff is `INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(retry_count - 1)`, capped at `MAX_BACKOFF`.
-   - Status becomes `retry_scheduled` and a `retry_rerun` job is queued in Redis, due after the backoff. A scheduler on any replica claims it and calls the GitHub re-run API (see [Durable jobs](#durable-jobs)).
-2. **Alert, nothing to roll back**: the failure is `build_failure` or `test_failure`. Nothing was deployed, so rollback is never attempted for these types.
-3. **Rollback**: retries are exhausted **and** a previous version is known **and** the failed version is the one running
-   - Before touching the cluster, the orchestrator reads the image tag the Deployment is running. If it equals the failed `version`, the rollback proceeds.
+1. **Rule.** The [recovery policy](../configuration/recovery-policy.md) gives the rule for the failure type, from the first matching override or the default. `MAX_RETRIES` caps its retries.
+2. **Diagnosis.** For failures after a deployment, the pods running the failed version and the Deployment are read (`src/diagnosis.py`). A transient cause (`ImagePullBackOff`, `Unschedulable`) leaves the rule alone; a deterministic one (`CrashLoopBackOff`, `OOMKilled`, ...) skips its retries. The diagnosis is stored in the state.
+3. **Decision.** `decide(rule, attempt, can_retry, has_rollback_target, diagnosis)` returns `retry`, `rollback` or `alert` with a reason:
+   - A **retry** rule retries while `attempt <= max_attempts`, a `workflow_run_id` is known and the diagnosis is not deterministic. Otherwise it continues with its `then` action (`rollback` or `alert`).
+   - A **rollback** needs a previous version that is not the failed version; otherwise the result is an alert (`no_rollback_target`).
+   - The decision is audited (`policy_decision`) and counted (`mana_policy_decisions_total`).
+4. **Retry.** Backoff is `INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(retry_count - 1)`, capped at `MAX_BACKOFF`. Status becomes `retry_scheduled` and a `retry_rerun` job is queued in Redis, due after the backoff. A scheduler on any replica claims it and calls the GitHub re-run API (see [Durable jobs](#durable-jobs)).
+5. **Rollback.** First the circuit breaker is checked: too many recent rollbacks of the application turn the decision into an alert. Then, before touching the cluster, the orchestrator reads the image tag the Deployment is running:
+   - If it equals the failed `version`, the status becomes `rolling_back` and a `rollback` job is queued, due at once, carrying the policy's verification timeout. The response is `action: rollback` and means *scheduled*. The job later sets `rolled_back` (and freezes the failed version on the deny-list), or `failed` if the rollback does not become healthy.
    - If another version is running (for example the failed version never reached the cluster, or someone already rolled back), the result is **skip**: nothing is changed, the status becomes `failed` and a `rollback_skipped` audit event is written.
    - If the live version cannot be read, or the image is pinned by digest so no tag can be compared, the result is **alert**.
-   - Status becomes `rolling_back` and a `rollback` job is queued; the response is `action: rollback` and means *scheduled*. The job later sets `rolled_back`, or `failed` if the rollback does not become healthy.
-4. **Alert**: everything else (for example, no previous version is known)
-   - Status becomes `failed` and a `manual_intervention_required` audit event is written.
+6. **Alert.** The status becomes `failed`, a `manual_intervention_required` audit event is written and the alert channels are notified with the reason.
 
-With the defaults (`MAX_RETRIES=3`, `INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
+Stuck rollouts found by the [watcher](../configuration/recovery-policy.md#the-rollout-watcher) enter at step 1 as a `timeout` failure with the deployment ID `watch-<namespace>-<app>-g<generation>` and no workflow run, so a retry is not possible and the rule continues with its `then` action.
 
-| Failure # for this deployment ID | Action                                  | Delay |
-| -------------------------------- | --------------------------------------- | ----- |
-| 1                                | retry                                   | 10 s  |
-| 2                                | retry                                   | 20 s  |
-| 3                                | retry                                   | 40 s  |
-| 4                                | rollback (if a previous version exists) | n/a   |
-| 4, no previous version           | alert                                   | n/a   |
+With the built-in policy (`INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
+
+| Failure type           | Failure # | Action                                     | Delay |
+| ---------------------- | --------- | ------------------------------------------ | ----- |
+| `health_check_failure` | 1         | rollback (if a previous version exists)    | none  |
+| `smoke_test_failure`   | 1         | rollback (if a previous version exists)    | none  |
+| `deployment_failure`   | 1         | retry                                      | 10 s  |
+| `deployment_failure`   | 2         | rollback (if a previous version exists)    | none  |
+| `timeout`              | 1, 2      | retry, then rollback                       | 10 s  |
+| `build_failure`        | 1, 2, 3   | retry, retry, alert                        | 10 s, 20 s |
+| `test_failure`         | 1         | alert                                      | none  |
+| any, no previous version | when it would roll back | alert                         | none  |
 
 ### Executing a rollback
 

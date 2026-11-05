@@ -114,6 +114,10 @@ rollback: ## Rollback deployment
 	@echo "$(COLOR_YELLOW)Rolling back deployment...$(COLOR_RESET)"
 	@kubectl rollout undo deployment/sample-app -n $(NAMESPACE)
 
+demo: ## Time an automatic rollback: make demo MODE=crash|unhealthy|unready|oom [DEMO_ARGS=...]
+	@test -n "$(MODE)" || { echo "MODE is required: crash, unhealthy, unready or oom" >&2; exit 2; }
+	@./scripts/demo/simulate-failure.sh $(MODE) --yes --namespace $(NAMESPACE) $(DEMO_ARGS)
+
 ## Monitoring Commands
 
 monitoring: ## Setup monitoring stack

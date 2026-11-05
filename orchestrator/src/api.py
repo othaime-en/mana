@@ -20,6 +20,7 @@ from src.deliveries import Deliveries
 from src.jobs import Scheduler
 from src.logging_config import configure_logging
 from src.utils import get_audit_logger
+from src.watcher import Watcher
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from src import metrics
 import logging
@@ -49,16 +50,33 @@ def build_scheduler() -> Scheduler:
     )
 
 
+def build_watcher() -> Optional[Watcher]:
+    """The cluster-side watcher, when WATCHER_ENABLED is set"""
+    if not _config.watcher_enabled:
+        return None
+    return Watcher(
+        orchestrator,
+        _config.watched_namespaces(),
+        _config.watcher_interval_seconds,
+        _config.watcher_stuck_seconds
+    )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Run the scheduler for the life of the process; drain it on shutdown"""
     scheduler = build_scheduler()
     worker = asyncio.create_task(scheduler.run(), name="scheduler")
+    watcher = build_watcher()
+    watching = asyncio.create_task(watcher.run(), name="watcher") if watcher else None
     _app.state.draining = False
     try:
         yield
     finally:
         _app.state.draining = True
+        if watcher:
+            watcher.stop()
+            await watching
         await scheduler.stop(_config.shutdown_grace_seconds)
         await worker
 
@@ -347,6 +365,29 @@ async def process_deployment_event(payload: WebhookPayload) -> JSONResponse:
                 }
             )
         
+        denied = await asyncio.to_thread(
+            orchestrator.check_version_denied,
+            payload.deployment_id,
+            payload.namespace,
+            payload.app_name,
+            payload.version,
+            metadata
+        )
+        if denied:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "denied",
+                    "deployment_id": payload.deployment_id,
+                    "message": (
+                        f"Version {payload.version} was rolled back earlier and is on the "
+                        f"deny-list; do not deploy it"
+                    ),
+                    "reason": denied["reason"],
+                    "denied_since": denied["since"]
+                }
+            )
+        
         try:
             await asyncio.to_thread(
                 orchestrator.record_deployment_started,
@@ -522,14 +563,36 @@ async def prometheus_metrics():
 
 @app.get("/deployments/{namespace}/{deployment_name}/status", dependencies=[Depends(require_api_key)])
 async def get_deployment_status(namespace: str, deployment_name: str):
-    """Replica status of a Kubernetes Deployment"""
+    """Replica status of a Kubernetes Deployment, plus the circuit breaker and deny-list"""
     try:
-        return await asyncio.to_thread(
+        status = await asyncio.to_thread(
             orchestrator.get_deployment_metrics, namespace, deployment_name
         )
+        automation = await asyncio.to_thread(
+            orchestrator.get_automation_status, namespace, deployment_name
+        )
+        return {**status, "automation": automation}
     except Exception as e:
         logger.error(f"Error getting deployment status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete(
+    "/denied-versions/{namespace}/{deployment_name}/{version}",
+    dependencies=[Depends(require_api_key)]
+)
+async def allow_denied_version(namespace: str, deployment_name: str, version: str):
+    """Take a version off the deny-list so a pipeline may deploy it again"""
+    try:
+        removed = await asyncio.to_thread(
+            orchestrator.guards.allow, namespace, deployment_name, version
+        )
+    except redis.RedisError as e:
+        logger.error(f"Could not update the deny-list: {e}")
+        raise HTTPException(status_code=503, detail="Redis is unavailable")
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"{version} is not on the deny-list")
+    return {"status": "allowed", "namespace": namespace, "deployment_name": deployment_name, "version": version}
 
 
 @app.get("/config", dependencies=[Depends(require_api_key)])

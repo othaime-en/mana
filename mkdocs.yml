@@ -64,6 +64,7 @@ nav:
   - Configuration:
       - Overview: configuration/overview.md
       - Orchestrator: configuration/orchestrator.md
+      - Recovery Policy: configuration/recovery-policy.md
       - Sample Application: configuration/sample-app.md
       - Environment Variables: configuration/environment-variables.md
   - Usage:

@@ -13,7 +13,7 @@ resource "kubernetes_deployment" "sample_app" {
   metadata {
     name      = local.app_name
     namespace = var.namespace
-    labels    = local.labels
+    labels    = merge(local.labels, { "mana.io/managed" = "true" })
     annotations = {
       "deployment.kubernetes.io/revision" = "1"
     }
@@ -214,7 +214,7 @@ resource "kubernetes_pod_disruption_budget_v1" "sample_app" {
   }
 
   spec {
-    min_available = 2
+    max_unavailable = "1"
 
     selector {
       match_labels = {

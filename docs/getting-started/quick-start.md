@@ -115,7 +115,7 @@ MANA_STATUS=success scripts/notify-orchestrator.sh | jq
 Confirm it was stored:
 
 ```bash
-kubectl -n orchestrator exec deploy/redis -- redis-cli get last_successful:production:sample-app
+kubectl -n orchestrator exec redis-0 -- redis-cli get last_successful:production:sample-app
 # 1.0.0
 ```
 
@@ -132,14 +132,14 @@ Some pods will show `ErrImagePull` or `ImagePullBackOff`. The rollout is stuck o
 
 ## 6. Report the Failure and Watch MANA Decide
 
-A pipeline would send a `failed` webhook when its rollout times out. Send it for the same `deployment_id` four times, waiting a moment between calls, and watch the decision change. (Run the log command in another terminal.)
+A pipeline would send a `failed` webhook when its rollout times out. Send it for the same `deployment_id` twice, waiting a moment between calls, and watch the decision change. (The default [recovery policy](../configuration/recovery-policy.md) retries a `deployment_failure` once and then rolls back; a `health_check_failure` would roll back on the first call.) (Run the log command in another terminal.)
 
 ```bash
 kubectl -n orchestrator logs -l app=orchestrator -f --tail=5
 ```
 
 ```bash
-for i in 1 2 3 4; do
+for i in 1 2; do
   echo "--- failure #$i"
   MANA_DEPLOYMENT_ID=demo-bad MANA_NAMESPACE=production MANA_VERSION=1.1.0-broken \
   MANA_STATUS=failed MANA_FAILURE_TYPE=deployment_failure MANA_WORKFLOW_RUN_ID=1 \
@@ -152,23 +152,19 @@ Expected output:
 
 ```text
 --- failure #1
-{"action":"retry","retry_count":1,"backoff_seconds":10.0,"workflow_run_id":"1","message":"Retry 1/3 scheduled in 10.0s"}
+{"action":"retry","retry_count":1,"backoff_seconds":10.0,"workflow_run_id":"1","message":"Retry 1/1 scheduled in 10.0s"}
 --- failure #2
-{"action":"retry","retry_count":2,"backoff_seconds":20.0,"workflow_run_id":"1","message":"Retry 2/3 scheduled in 20.0s"}
---- failure #3
-{"action":"retry","retry_count":3,"backoff_seconds":40.0,"workflow_run_id":"1","message":"Retry 3/3 scheduled in 40.0s"}
---- failure #4
-{"action":"rollback","previous_version":"1.0.0","message":"Rolled back to version 1.0.0"}
+{"action":"rollback","previous_version":"1.0.0","message":"Rollback to version 1.0.0 scheduled"}
 ```
 
 What happened:
 
 | Failure | Decision   | Why                                                                                                                                                                                                                                                                                    |
 | ------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1, 2, 3 | `retry`    | Within `MAX_RETRIES=3`; a workflow re-run is scheduled after 10 s, 20 s and 40 s of backoff. Because the token is a placeholder, GitHub rejects the re-run request (an error such as `Failed to trigger re-run: 401` appears in the logs after the backoff), which is harmless for this demo |
-| 4       | `rollback` | `retry_count` (4) now exceeds `MAX_RETRIES`, a previous version (`1.0.0`) is known, and the failed version is the one running                                                                                                                                                                   |
+| 1       | `retry`    | The policy allows one retry for a `deployment_failure`; a workflow re-run is scheduled after 10 s. The diagnosis (`ImagePullBackOff`, a transient cause) keeps the retry. Because the token is a placeholder, GitHub rejects the re-run request (an error such as `Failed to trigger re-run: 401` appears in the logs after the backoff), which is harmless for this walkthrough. |
+| 2       | `rollback` | The retry is used up, a previous version (`1.0.0`) is known, and the failed version is the one running |
 
-The fourth call takes a few seconds: the orchestrator patches the Deployment back to `sample-app:1.0.0`, waits for all replicas to be ready, and calls each pod's `/health` endpoint before answering.
+The second call answers at once with *scheduled*. A rollback job then takes the application's lock, patches the Deployment back to `sample-app:1.0.0`, waits for all replicas to be ready and calls each pod's `/health` endpoint; wait for the state to read `rolled_back` (step 7). The queued retry jobs find the deployment has moved on and do nothing, so the placeholder token is never used.
 
 ## 7. Verify the Recovery
 

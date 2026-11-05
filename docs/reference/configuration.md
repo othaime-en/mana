@@ -85,8 +85,8 @@ With Docker Compose the same services publish `8000`, `5000`, `6379`, `9090`, `3
 
 | Workload         | Replicas        | CPU request / limit | Memory request / limit | Probes                                                                                    |
 | ---------------- | --------------- | ------------------- | ---------------------- | ----------------------------------------------------------------------------------------- |
-| Orchestrator     | 2               | 100m / 500m         | 256Mi / 512Mi          | liveness and readiness `GET /health:8000`, 60 s delay, 20 s period                        |
-| Redis (manifest) | 1               | 50m / 100m          | 64Mi / 128Mi           | none                                                                                      |
+| Orchestrator     | 2               | 100m / 500m         | 256Mi / 512Mi          | startup and liveness `GET /livez:8000`, readiness `GET /readyz:8000`; PDB `maxUnavailable: 1` |
+| Redis (manifest) | 1 (StatefulSet, 1Gi PVC) | 50m / 100m | 64Mi / 128Mi           | `redis-cli ping` (liveness and readiness); AOF persistence                                |
 | Sample app       | 3 (HPA 3 to 10) | 100m / 200m         | 128Mi / 256Mi          | liveness `/health` (30 s delay, 10 s period); readiness `/ready` (10 s delay, 5 s period) |
 
 All application pods run as non-root (UID 1000) with privilege escalation disabled and all capabilities dropped.
@@ -142,6 +142,10 @@ Defined in `monitoring/prometheus/alerts.yml`. Severity drives Alertmanager rout
 | `HighWebhookFailureRate`                                                            | `webhook_errors_total / webhook_requests_total > 5%` per endpoint | 5 m        | warning  |
 | `RedisConnectionFailures`                                                           | `rate(redis_connection_errors_total[5m]) > 0`                     | 2 m        | critical |
 | `HighHealthCheckFailureRate`                                                        | failed health checks `> 10%`                                      | 5 m        | warning  |
+| `SchedulerStalled`                                                                  | `max(mana_scheduler_overdue_seconds) > 120`                       | 2 m        | critical |
+| `JobsDeadLettered`                                                                  | any job with `outcome="dead"` in 15 m                             | none       | critical |
+| `GitHubRerunFailing`                                                                | more than 50% of re-run requests not 2xx over 10 m                | 10 m       | warning  |
+| `AlertDeliveryFailing`                                                              | more than 2 failed alert deliveries per channel in 15 m           | none       | warning  |
 | `HighErrorRate`                                                                     | 5xx ratio of `flask_http_request_total`                           | 5 m        | critical |
 | `SlowResponseTime`                                                                  | p95 request latency `> 1 s`                                       | 10 m       | warning  |
 | `HighMemoryUsage` / `HighCPUUsage`                                                  | container usage vs limit                                          | 10 m       | warning  |

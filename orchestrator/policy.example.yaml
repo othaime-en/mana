@@ -1,0 +1,37 @@
+# Recovery policy for the Mana orchestrator. Point POLICY_FILE at a copy of this
+# file; without POLICY_FILE the built-in default policy (the `default` section
+# below) is used. Retries stay capped by MAX_RETRIES.
+version: 1
+
+# What to do per failure type. Every type must be listed.
+#   action: retry     re-run the workflow; needs max_attempts, and `then` says what
+#                     follows when the attempts are used up (rollback or alert)
+#   action: rollback  roll back to the last successful version at once
+#   action: alert     only notify a human
+# build_failure and test_failure happen before anything is deployed, so they can
+# never roll back. A deterministic diagnosis (CrashLoopBackOff, OOMKilled, ...)
+# skips the retries and goes straight to `then`.
+default:
+  build_failure:        {action: retry, max_attempts: 2}
+  test_failure:         {action: alert}
+  deployment_failure:   {action: retry, max_attempts: 1, then: rollback}
+  health_check_failure: {action: rollback}
+  smoke_test_failure:   {action: rollback}
+  timeout:              {action: retry, max_attempts: 1, then: rollback}
+
+# The first override whose match applies and that lists the failure type wins.
+overrides:
+  - match: {namespace: staging}
+    rules:
+      health_check_failure: {action: retry, max_attempts: 2, then: rollback}
+
+rollback:
+  verify_timeout_seconds: 120   # how long the rolled-back version has to become healthy
+  freeze_failed_version: true   # refuse to deploy the failed version again (deny-list)
+  deny_ttl_seconds: 604800      # how long a version stays denied (7 days)
+
+# More than max_rollbacks rollbacks of one application inside the window pauses
+# automatic rollback for it and alerts instead.
+circuit_breaker:
+  max_rollbacks: 3
+  window_seconds: 3600

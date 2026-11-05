@@ -253,6 +253,55 @@ class TestGetAuditLogger:
         assert id(logger1) == id(logger2)
 
 
+class TestPolicyDecisionAudit:
+    def test_the_decision_and_its_reason_are_in_the_event(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_policy_decision(
+                deployment_id='test-123',
+                namespace='production',
+                deployment_name='sample-app',
+                version='1.0.0',
+                failure_type='health_check_failure',
+                attempt=1,
+                decision='rollback',
+                reason='policy',
+                diagnosis='CrashLoopBackOff'
+            )
+        
+        event = caplog.records[-1].audit_event
+        assert event['action'] == 'policy_decision'
+        assert event['details'] == {
+            'failure_type': 'health_check_failure',
+            'attempt': 1,
+            'decision': 'rollback',
+            'reason': 'policy',
+            'detail': '',
+            'diagnosis': 'CrashLoopBackOff'
+        }
+
+
+class TestGuardAudit:
+    def test_a_frozen_or_refused_version_is_logged_with_its_outcome(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_version_denied(
+                'd1', 'production', 'sample-app', 'v2', outcome='refused', reason='rolled back'
+            )
+        
+        event = caplog.records[-1].audit_event
+        assert event['action'] == 'version_denied'
+        assert event['details'] == {'outcome': 'refused', 'reason': 'rolled back'}
+    
+    def test_an_open_circuit_breaker_is_logged_with_the_count(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_circuit_breaker_open(
+                'd1', 'production', 'sample-app', 'v2', rollbacks=3, window_seconds=3600
+            )
+        
+        event = caplog.records[-1].audit_event
+        assert event['action'] == 'circuit_breaker_open'
+        assert event['details'] == {'rollbacks': 3, 'window_seconds': 3600}
+
+
 class TestAuditAction:
     """Test audit action enum"""
     

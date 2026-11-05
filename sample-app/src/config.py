@@ -34,6 +34,15 @@ class Config:
     enable_metrics: bool
     metrics_port: int
 
+    # Fault injection (demos and tests only; every mode needs the master flag)
+    enable_fault_injection: bool = False
+    fail_on_start: bool = False
+    fail_health_after: Optional[int] = None
+    ready_never: bool = False
+    leak_mb_per_s: float = 0.0
+    leak_max_mb: int = 2048
+    latency_ms: int = 0
+
     def __post_init__(self):
         """Validate configuration after initialization"""
         self._validate()
@@ -65,6 +74,20 @@ class Config:
         if self.startup_time < 0:
             raise ValueError(f"Startup time must be >= 0, got {self.startup_time}")
 
+        # Fault injection validation
+        if self.leak_mb_per_s < 0 or self.leak_max_mb < 1:
+            raise ValueError("LEAK_MB_PER_S must be >= 0 and LEAK_MAX_MB >= 1")
+        if self.latency_ms < 0:
+            raise ValueError(f"LATENCY_MS must be >= 0, got {self.latency_ms}")
+        if self.fail_health_after is not None and self.fail_health_after < 0:
+            raise ValueError(
+                f"FAIL_HEALTH_AFTER must be >= 0, got {self.fail_health_after}"
+            )
+        if self.active_faults() and not self.enable_fault_injection:
+            raise ValueError(
+                f"Fault injection modes {self.active_faults()} need ENABLE_FAULT_INJECTION=true"
+            )
+
         logger.info(
             f"Configuration validated: environment={self.environment}, port={self.port}"
         )
@@ -84,7 +107,30 @@ class Config:
             keepalive=int(os.getenv("KEEPALIVE", "5")),
             enable_metrics=os.getenv("ENABLE_METRICS", "true").lower() == "true",
             metrics_port=int(os.getenv("METRICS_PORT", "5000")),
+            enable_fault_injection=os.getenv("ENABLE_FAULT_INJECTION", "false").lower()
+            == "true",
+            fail_on_start=os.getenv("FAIL_ON_START", "false").lower() == "true",
+            fail_health_after=(
+                int(os.environ["FAIL_HEALTH_AFTER"])
+                if os.getenv("FAIL_HEALTH_AFTER")
+                else None
+            ),
+            ready_never=os.getenv("READY_NEVER", "false").lower() == "true",
+            leak_mb_per_s=float(os.getenv("LEAK_MB_PER_S", "0")),
+            leak_max_mb=int(os.getenv("LEAK_MAX_MB", "2048")),
+            latency_ms=int(os.getenv("LATENCY_MS", "0")),
         )
+
+    def active_faults(self) -> list:
+        """Names of the fault injection modes that are set"""
+        modes = {
+            "FAIL_ON_START": self.fail_on_start,
+            "FAIL_HEALTH_AFTER": self.fail_health_after is not None,
+            "READY_NEVER": self.ready_never,
+            "LEAK_MB_PER_S": self.leak_mb_per_s > 0,
+            "LATENCY_MS": self.latency_ms > 0,
+        }
+        return [name for name, active in modes.items() if active]
 
     def is_production(self) -> bool:
         """Check if running in production environment"""

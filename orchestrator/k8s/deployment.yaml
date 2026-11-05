@@ -15,6 +15,11 @@ metadata:
     app: orchestrator
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: orchestrator
@@ -24,6 +29,14 @@ spec:
         app: orchestrator
     spec:
       serviceAccountName: orchestrator-sa
+      terminationGracePeriodSeconds: 45
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: orchestrator
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -81,6 +94,20 @@ spec:
               key: token
         - name: GITHUB_REPO
           value: "othaime-en/mana"  # REPLACE THIS
+        - name: JOB_LEASE_SECONDS
+          value: "60"
+        - name: SHUTDOWN_GRACE_SECONDS
+          value: "30"
+        - name: WATCHER_ENABLED
+          value: "true"
+        - name: WATCHER_NAMESPACES
+          value: "production,staging"
+        - name: SLACK_WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: slack-webhook
+              key: url
+              optional: true
         resources:
           requests:
             memory: "256Mi"
@@ -88,18 +115,24 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "500m"
+        startupProbe:
+          httpGet:
+            path: /livez
+            port: 8000
+          periodSeconds: 5
+          failureThreshold: 24
         livenessProbe:
           httpGet:
-            path: /health
+            path: /livez
             port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 3
         readinessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000
@@ -135,3 +168,14 @@ kind: ServiceAccount
 metadata:
   name: orchestrator-sa
   namespace: orchestrator
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orchestrator-pdb
+  namespace: orchestrator
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: orchestrator

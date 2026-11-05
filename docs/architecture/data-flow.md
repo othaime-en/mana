@@ -53,30 +53,35 @@ The important side effect is `last_successful:<namespace>:<app_name>`. That valu
 
 ### The decision rule
 
-After incrementing `retry_count`, `handle_deployment_failure()` evaluates these conditions **in order**:
+After incrementing `retry_count` (the number of failures for this deployment ID), `handle_deployment_failure()` gathers the facts and calls the pure function `decide()` from `src/policy.py`:
 
-1. **Retry**: `retry_count <= MAX_RETRIES`
-   - Requires `workflow_run_id` in the state's `metadata`, which is filled from the failure webhook's own `metadata` and from earlier state for the same deployment ID. If it is missing, the result is **alert** instead.
-   - Backoff is `INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(retry_count - 1)`, capped at `MAX_BACKOFF`.
-   - Status becomes `retry_scheduled`; a background task waits for the backoff, then calls the GitHub re-run API.
-2. **Alert, nothing to roll back**: the failure is `build_failure` or `test_failure`. Nothing was deployed, so rollback is never attempted for these types.
-3. **Rollback**: retries are exhausted **and** a previous version is known **and** the failed version is the one running
-   - Before touching the cluster, the orchestrator reads the image tag the Deployment is running. If it equals the failed `version`, the rollback proceeds.
+1. **Rule.** The [recovery policy](../configuration/recovery-policy.md) gives the rule for the failure type, from the first matching override or the default. `MAX_RETRIES` caps its retries.
+2. **Diagnosis.** For failures after a deployment, the pods running the failed version and the Deployment are read (`src/diagnosis.py`). A transient cause (`ImagePullBackOff`, `Unschedulable`) leaves the rule alone; a deterministic one (`CrashLoopBackOff`, `OOMKilled`, ...) skips its retries. The diagnosis is stored in the state.
+3. **Decision.** `decide(rule, attempt, can_retry, has_rollback_target, diagnosis)` returns `retry`, `rollback` or `alert` with a reason:
+   - A **retry** rule retries while `attempt <= max_attempts`, a `workflow_run_id` is known and the diagnosis is not deterministic. Otherwise it continues with its `then` action (`rollback` or `alert`).
+   - A **rollback** needs a previous version that is not the failed version; otherwise the result is an alert (`no_rollback_target`).
+   - The decision is audited (`policy_decision`) and counted (`mana_policy_decisions_total`).
+4. **Retry.** Backoff is `INITIAL_BACKOFF × BACKOFF_MULTIPLIER^(retry_count - 1)`, capped at `MAX_BACKOFF`. Status becomes `retry_scheduled` and a `retry_rerun` job is queued in Redis, due after the backoff. A scheduler on any replica claims it and calls the GitHub re-run API (see [Durable jobs](#durable-jobs)).
+5. **Rollback.** First the circuit breaker is checked: too many recent rollbacks of the application turn the decision into an alert. Then, before touching the cluster, the orchestrator reads the image tag the Deployment is running:
+   - If it equals the failed `version`, the status becomes `rolling_back` and a `rollback` job is queued, due at once, carrying the policy's verification timeout. The response is `action: rollback` and means *scheduled*. The job later sets `rolled_back` (and freezes the failed version on the deny-list), or `failed` if the rollback does not become healthy.
    - If another version is running (for example the failed version never reached the cluster, or someone already rolled back), the result is **skip**: nothing is changed, the status becomes `failed` and a `rollback_skipped` audit event is written.
    - If the live version cannot be read, or the image is pinned by digest so no tag can be compared, the result is **alert**.
-   - Status becomes `rolling_back`, then `rolled_back` on success or `failed` if the rollback does not become healthy.
-4. **Alert**: everything else (for example, no previous version is known)
-   - Status becomes `failed` and a `manual_intervention_required` audit event is written.
+6. **Alert.** The status becomes `failed`, a `manual_intervention_required` audit event is written and the alert channels are notified with the reason.
 
-With the defaults (`MAX_RETRIES=3`, `INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
+Stuck rollouts found by the [watcher](../configuration/recovery-policy.md#the-rollout-watcher) enter at step 1 as a `timeout` failure with the deployment ID `watch-<namespace>-<app>-g<generation>` and no workflow run, so a retry is not possible and the rule continues with its `then` action.
 
-| Failure # for this deployment ID | Action                                  | Delay |
-| -------------------------------- | --------------------------------------- | ----- |
-| 1                                | retry                                   | 10 s  |
-| 2                                | retry                                   | 20 s  |
-| 3                                | retry                                   | 40 s  |
-| 4                                | rollback (if a previous version exists) | n/a   |
-| 4, no previous version           | alert                                   | n/a   |
+With the built-in policy (`INITIAL_BACKOFF=10`, `BACKOFF_MULTIPLIER=2`):
+
+| Failure type           | Failure # | Action                                     | Delay |
+| ---------------------- | --------- | ------------------------------------------ | ----- |
+| `health_check_failure` | 1         | rollback (if a previous version exists)    | none  |
+| `smoke_test_failure`   | 1         | rollback (if a previous version exists)    | none  |
+| `deployment_failure`   | 1         | retry                                      | 10 s  |
+| `deployment_failure`   | 2         | rollback (if a previous version exists)    | none  |
+| `timeout`              | 1, 2      | retry, then rollback                       | 10 s  |
+| `build_failure`        | 1, 2, 3   | retry, retry, alert                        | 10 s, 20 s |
+| `test_failure`         | 1         | alert                                      | none  |
+| any, no previous version | when it would roll back | alert                         | none  |
 
 ### Executing a rollback
 
@@ -111,6 +116,28 @@ If both fail, the result is `None` and the decision is `alert`.
 !!! note
 `HEALTH_CHECK_TIMEOUT` (default 5) is the **per-request HTTP timeout** used when calling a pod, not the overall verification timeout. The overall timeout is the 300 s default of `check_deployment_health()` (or the `timeout` field of `POST /health-check`).
 
+## Durable jobs
+
+Retries, rollbacks and alerts run as jobs in Redis, never inside the webhook request.
+
+| Key                    | Type       | Meaning                                                      |
+| ---------------------- | ---------- | ------------------------------------------------------------ |
+| `mana:jobs:pending`    | sorted set | Job ids scored by the time they are due                      |
+| `mana:jobs:inflight`   | sorted set | Claimed job ids scored by the end of their lease             |
+| `mana:job:<id>`        | JSON       | Kind, payload and attempt count (24 h TTL)                   |
+| `mana:lock:rollback:<namespace>:<app>` | string | Per-application rollback lock (expires on its own) |
+| `mana:delivery:<hash>` | JSON       | Claim and answer of a signed webhook (30 s while processing, 10 min after) |
+
+1. A scheduler runs in every replica. It claims the oldest due job with one atomic Lua script that moves it from `pending` to `inflight` with a lease, so exactly one replica gets it. All times come from the Redis server, so replica clocks cannot disagree.
+2. While the job runs, the lease is renewed every third of its length. If the replica dies, the lease expires, any replica moves the job back to `pending`, and it runs again. The attempt count then exceeds 1.
+3. A job id is deterministic (`retry_rerun:<deployment>:<n>`, `rollback:<deployment>:<n>`), so queueing the same job twice adds one.
+4. A job only acts while the deployment is still waiting for it: a retry job is skipped if the deployment has moved to a later step, so a stale job cannot re-run a succeeded deployment or fail one that moved on.
+5. A failing job is retried with backoff up to `JOB_MAX_ATTEMPTS`. A job that raises *defer* (for example a rollback that finds the lock taken) waits and does not use an attempt. A job that gives up marks the deployment `failed`, writes `manual_intervention_required` and sends an alert.
+
+The rollback job holds the per-application lock for its whole run, renewed in the background. It re-reads the live version under the lock. A first attempt that finds the *target* version already live means another rollback did the work and is skipped; a retried attempt that finds it live (the worker died after patching) goes on to verify the rollout instead, so the same rollback is never executed twice and a half-finished one is completed.
+
+Not covered: if a replica dies in the milliseconds between saving a state and queueing its job, the job is lost and the deployment stays in that state until its 24 h TTL. The sender's own retry of the same signed request is recognised as a copy and not reprocessed.
+
 ## Retry Mechanics
 
 For a retry the orchestrator does not redeploy anything itself. It asks GitHub to re-run the failed workflow:
@@ -120,7 +147,7 @@ POST https://api.github.com/repos/<GITHUB_REPO>/actions/runs/<workflow_run_id>/r
 Authorization: Bearer <GITHUB_TOKEN>
 ```
 
-This happens in a background `asyncio` task after the backoff delay. Success is HTTP `201`; `403` is logged as a missing-permission error (the token needs the `actions:write` permission, or the classic `repo`/`workflow` scopes). The retry endpoint does not wait for the re-run to finish. The outcome arrives later as a new webhook from the re-run pipeline.
+This is done by the `retry_rerun` job once the backoff has passed. Success is HTTP `201`. `403` and `409` (the run may still be in progress, or the token lacks `actions:write`), `429`, `5xx` and network errors are retried with backoff; any other answer, or a missing token, fails the job at once (the token needs `actions:write`, or the classic `repo`/`workflow` scopes). The retry endpoint does not wait for the re-run to finish. The outcome arrives later as a new webhook from the re-run pipeline.
 
 ## State Model
 

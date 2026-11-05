@@ -124,14 +124,16 @@ Rules that matter:
 ## How a Retry Plays Out
 
 1. A deploy job fails; its last step posts `status=failed` with `workflow_run_id`.
-2. The orchestrator replies immediately with `action: retry` and schedules a background task.
-3. After the backoff (10 s, 20 s, 40 s by default) it calls `POST /repos/<repo>/actions/runs/<run_id>/rerun`.
+2. The orchestrator replies immediately with `action: retry` and queues a durable job in Redis, due after the backoff.
+3. When the job is due (10 s, 20 s, 40 s by default) whichever replica claims it calls `POST /repos/<repo>/actions/runs/<run_id>/rerun`. A restart or a killed pod in between does not lose the retry: another replica picks the job up.
 4. GitHub starts a new attempt of the **same run**. The attempt posts its own `in_progress` and `success` or `failed` events.
-5. After more than `MAX_RETRIES` failures for one deployment ID, the orchestrator patches the Deployment back to the last good version instead.
+5. When the policy says so (a deployment failure's second failure by default, or the first failure of a health check), the orchestrator replies `action: rollback` and queues a rollback job. The job takes a lock for the application, checks that the failed version is still the live one, patches the Deployment back to the last good version, verifies it, and sets the state to `rolled_back`. The webhook does not wait for it; poll `GET /deployment/<id>`.
 
-The workflows never roll back themselves: the orchestrator is the only component that changes the image back. Until the fast-path rollback is built, a failed version therefore stays live while the retries run.
+The workflows never roll back themselves: the orchestrator is the only component that changes the image back. A health check failure is rolled back on the first failure, so the failed version is live only until the rollback is verified; the failures that are retried leave it live while the retries run.
 
-Timing matters: GitHub allows a re-run only for a run that has finished. The result webhook is sent from inside the run, so a short backoff can reach GitHub while the run is still active and be rejected. Watch the orchestrator log for `Failed to trigger re-run` or `permission denied` lines.
+After a rollback the failed version is on the deny-list. The deploy job's `in_progress` notification is answered `denied` for it, `scripts/notify-orchestrator.sh` exits 3 and sets the step output `denied=true`, and the job stops with an error before deploying. It reports no result, so the policy is not started for a deployment that never ran. See [Recovery Policy](../configuration/recovery-policy.md#circuit-breaker-and-deny-list).
+
+Timing matters: GitHub allows a re-run only for a run that has finished. The result webhook is sent from inside the run, so a short backoff can reach GitHub while the run is still active and be rejected. MANA retries a 403, 409, 429 or 5xx answer with backoff (up to `JOB_MAX_ATTEMPTS`); after that the deployment is marked `failed` and an alert is sent. Watch `mana_github_api_requests_total{endpoint="rerun"}` and the orchestrator log for `GitHub answered` lines. Whether GitHub accepts a re-run of a run that is still in progress is still unverified (CORE-05).
 
 ## Recommended Workflow Changes
 

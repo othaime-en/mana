@@ -132,6 +132,7 @@ SRC = ROOT / "orchestrator" / "src"
 
 API_CALLS = {
     "read_namespaced_deployment": ("apps", "deployments", "get"),
+    "list_namespaced_deployment": ("apps", "deployments", "list"),
     "patch_namespaced_deployment": ("apps", "deployments", "patch"),
     "list_namespaced_replica_set": ("apps", "replicasets", "list"),
     "list_namespaced_pod": ("", "pods", "list"),
@@ -186,7 +187,7 @@ def test_role_grants_exactly_what_the_code_calls(namespace):
 
 def test_terraform_roles_match_the_manifest_rules():
     text = (ROOT / "terraform" / "modules" / "orchestrator" / "main.tf").read_text()
-    for verbs in ('["get", "patch"]', '["list"]'):
+    for verbs in ('["get", "list", "patch"]', '["list"]'):
         assert verbs in text
     for forbidden in ('"update"', '"watch"', '"*"', '"create"', '"delete"'):
         assert forbidden not in text.split('resource "kubernetes_role" "orchestrator"')[1].split("resource \"kubernetes_config_map\"")[0]
@@ -203,11 +204,14 @@ ALLOWED_VOLUME_TYPES = {
 
 
 def pod_spec(name: str) -> dict:
-    deployment = next(
+    return workload(name)["spec"]["template"]["spec"]
+
+
+def workload(name: str) -> dict:
+    return next(
         doc for doc in documents(WORKLOADS[name])
-        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == name
+        if doc["kind"] in ("Deployment", "StatefulSet") and doc["metadata"]["name"] == name
     )
-    return deployment["spec"]["template"]["spec"]
 
 
 @pytest.mark.parametrize("name", WORKLOADS)
@@ -294,3 +298,123 @@ def test_workflows_do_not_use_a_personal_access_token_for_the_registry():
     text = (ROOT / ".github" / "workflows" / "build-and-test.yml").read_text()
     assert "GHCR_PAT" not in text
     assert "secrets.GITHUB_TOKEN" in text
+
+
+def container(name: str) -> dict:
+    return pod_spec(name)["containers"][0]
+
+
+def test_redis_keeps_its_data_on_a_persistent_volume():
+    redis = workload("redis")
+    assert redis["kind"] == "StatefulSet"
+    (claim,) = redis["spec"]["volumeClaimTemplates"]
+    assert claim["metadata"]["name"] == "redis-data"
+    assert claim["spec"]["accessModes"] == ["ReadWriteOnce"]
+    assert redis["spec"]["persistentVolumeClaimRetentionPolicy"]["whenDeleted"] == "Retain"
+    assert not [v for v in pod_spec("redis").get("volumes", []) if v["name"] == "redis-data"]
+    command = " ".join(container("redis")["command"])
+    assert "--appendonly yes" in command and "--dir /data" in command
+    mounts = {m["name"]: m["mountPath"] for m in container("redis")["volumeMounts"]}
+    assert mounts["redis-data"] == "/data"
+
+
+def test_redis_services_match_the_statefulset():
+    docs = {doc["metadata"]["name"]: doc for doc in documents(WORKLOADS["redis"]) if doc["kind"] == "Service"}
+    assert docs["redis-headless"]["spec"]["clusterIP"] == "None"
+    assert workload("redis")["spec"]["serviceName"] == "redis-headless"
+    for service in docs.values():
+        assert service["spec"]["selector"] == {"app": "redis"}
+
+
+def test_orchestrator_probes_use_the_dedicated_endpoints():
+    probes = container("orchestrator")
+    assert probes["livenessProbe"]["httpGet"]["path"] == "/livez"
+    assert probes["startupProbe"]["httpGet"]["path"] == "/livez"
+    assert probes["readinessProbe"]["httpGet"]["path"] == "/readyz"
+    assert "initialDelaySeconds" not in probes["livenessProbe"]
+
+
+def test_orchestrator_gets_time_to_drain_its_scheduler():
+    spec = pod_spec("orchestrator")
+    env = {e["name"]: e.get("value") for e in container("orchestrator")["env"]}
+    assert spec["terminationGracePeriodSeconds"] > float(env["SHUTDOWN_GRACE_SECONDS"])
+    assert env["JOB_LEASE_SECONDS"] == "60"
+
+
+def test_orchestrator_replicas_spread_over_nodes_and_roll_without_losing_one():
+    deployment = workload("orchestrator")
+    spread = deployment["spec"]["template"]["spec"]["topologySpreadConstraints"]
+    assert spread[0]["topologyKey"] == "kubernetes.io/hostname"
+    assert spread[0]["labelSelector"]["matchLabels"] == {"app": "orchestrator"}
+    assert deployment["spec"]["strategy"]["rollingUpdate"]["maxUnavailable"] == 0
+
+
+def test_the_slack_webhook_is_an_optional_secret_reference():
+    env = {e["name"]: e for e in container("orchestrator")["env"]}
+    reference = env["SLACK_WEBHOOK_URL"]["valueFrom"]["secretKeyRef"]
+    assert reference["optional"] is True and "value" not in env["SLACK_WEBHOOK_URL"]
+
+
+@pytest.mark.parametrize("name,namespace,replicas_in", [("orchestrator-pdb", "orchestrator", "orchestrator"), ("sample-app-pdb", "production", "sample-app")])
+def test_disruption_budgets_never_block_a_node_drain(name, namespace, replicas_in):
+    pdb = next(
+        doc for path in WORKLOADS.values() for doc in documents(path)
+        if doc["kind"] == "PodDisruptionBudget" and doc["metadata"]["name"] == name
+    )
+    assert pdb["metadata"]["namespace"] == namespace
+    assert "minAvailable" not in pdb["spec"]
+    assert pdb["spec"]["maxUnavailable"] == 1
+    assert pdb["spec"]["selector"]["matchLabels"] == workload(replicas_in)["spec"]["selector"]["matchLabels"]
+
+
+def test_terraform_mirrors_the_durability_changes():
+    modules = ROOT / "terraform" / "modules"
+    orchestrator = (modules / "orchestrator" / "main.tf").read_text()
+    assert 'resource "kubernetes_stateful_set_v1" "redis"' in orchestrator
+    assert 'resource "kubernetes_deployment" "redis"' not in orchestrator
+    assert "volume_claim_template" in orchestrator and 'cluster_ip = "None"' in orchestrator
+    assert "--appendonly yes" in orchestrator and "--dir /data" in orchestrator
+    assert 'path = "/livez"' in orchestrator and 'path = "/readyz"' in orchestrator
+    assert 'path = "/health"' not in orchestrator
+    assert "termination_grace_period_seconds = 45" in orchestrator
+    assert "topology_spread_constraint" in orchestrator
+    assert 'resource "kubernetes_pod_disruption_budget_v1" "orchestrator"' in orchestrator
+    for module in ("orchestrator", "sample-app"):
+        text = (modules / module / "main.tf").read_text()
+        assert 'max_unavailable = "1"' in text and "min_available" not in text
+
+
+def test_the_sample_app_opts_in_to_cluster_side_watching():
+    labels = workload("sample-app")["metadata"]["labels"]
+
+    assert labels["mana.io/managed"] == "true"
+
+
+def container_env(name: str) -> dict:
+    containers = pod_spec(name)["containers"]
+    return {item["name"]: item.get("value") for item in containers[0]["env"]}
+
+
+def test_the_watcher_only_scans_namespaces_the_role_covers():
+    env = container_env("orchestrator")
+    roles = [doc for doc in documents(ROOT / "orchestrator" / "k8s" / "rbac.yaml") if doc["kind"] == "Role"]
+    covered = {role["metadata"]["namespace"] for role in roles}
+
+    assert env["WATCHER_ENABLED"] == "true"
+    assert set(env["WATCHER_NAMESPACES"].split(",")) <= covered
+
+
+def test_terraform_enables_the_watcher_like_the_manifests():
+    text = (ROOT / "terraform" / "modules" / "orchestrator" / "main.tf").read_text()
+    variables = (ROOT / "terraform" / "modules" / "orchestrator" / "variables.tf").read_text()
+
+    assert 'name  = "WATCHER_ENABLED"' in text and "tostring(var.watcher_enabled)" in text
+    assert 'name  = "WATCHER_NAMESPACES"' in text and 'join(",", var.watcher_namespaces)' in text
+    assert 'default     = ["production", "staging"]' in variables
+
+
+def test_terraform_labels_the_sample_app_for_the_watcher():
+    text = (ROOT / "terraform" / "modules" / "sample-app" / "main.tf").read_text()
+    deployment_metadata = text.split('resource "kubernetes_deployment" "sample_app"')[1].split("spec {")[0]
+
+    assert '"mana.io/managed" = "true"' in deployment_metadata

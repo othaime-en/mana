@@ -1,7 +1,7 @@
 """Prometheus metrics emitted by the orchestrator"""
 
 import logging
-from typing import Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 import redis
 from prometheus_client import Counter, Histogram
@@ -14,6 +14,7 @@ DEPLOYMENT_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600)
 RECOVERY_BUCKETS = (5, 10, 20, 30, 45, 60, 90, 120, 300, 600, 1800)
 DECISION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
 HEALTH_CHECK_BUCKETS = (1, 5, 10, 30, 60, 120, 300, 600)
+DETECTION_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 1200, 1800)
 
 deployments_total = Counter(
     'deployments_total',
@@ -47,6 +48,42 @@ rollback_decision_duration_seconds = Histogram(
     'Seconds the orchestrator needs to decide how to handle a failure',
     buckets=DECISION_BUCKETS
 )
+mana_detection_duration_seconds = Histogram(
+    'mana_detection_duration_seconds',
+    'Seconds from the first in_progress event to the first failure of a deployment',
+    ['namespace', 'app'],
+    buckets=DETECTION_BUCKETS
+)
+policy_decisions_total = Counter(
+    'mana_policy_decisions_total',
+    'Recovery decisions by failure type, chosen action and the reason for it',
+    ['failure_type', 'action', 'reason']
+)
+failure_diagnoses_total = Counter(
+    'mana_failure_diagnoses_total',
+    'Failed rollouts diagnosed from pod and Deployment signals',
+    ['namespace', 'reason']
+)
+version_denials_total = Counter(
+    'mana_version_denials_total',
+    'Versions frozen after a rollback (frozen) and deployments of a frozen version refused (refused)',
+    ['namespace', 'outcome']
+)
+circuit_breaker_trips_total = Counter(
+    'mana_circuit_breaker_trips_total',
+    'Rollbacks not scheduled because the application already rolled back too often',
+    ['namespace']
+)
+watcher_scans_total = Counter(
+    'mana_watcher_scans_total',
+    'Watcher passes over one namespace, by whether the Deployments could be listed',
+    ['outcome']
+)
+watcher_detections_total = Counter(
+    'mana_watcher_detections_total',
+    'Stuck rollouts the watcher found and sent through the recovery policy',
+    ['namespace', 'reason']
+)
 health_check_duration_seconds = Histogram(
     'health_check_duration_seconds',
     'Health check duration in seconds',
@@ -72,6 +109,33 @@ redis_connection_errors_total = Counter(
     'redis_connection_errors_total',
     'Redis calls that failed with a connection or timeout error'
 )
+scheduler_jobs_total = Counter(
+    'mana_scheduler_jobs_total',
+    'Scheduler job executions by kind and outcome',
+    ['kind', 'outcome']
+)
+webhook_duplicates_total = Counter(
+    'mana_webhook_duplicates_total',
+    'Webhook deliveries dropped as copies of one already seen',
+    ['outcome']
+)
+alerts_sent_total = Counter(
+    'mana_alerts_sent_total',
+    'Alert deliveries by channel and outcome (sent, skipped, failed)',
+    ['channel', 'outcome']
+)
+github_api_requests_total = Counter(
+    'mana_github_api_requests_total',
+    'GitHub API requests by endpoint and HTTP status (error when none came back)',
+    ['endpoint', 'code']
+)
+
+COLLECTED_METRIC_NAMES = (
+    'active_deployments',
+    'mana_scheduler_pending_jobs',
+    'mana_scheduler_inflight_jobs',
+    'mana_scheduler_overdue_seconds',
+)
 
 
 def record_outcome(
@@ -95,6 +159,19 @@ def record_outcome(
         mana_recovery_duration_seconds.labels(
             namespace=namespace, app=app, outcome=outcome
         ).observe(max(finished_at - first_failure_at, 0))
+
+
+def record_detection(
+    namespace: str,
+    app: str,
+    started_at: Optional[float],
+    first_failure_at: float
+) -> None:
+    """Record how long a deployment ran before its first failure was reported"""
+    if started_at is not None:
+        mana_detection_duration_seconds.labels(
+            namespace=namespace, app=app
+        ).observe(max(first_failure_at - started_at, 0))
 
 
 def record_health_check(
@@ -129,19 +206,24 @@ class CountingRedis:
     def __init__(self, client):
         self._client = client
 
-    def __getattr__(self, name):
-        attribute = getattr(self._client, name)
-        if not callable(attribute):
-            return attribute
-
+    @staticmethod
+    def _counted(function):
         def call(*args, **kwargs):
             try:
-                return attribute(*args, **kwargs)
+                return function(*args, **kwargs)
             except (redis.ConnectionError, redis.TimeoutError):
                 redis_connection_errors_total.inc()
                 raise
 
         return call
+
+    def __getattr__(self, name):
+        attribute = getattr(self._client, name)
+        if not callable(attribute):
+            return attribute
+        if name == "register_script":
+            return lambda *args, **kwargs: self._counted(attribute(*args, **kwargs))
+        return self._counted(attribute)
 
 
 class ActiveDeploymentsCollector(Collector):
@@ -173,3 +255,37 @@ class ActiveDeploymentsCollector(Collector):
         for namespace in sorted(self._seen):
             family.add_metric([namespace], counts.get(namespace, 0))
         yield family
+
+
+class SchedulerCollector(Collector):
+    """
+    Report job queue depth from Redis at scrape time
+
+    Like active_deployments, every replica reports the same values, so queries
+    use max. mana_scheduler_overdue_seconds is how long the oldest due job has
+    waited; it grows when no replica is working the queue.
+    """
+
+    def __init__(self, source: Callable[[], Any]):
+        self._source = source
+
+    def describe(self) -> Iterable[GaugeMetricFamily]:
+        """Skip the registration-time scrape so importing never needs Redis"""
+        return []
+
+    def collect(self) -> Iterable[GaugeMetricFamily]:
+        try:
+            stats = self._source()
+        except redis.RedisError as e:
+            logger.warning(f"scheduler stats unavailable: {e}")
+            return
+
+        for name, doc, value in (
+            ('mana_scheduler_pending_jobs', 'Jobs waiting to run', stats.pending),
+            ('mana_scheduler_inflight_jobs', 'Jobs claimed by a worker', stats.inflight),
+            ('mana_scheduler_overdue_seconds',
+             'Seconds the oldest due job has been waiting', stats.overdue_seconds),
+        ):
+            family = GaugeMetricFamily(name, doc)
+            family.add_metric([], value)
+            yield family

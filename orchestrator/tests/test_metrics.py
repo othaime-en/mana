@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
@@ -8,7 +8,7 @@ from prometheus_client import REGISTRY, generate_latest
 from src import metrics
 from src.metrics import ActiveDeploymentsCollector, CountingRedis
 from src.orchestrator import DeploymentStatus, FailureType, SelfHealingOrchestrator
-from tests.fakes import FakeRedis
+from tests.fakes import FakeJobQueue, FakeLocks, FakeRedis
 from tests.test_api import webhook_body
 
 
@@ -38,7 +38,8 @@ def orchestrator():
     orch.redis_client = FakeRedis()
     orch.max_retries = 1
     orch.get_previous_version = Mock(return_value="v0")
-    orch.trigger_github_workflow_rerun = AsyncMock()
+    orch.jobs = FakeJobQueue()
+    orch.locks = FakeLocks()
     return orch
 
 
@@ -120,6 +121,9 @@ class TestOutcomes:
         result = await fail(orchestrator)
 
         assert result["action"] == "rollback"
+        assert rolled_back.value == 0
+        orchestrator.job_handlers()["rollback"](orchestrator.jobs.job())
+
         assert rolled_back.value == 1
         assert recovery.value == 1
 

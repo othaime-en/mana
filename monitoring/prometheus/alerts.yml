@@ -129,6 +129,49 @@ groups:
           description: "95th percentile rollback decision time is {{ $value | humanizeDuration }}. Target: <1 second. This may delay automatic recovery."
           runbook_url: "https://docs.example.com/runbooks/slow-rollback-decision"
 
+      # Warning: Rollbacks are slower than the recovery target
+      - alert: SlowRollbackRecovery
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(mana_recovery_duration_seconds_bucket{outcome="rolled_back"}[1h]))
+          ) > 60
+          and
+          sum(increase(mana_recovery_duration_seconds_count{outcome="rolled_back"}[1h])) >= 3
+        for: 10m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "Rollbacks take longer than 60 seconds"
+          description: "95th percentile time from the first failure to a verified rollback is {{ $value | humanizeDuration }}. Target: under 60 seconds. Check the verification timeout in the policy, the image pull time on the nodes and the health poll interval."
+          runbook_url: "https://docs.example.com/runbooks/slow-rollback-recovery"
+
+      # Critical: Automatic rollback paused by the circuit breaker
+      - alert: CircuitBreakerOpen
+        expr: |
+          sum by (namespace) (increase(mana_circuit_breaker_trips_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "Automatic rollback is paused in {{ $labels.namespace }}"
+          description: "An application in {{ $labels.namespace }} rolled back more often than the circuit breaker allows, so a failure was left to a person instead of being rolled back again. Look at GET /deployments/<namespace>/<app>/status for the breaker and the frozen versions."
+          runbook_url: "https://docs.example.com/runbooks/circuit-breaker-open"
+
+      # Warning: The cluster-side watcher cannot list Deployments
+      - alert: WatcherScanFailing
+        expr: |
+          sum(increase(mana_watcher_scans_total{outcome="error"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "The rollout watcher cannot list Deployments"
+          description: "The watcher has failed to list Deployments for 10 minutes, so stuck rollouts without a webhook go unnoticed. Check that the orchestrator Role in each WATCHER_NAMESPACES namespace allows `list` on deployments and that the namespaces exist."
+          runbook_url: "https://docs.example.com/runbooks/watcher-scan-failing"
+
       # Warning: High webhook failure rate
       - alert: HighWebhookFailureRate
         expr: |
@@ -170,6 +213,57 @@ groups:
           summary: "Orchestrator cannot connect to Redis"
           description: "Orchestrator is experiencing Redis connection failures. State persistence is affected."
           runbook_url: "https://docs.example.com/runbooks/redis-connection-failures"
+
+      # Critical: Nobody is working the job queue
+      - alert: SchedulerStalled
+        expr: max(mana_scheduler_overdue_seconds) > 120
+        for: 2m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "Retries and rollbacks are waiting for a worker"
+          description: "The oldest due job has been waiting {{ $value | humanizeDuration }}. No orchestrator replica is claiming jobs, so scheduled retries and rollbacks are not running."
+          runbook_url: "https://docs.example.com/runbooks/scheduler-stalled"
+
+      # Critical: A job ran out of attempts
+      - alert: JobsDeadLettered
+        expr: sum by (kind) (increase(mana_scheduler_jobs_total{outcome="dead"}[15m])) > 0
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "A {{ $labels.kind }} job was abandoned"
+          description: "{{ $value | humanize }} {{ $labels.kind }} job(s) failed every attempt in the last 15 minutes. The affected deployment is marked failed and needs manual intervention."
+          runbook_url: "https://docs.example.com/runbooks/jobs-dead-lettered"
+
+      # Warning: Alerts are not reaching their channel
+      - alert: AlertDeliveryFailing
+        expr: sum by (channel) (increase(mana_alerts_sent_total{outcome="failed"}[15m])) > 2
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "Mana cannot deliver alerts to {{ $labels.channel }}"
+          description: "{{ $value | humanize }} deliveries to {{ $labels.channel }} failed in 15 minutes. People are not being told when automatic recovery needs them. Check SLACK_WEBHOOK_URL or the token's commit-status permission."
+          runbook_url: "https://docs.example.com/runbooks/alert-delivery-failing"
+
+      # Warning: GitHub rejects workflow re-runs
+      - alert: GitHubRerunFailing
+        expr: |
+          (
+            sum(rate(mana_github_api_requests_total{endpoint="rerun",code!~"2.."}[10m]))
+            /
+            sum(rate(mana_github_api_requests_total{endpoint="rerun"}[10m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "GitHub is rejecting workflow re-runs"
+          description: "{{ $value | humanizePercentage }} of re-run requests fail. Check the token's Actions write permission, and that the run has finished."
+          runbook_url: "https://docs.example.com/runbooks/github-rerun-failing"
 
       # Warning: High health check failure rate
       - alert: HighHealthCheckFailureRate

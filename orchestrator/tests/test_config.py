@@ -235,3 +235,110 @@ class TestRedisSecurityConfig:
              patch('src.orchestrator.client.CoreV1Api'):
             SelfHealingOrchestrator(use_config=True)
         assert redis_cls.call_args.kwargs['password'] == 's3cret'
+
+
+class TestSchedulerSettings:
+    def test_defaults(self):
+        config = OrchestratorConfig.from_env()
+
+        assert (config.job_lease_seconds, config.scheduler_poll_seconds) == (60.0, 1.0)
+        assert (config.scheduler_concurrency, config.job_max_attempts) == (4, 5)
+        assert config.shutdown_grace_seconds == 30.0
+
+    def test_environment_overrides(self, monkeypatch):
+        monkeypatch.setenv('JOB_LEASE_SECONDS', '90')
+        monkeypatch.setenv('SCHEDULER_POLL_SECONDS', '0.5')
+        monkeypatch.setenv('SCHEDULER_CONCURRENCY', '2')
+        monkeypatch.setenv('JOB_MAX_ATTEMPTS', '7')
+        monkeypatch.setenv('SHUTDOWN_GRACE_SECONDS', '10')
+
+        config = OrchestratorConfig.from_env()
+
+        assert (config.job_lease_seconds, config.scheduler_poll_seconds) == (90.0, 0.5)
+        assert (config.scheduler_concurrency, config.job_max_attempts) == (2, 7)
+        assert config.shutdown_grace_seconds == 10.0
+
+    @pytest.mark.parametrize('variable,value', [
+        ('JOB_LEASE_SECONDS', '2'),
+        ('SCHEDULER_POLL_SECONDS', '0'),
+        ('SCHEDULER_CONCURRENCY', '0'),
+        ('JOB_MAX_ATTEMPTS', '0'),
+        ('SHUTDOWN_GRACE_SECONDS', '-1'),
+    ])
+    def test_invalid_values_are_rejected(self, monkeypatch, variable, value):
+        monkeypatch.setenv(variable, value)
+
+        with pytest.raises(ValueError):
+            OrchestratorConfig.from_env().validate()
+
+
+class TestHealthPoll:
+    def test_default_poll_interval(self, monkeypatch):
+        monkeypatch.delenv('HEALTH_POLL_SECONDS', raising=False)
+
+        assert OrchestratorConfig.from_env().health_poll_seconds == 5.0
+
+    def test_poll_interval_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv('HEALTH_POLL_SECONDS', '2')
+
+        assert OrchestratorConfig.from_env().health_poll_seconds == 2.0
+
+    @pytest.mark.parametrize('value', ['0', '-1'])
+    def test_poll_interval_must_be_positive(self, monkeypatch, value):
+        monkeypatch.setenv('HEALTH_POLL_SECONDS', value)
+
+        with pytest.raises(ValueError, match='health_poll_seconds must be > 0'):
+            OrchestratorConfig.from_env().validate()
+
+
+class TestWatcherSettings:
+    def test_the_watcher_is_off_by_default(self, monkeypatch):
+        for name in ('WATCHER_ENABLED', 'WATCHER_NAMESPACES', 'WATCHER_INTERVAL_SECONDS', 'WATCHER_STUCK_SECONDS'):
+            monkeypatch.delenv(name, raising=False)
+
+        config = OrchestratorConfig.from_env()
+
+        assert config.watcher_enabled is False
+        assert config.watched_namespaces() == ['production', 'staging']
+        assert (config.watcher_interval_seconds, config.watcher_stuck_seconds) == (15.0, 120.0)
+
+    def test_settings_are_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv('WATCHER_ENABLED', 'true')
+        monkeypatch.setenv('WATCHER_NAMESPACES', ' production , canary ,')
+        monkeypatch.setenv('WATCHER_INTERVAL_SECONDS', '5')
+        monkeypatch.setenv('WATCHER_STUCK_SECONDS', '60')
+
+        config = OrchestratorConfig.from_env()
+        config.validate()
+
+        assert config.watcher_enabled is True
+        assert config.watched_namespaces() == ['production', 'canary']
+        assert (config.watcher_interval_seconds, config.watcher_stuck_seconds) == (5.0, 60.0)
+
+    @pytest.mark.parametrize('name,value,message', [
+        ('WATCHER_INTERVAL_SECONDS', '0', 'watcher_interval_seconds must be > 0'),
+        ('WATCHER_STUCK_SECONDS', '-5', 'watcher_stuck_seconds must be > 0'),
+    ])
+    def test_intervals_must_be_positive(self, monkeypatch, name, value, message):
+        monkeypatch.setenv(name, value)
+
+        with pytest.raises(ValueError, match=message):
+            OrchestratorConfig.from_env().validate()
+
+    @pytest.mark.parametrize('value,message', [
+        (' , ', 'at least one namespace'),
+        ('Production', 'invalid namespace'),
+        ('prod_1', 'invalid namespace'),
+        ('-bad', 'invalid namespace'),
+    ])
+    def test_namespaces_are_checked_when_the_watcher_is_on(self, monkeypatch, value, message):
+        monkeypatch.setenv('WATCHER_ENABLED', 'true')
+        monkeypatch.setenv('WATCHER_NAMESPACES', value)
+
+        with pytest.raises(ValueError, match=message):
+            OrchestratorConfig.from_env().validate()
+
+    def test_namespaces_are_not_checked_when_the_watcher_is_off(self, monkeypatch):
+        monkeypatch.setenv('WATCHER_NAMESPACES', 'Not Valid')
+
+        OrchestratorConfig.from_env().validate()

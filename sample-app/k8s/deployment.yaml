@@ -6,6 +6,7 @@ metadata:
   labels:
     app: sample-app
     version: "1.0.0"
+    mana.io/managed: "true"
   annotations:
     deployment.kubernetes.io/revision: "1"
 spec:
@@ -134,7 +135,7 @@ metadata:
   name: sample-app-pdb
   namespace: production
 spec:
-  minAvailable: 2
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: sample-app

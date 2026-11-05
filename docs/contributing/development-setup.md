@@ -145,7 +145,7 @@ curl -s -X POST $MANA/webhook/deployment -H 'Content-Type: application/json' \
 curl -s $MANA/deployment/d2 | jq
 ```
 
-Repeat step 2 with the same `deployment_id` to walk through retries and, after the fourth failure, the rollback. Retries need `GITHUB_TOKEN`/`GITHUB_REPO` to trigger a real re-run; without them the response still says `retry`, and the orchestrator logs the error.
+Repeat step 2 with the same `deployment_id` to walk through the retry and, on the second failure, the rollback (the default policy retries a `deployment_failure` once). Retries need `GITHUB_TOKEN`/`GITHUB_REPO` to trigger a real re-run; without them the response still says `retry`, and the orchestrator logs the error.
 
 ## 6. Terraform
 

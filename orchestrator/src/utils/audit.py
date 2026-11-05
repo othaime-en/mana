@@ -27,6 +27,9 @@ class AuditAction(Enum):
     STATE_SAVED = "state_saved"
     STATE_RETRIEVED = "state_retrieved"
     ALERT_SENT = "alert_sent"
+    POLICY_DECISION = "policy_decision"
+    VERSION_DENIED = "version_denied"
+    CIRCUIT_BREAKER_OPEN = "circuit_breaker_open"
     MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
 
 
@@ -321,6 +324,97 @@ class AuditLogger:
                 "ready_replicas": ready_replicas,
                 "desired_replicas": desired_replicas
             }
+        )
+    
+    def log_alert_sent(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        channel: str,
+        event: str
+    ):
+        """Log that an alert reached a channel"""
+        self.log_event(
+            action=AuditAction.ALERT_SENT,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=True,
+            details={"channel": channel, "event": event}
+        )
+    
+    def log_policy_decision(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        failure_type: str,
+        attempt: int,
+        decision: str,
+        reason: str,
+        detail: str = "",
+        diagnosis: Optional[str] = None
+    ):
+        """Log which action the recovery policy chose for a failure, and why"""
+        self.log_event(
+            action=AuditAction.POLICY_DECISION,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=True,
+            details={
+                "failure_type": failure_type,
+                "attempt": attempt,
+                "decision": decision,
+                "reason": reason,
+                "detail": detail,
+                "diagnosis": diagnosis
+            }
+        )
+    
+    def log_version_denied(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        outcome: str,
+        reason: str
+    ):
+        """Log a version being frozen after a rollback, or refused because it is frozen"""
+        self.log_event(
+            action=AuditAction.VERSION_DENIED,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=True,
+            details={"outcome": outcome, "reason": reason}
+        )
+    
+    def log_circuit_breaker_open(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        rollbacks: int,
+        window_seconds: int
+    ):
+        """Log automatic rollback being paused because the application rolled back too often"""
+        self.log_event(
+            action=AuditAction.CIRCUIT_BREAKER_OPEN,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=True,
+            details={"rollbacks": rollbacks, "window_seconds": window_seconds}
         )
     
     def log_manual_intervention_required(

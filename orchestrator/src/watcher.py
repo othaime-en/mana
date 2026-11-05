@@ -104,6 +104,21 @@ def assess_rollout(deployment, now: float, stuck_seconds: float) -> Optional[Tup
     return NO_PROGRESS, f"{ready}/{desired} replicas ready and no progress for {int(idle)} s"
 
 
+def image_version(reference) -> str:
+    """
+    The label a rollout's image goes by: its tag, else a short digest, else "latest"
+
+    An image pinned by digest or without a tag cannot be matched to a rollback
+    target, so the policy turns a rollback for it into an alert instead of
+    skipping the rollout; the label still names it.
+    """
+    if reference.tag:
+        return reference.tag
+    if reference.digest:
+        return reference.digest[:19]
+    return "latest"
+
+
 def stuck_rollout(deployment, namespace: str, now: float, stuck_seconds: float) -> Optional[StuckRollout]:
     """The StuckRollout for a managed Deployment, or None when it is fine or cannot be read"""
     assessment = assess_rollout(deployment, now, stuck_seconds)
@@ -115,14 +130,11 @@ def stuck_rollout(deployment, namespace: str, now: float, stuck_seconds: float) 
     except ContainerNotFoundError as error:
         logger.warning(f"Cannot tell which version {namespace}/{name} runs: {error}")
         return None
-    if reference.digest is not None or not reference.tag:
-        logger.warning(f"{namespace}/{name} is pinned by digest or has no tag; the watcher cannot track it")
-        return None
     reason, detail = assessment
     return StuckRollout(
         namespace=namespace,
         app=name,
-        version=reference.tag,
+        version=image_version(reference),
         generation=deployment.metadata.generation or 0,
         reason=reason,
         detail=detail,
@@ -204,7 +216,7 @@ class Watcher:
             namespace=stuck.namespace,
             deployment_name=stuck.app,
             version=stuck.version,
-            failure_type=FailureType.TIMEOUT,
+            failure_type=FailureType.ROLLOUT_STUCK,
             metadata={
                 "detected_by": "watcher",
                 "detection": stuck.reason,

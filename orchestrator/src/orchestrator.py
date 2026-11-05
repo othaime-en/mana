@@ -50,6 +50,7 @@ class FailureType(Enum):
     HEALTH_CHECK_FAILURE = "health_check_failure"
     SMOKE_TEST_FAILURE = "smoke_test_failure"
     TIMEOUT = "timeout"
+    ROLLOUT_STUCK = "rollout_stuck"
 
 
 NON_ROLLBACK_FAILURES = frozenset({

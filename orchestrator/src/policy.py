@@ -23,6 +23,7 @@ FAILURE_TYPES = (
     "health_check_failure",
     "smoke_test_failure",
     "timeout",
+    "rollout_stuck",
 )
 NON_ROLLBACK_FAILURES = frozenset({"build_failure", "test_failure"})
 
@@ -98,7 +99,7 @@ class Override(_Strict):
     def _check_rules(self) -> "Override":
         if not self.rules:
             raise ValueError("an override needs at least one rule under 'rules'")
-        _check_failure_types(self.rules, require_all=False)
+        _check_failure_types(self.rules)
         return self
 
 
@@ -115,14 +116,10 @@ class CircuitBreaker(_Strict):
     window_seconds: int = Field(default=3600, ge=60)
 
 
-def _check_failure_types(rules: Dict[str, Rule], require_all: bool) -> None:
+def _check_failure_types(rules: Dict[str, Rule]) -> None:
     unknown = sorted(set(rules) - set(FAILURE_TYPES))
     if unknown:
         raise ValueError(f"unknown failure type(s) {unknown}; valid: {list(FAILURE_TYPES)}")
-    if require_all:
-        missing = [name for name in FAILURE_TYPES if name not in rules]
-        if missing:
-            raise ValueError(f"the default policy must cover every failure type; missing {missing}")
     for name, rule in rules.items():
         if name in NON_ROLLBACK_FAILURES and rule.rolls_back():
             raise ValueError(
@@ -131,17 +128,28 @@ def _check_failure_types(rules: Dict[str, Rule], require_all: bool) -> None:
 
 
 class Policy(_Strict):
+    """The recovery policy; failure types missing from `default` use the built-in rule"""
     version: int = Field(default=1)
     default: Dict[str, Rule]
     overrides: List[Override] = Field(default_factory=list)
     rollback: RollbackSettings = Field(default_factory=RollbackSettings)
     circuit_breaker: CircuitBreaker = Field(default_factory=CircuitBreaker)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_default_rules(cls, data):
+        """A file written before a failure type existed keeps working: the built-in rule fills the gap"""
+        if isinstance(data, dict):
+            given = data.get("default")
+            if given is None or isinstance(given, dict):
+                return {**data, "default": {**DEFAULT_POLICY["default"], **(given or {})}}
+        return data
+
     @model_validator(mode="after")
     def _check(self) -> "Policy":
         if self.version != 1:
             raise ValueError(f"unsupported policy version {self.version}; expected 1")
-        _check_failure_types(self.default, require_all=True)
+        _check_failure_types(self.default)
         return self
 
     def rule_for(self, namespace: str, app: str, failure_type: str) -> Rule:
@@ -161,6 +169,7 @@ DEFAULT_POLICY: Dict = {
         "health_check_failure": {"action": "rollback"},
         "smoke_test_failure": {"action": "rollback"},
         "timeout": {"action": "retry", "max_attempts": 1, "then": "rollback"},
+        "rollout_stuck": {"action": "rollback"},
     },
 }
 

@@ -43,7 +43,7 @@ def test_the_default_policy_covers_every_failure_type():
 def test_the_default_policy_rolls_back_post_deploy_failures_at_once():
     policy = load_policy()
 
-    for failure_type in ("health_check_failure", "smoke_test_failure"):
+    for failure_type in ("health_check_failure", "smoke_test_failure", "rollout_stuck"):
         assert policy.rule_for("production", "sample-app", failure_type).action is Action.ROLLBACK
     assert policy.rule_for("production", "sample-app", "test_failure").action is Action.ALERT
 
@@ -101,11 +101,31 @@ class TestRuleShape:
 
 
 class TestPolicyValidation:
-    def test_every_failure_type_must_be_listed(self):
-        incomplete = {key: value for key, value in DEFAULT_POLICY["default"].items() if key != "timeout"}
+    def test_a_type_missing_from_default_uses_the_built_in_rule(self):
+        incomplete = {key: value for key, value in DEFAULT_POLICY["default"].items() if key != "rollout_stuck"}
 
-        with pytest.raises(ValueError, match="missing .*timeout"):
-            Policy.model_validate(policy_with(default=incomplete))
+        policy = Policy.model_validate(policy_with(default=incomplete))
+
+        assert policy.rule_for("production", "app", "rollout_stuck") == load_policy().default["rollout_stuck"]
+
+    def test_a_policy_with_only_overrides_still_has_every_rule(self):
+        policy = Policy.model_validate({"overrides": [
+            {"match": {"namespace": "staging"}, "rules": {"timeout": {"action": "alert"}}}
+        ]})
+
+        assert set(policy.default) == set(FAILURE_TYPES)
+        assert policy.rule_for("production", "app", "timeout").action is Action.RETRY
+        assert policy.rule_for("staging", "app", "timeout").action is Action.ALERT
+
+    def test_a_rule_in_default_replaces_the_built_in_one(self):
+        policy = Policy.model_validate({"default": {"timeout": {"action": "alert"}}})
+
+        assert policy.rule_for("production", "app", "timeout").action is Action.ALERT
+        assert policy.rule_for("production", "app", "health_check_failure").action is Action.ROLLBACK
+
+    def test_a_default_that_is_not_a_mapping_is_rejected(self):
+        with pytest.raises(ValueError):
+            Policy.model_validate({"default": ["timeout"]})
 
     def test_unknown_failure_types_are_rejected(self):
         extra = {**DEFAULT_POLICY["default"], "disk_full": {"action": "alert"}}

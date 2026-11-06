@@ -81,6 +81,19 @@ resource "kubernetes_config_map" "orchestrator" {
   }
 }
 
+# The recovery policy; the manifest orchestrator/k8s/policy-configmap.yaml is the single source
+resource "kubernetes_config_map" "policy" {
+  metadata {
+    name      = "mana-policy"
+    namespace = var.namespace
+    labels    = local.labels
+  }
+
+  data = {
+    "policy.yaml" = yamldecode(file("${path.module}/../../../orchestrator/k8s/policy-configmap.yaml")).data["policy.yaml"]
+  }
+}
+
 resource "random_password" "redis" {
   length  = 48
   special = false
@@ -390,6 +403,11 @@ resource "kubernetes_deployment" "orchestrator" {
           }
 
           env {
+            name  = "POLICY_FILE"
+            value = "/etc/mana/policy.yaml"
+          }
+
+          env {
             name  = "WATCHER_ENABLED"
             value = tostring(var.watcher_enabled)
           }
@@ -534,6 +552,12 @@ resource "kubernetes_deployment" "orchestrator" {
             name       = "tmp"
             mount_path = "/tmp"
           }
+
+          volume_mount {
+            name       = "policy"
+            mount_path = "/etc/mana"
+            read_only  = true
+          }
         }
 
         volume {
@@ -542,12 +566,20 @@ resource "kubernetes_deployment" "orchestrator" {
             size_limit = "64Mi"
           }
         }
+
+        volume {
+          name = "policy"
+          config_map {
+            name = kubernetes_config_map.policy.metadata[0].name
+          }
+        }
       }
     }
   }
 
   depends_on = [
-    kubernetes_role_binding.orchestrator
+    kubernetes_role_binding.orchestrator,
+    kubernetes_config_map.policy
   ]
 }
 

@@ -1,0 +1,30 @@
+# Recovery policy for the orchestrator, mounted at /etc/mana/policy.yaml. The orchestrator
+# reloads it within POLICY_RELOAD_SECONDS of a change (a mounted ConfigMap can take about a
+# minute to reach the pod) and keeps the policy in force if the new file is invalid; see
+# docs/configuration/recovery-policy.md. This is the built-in default policy: edit it to change
+# what MANA does, or delete a failure type to use the built-in rule for it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mana-policy
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+data:
+  policy.yaml: |
+    version: 1
+    default:
+      build_failure:        {action: retry, max_attempts: 2}
+      test_failure:         {action: alert}
+      deployment_failure:   {action: retry, max_attempts: 1, then: rollback}
+      health_check_failure: {action: rollback}
+      smoke_test_failure:   {action: rollback}
+      timeout:              {action: retry, max_attempts: 1, then: rollback}
+      rollout_stuck:        {action: rollback}
+    rollback:
+      verify_timeout_seconds: 120
+      freeze_failed_version: true
+      deny_ttl_seconds: 604800
+    circuit_breaker:
+      max_rollbacks: 3
+      window_seconds: 3600

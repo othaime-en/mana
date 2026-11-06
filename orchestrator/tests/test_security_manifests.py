@@ -418,3 +418,51 @@ def test_terraform_labels_the_sample_app_for_the_watcher():
     deployment_metadata = text.split('resource "kubernetes_deployment" "sample_app"')[1].split("spec {")[0]
 
     assert '"mana.io/managed" = "true"' in deployment_metadata
+
+
+POLICY_MANIFEST = ROOT / "orchestrator" / "k8s" / "policy-configmap.yaml"
+
+
+def policy_configmap() -> dict:
+    (document,) = documents(POLICY_MANIFEST)
+    return document
+
+
+def test_the_shipped_policy_is_valid_and_equals_the_built_in_one(tmp_path):
+    from src.policy import load_policy
+
+    config_map = policy_configmap()
+    path = tmp_path / "policy.yaml"
+    path.write_text(config_map["data"]["policy.yaml"])
+
+    shipped, built_in = load_policy(str(path)), load_policy()
+
+    assert config_map["kind"] == "ConfigMap" and config_map["metadata"]["namespace"] == "orchestrator"
+    assert shipped.default == built_in.default
+    assert shipped.rollback == built_in.rollback
+    assert shipped.circuit_breaker == built_in.circuit_breaker
+    assert shipped.overrides == []
+
+
+def test_the_orchestrator_mounts_the_policy_read_only_where_it_reads_it():
+    spec = pod_spec("orchestrator")
+    env = container_env("orchestrator")
+    mount = next(m for m in spec["containers"][0]["volumeMounts"] if m["name"] == "policy")
+    volume = next(v for v in spec["volumes"] if v["name"] == "policy")
+
+    assert volume["configMap"]["name"] == policy_configmap()["metadata"]["name"]
+    assert mount["readOnly"] is True
+    assert env["POLICY_FILE"] == f"{mount['mountPath']}/policy.yaml"
+    assert "policy.yaml" in policy_configmap()["data"]
+
+
+def test_terraform_ships_the_same_policy_from_the_same_manifest():
+    module = ROOT / "terraform" / "modules" / "orchestrator"
+    text = (module / "main.tf").read_text()
+    relative = text.split('yamldecode(file("${path.module}/')[1].split('"')[0]
+
+    assert (module / relative).resolve() == POLICY_MANIFEST
+    assert '"policy.yaml" = yamldecode(' in text and '.data["policy.yaml"]' in text
+    assert 'name  = "POLICY_FILE"' in text and 'value = "/etc/mana/policy.yaml"' in text
+    assert 'mount_path = "/etc/mana"' in text and "read_only  = true" in text
+    assert "kubernetes_config_map.policy" in text

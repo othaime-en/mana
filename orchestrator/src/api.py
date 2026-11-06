@@ -607,7 +607,8 @@ async def get_config():
         "max_app_health_failures": orchestrator.max_app_health_failures,
         "github_integration_enabled": bool(
             orchestrator.github_token and orchestrator.github_repo
-        )
+        ),
+        "policy": orchestrator.policy_info()
     }
 
 

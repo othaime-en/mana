@@ -1,4 +1,7 @@
 import itertools
+import os
+import time
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -366,3 +369,242 @@ def test_invariants_hold_for_every_combination(rule, attempt, can_retry, has_tar
         assert decision.action is (Action.ROLLBACK if rule.action is Action.ROLLBACK and has_target else Action.ALERT)
     if rule.action is Action.RETRY and attempt > rule.max_attempts:
         assert decision.action is not Action.RETRY
+
+
+class TestPolicySource:
+    """The policy in force follows its file, and a bad edit never replaces a good policy"""
+
+    ALERT_ON_HEALTH = {**DEFAULT_POLICY["default"], "health_check_failure": {"action": "alert"}}
+
+    @pytest.fixture
+    def clock(self):
+        class Clock:
+            now = 1000.0
+
+            def __call__(self):
+                return self.now
+
+            def advance(self, seconds=6.0):
+                self.now += seconds
+
+        return Clock()
+
+    def write(self, path, default=None, version=1):
+        import json
+
+        path.write_text(json.dumps({"version": version, "default": default or DEFAULT_POLICY["default"]}))
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    def source(self, tmp_path, clock, events, interval=5.0):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        self.write(path)
+        return path, PolicySource(str(path), interval, events.append, clock=clock)
+
+    def health_action(self, source):
+        return source.policy.rule_for("production", "app", "health_check_failure").action
+
+    def test_without_a_file_it_serves_the_built_in_policy(self):
+        from src.policy import PolicySource
+
+        source = PolicySource()
+
+        assert source.policy.default == load_policy().default
+        assert source.path == ""
+
+    def test_a_given_policy_is_served_as_is_and_never_reloaded(self, tmp_path, clock):
+        from src.policy import PolicySource
+
+        fixed = Policy.model_validate(policy_with(default=self.ALERT_ON_HEALTH))
+        source = PolicySource(str(tmp_path / "ignored.yaml"), policy=fixed, clock=clock)
+        clock.advance()
+
+        assert source.policy is fixed and source.path == ""
+
+    def test_a_changed_file_is_picked_up_after_the_interval(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+        assert self.health_action(source) is Action.ROLLBACK
+        before = source.loaded_at
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        assert self.health_action(source) is Action.ROLLBACK
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+        assert events == ["loaded"]
+        assert source.loaded_at >= before
+
+    def test_the_file_is_not_looked_at_more_often_than_the_interval(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events, interval=5.0)
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance(4.9)
+
+        assert self.health_action(source) is Action.ROLLBACK
+
+        clock.advance(0.2)
+        assert self.health_action(source) is Action.ALERT
+
+    def test_an_unchanged_file_is_not_reloaded(self, tmp_path, clock):
+        events = []
+        _, source = self.source(tmp_path, clock, events)
+
+        for _ in range(3):
+            clock.advance()
+            source.policy
+
+        assert events == []
+
+    def test_an_invalid_file_keeps_the_policy_in_force_and_is_reported_once(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+
+        self.write(path, {"timeout": {"action": "retry"}})
+        for _ in range(3):
+            clock.advance()
+            assert self.health_action(source) is Action.ROLLBACK
+
+        assert events == ["rejected"]
+
+    def test_fixing_a_rejected_file_loads_it(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+        self.write(path, {"timeout": {"action": "retry"}})
+        clock.advance()
+        source.policy
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+        assert events == ["rejected", "loaded"]
+
+    def test_unparsable_yaml_is_rejected_too(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+
+        path.write_text("default: [unclosed")
+        clock.advance()
+
+        assert self.health_action(source) is Action.ROLLBACK
+        assert events == ["rejected"]
+
+    def test_a_file_that_disappears_keeps_the_policy_and_is_loaded_again_when_it_returns(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+
+        path.unlink()
+        clock.advance()
+        assert self.health_action(source) is Action.ROLLBACK
+        assert events == []
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+
+    def test_an_interval_of_zero_turns_reloading_off(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events, interval=0)
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance(10_000)
+
+        assert self.health_action(source) is Action.ROLLBACK
+
+    def test_a_symlink_swap_like_a_mounted_configmap_is_detected(self, tmp_path, clock):
+        from src.policy import PolicySource
+
+        first, second = tmp_path / "v1", tmp_path / "v2"
+        first.mkdir(), second.mkdir()
+        self.write(first / "policy.yaml")
+        self.write(second / "policy.yaml", self.ALERT_ON_HEALTH)
+        data = tmp_path / "..data"
+        data.symlink_to(first)
+        mounted = tmp_path / "policy.yaml"
+        mounted.symlink_to(data / "policy.yaml")
+        events = []
+        source = PolicySource(str(mounted), 5.0, events.append, clock=clock)
+
+        staging = tmp_path / "..data_tmp"
+        staging.symlink_to(second)
+        os.replace(staging, data)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+        assert events == ["loaded"]
+
+    def test_many_threads_reloading_at_once_reload_once(self, tmp_path, clock):
+        from concurrent.futures import ThreadPoolExecutor
+
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        real_load = load_policy
+
+        def slow_load(path):
+            time.sleep(0.1)
+            return real_load(path)
+
+        with patch("src.policy.load_policy", slow_load), ThreadPoolExecutor(8) as pool:
+            actions = list(pool.map(lambda _: self.health_action(source), range(32)))
+
+        assert set(actions) == {Action.ALERT}
+        assert events == ["loaded"]
+
+    def test_an_invalid_file_at_start_up_stops_the_service(self, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text("default: {timeout: {action: retry}}")
+
+        with pytest.raises(PolicyError):
+            PolicySource(str(path))
+
+    def test_a_swap_to_a_file_of_the_same_size_and_time_is_still_detected(self, tmp_path, clock):
+        import json
+        from src.policy import PolicySource
+
+        old = json.dumps({"default": DEFAULT_POLICY["default"]})
+        new = json.dumps({"default": self.ALERT_ON_HEALTH})
+        size = max(len(old), len(new))
+        first, second = tmp_path / "v1", tmp_path / "v2"
+        first.mkdir(), second.mkdir()
+        for directory, text in ((first, old), (second, new)):
+            (directory / "policy.yaml").write_text(text.ljust(size))
+            os.utime(directory / "policy.yaml", ns=(5_000_000_000, 5_000_000_000))
+        data = tmp_path / "..data"
+        data.symlink_to(first)
+        mounted = tmp_path / "policy.yaml"
+        mounted.symlink_to(data / "policy.yaml")
+        source = PolicySource(str(mounted), 5.0, clock=clock)
+        assert self.health_action(source) is Action.ROLLBACK
+
+        staging = tmp_path / "..data_tmp"
+        staging.symlink_to(second)
+        os.replace(staging, data)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+
+    def test_the_path_and_interval_are_exposed(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events, interval=7.0)
+
+        assert (source.path, source.reload_seconds) == (str(path), 7.0)
+
+    def test_reloading_without_a_listener_is_fine(self, tmp_path, clock):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        self.write(path)
+        source = PolicySource(str(path), 5.0, clock=clock)
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT

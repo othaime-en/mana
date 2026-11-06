@@ -84,6 +84,11 @@ watcher_detections_total = Counter(
     'Stuck rollouts the watcher found and sent through the recovery policy',
     ['namespace', 'reason']
 )
+policy_reloads_total = Counter(
+    'mana_policy_reloads_total',
+    'Reloads of the policy file after it changed (loaded) or was rejected as invalid (rejected)',
+    ['outcome']
+)
 health_check_duration_seconds = Histogram(
     'health_check_duration_seconds',
     'Health check duration in seconds',

@@ -342,3 +342,20 @@ class TestWatcherSettings:
         monkeypatch.setenv('WATCHER_NAMESPACES', 'Not Valid')
 
         OrchestratorConfig.from_env().validate()
+
+
+class TestPolicyReloadSetting:
+    def test_default_and_environment(self, monkeypatch):
+        monkeypatch.delenv('POLICY_RELOAD_SECONDS', raising=False)
+        assert OrchestratorConfig.from_env().policy_reload_seconds == 5.0
+
+        monkeypatch.setenv('POLICY_RELOAD_SECONDS', '0')
+        config = OrchestratorConfig.from_env()
+        config.validate()
+        assert config.policy_reload_seconds == 0.0
+
+    def test_a_negative_interval_is_rejected(self, monkeypatch):
+        monkeypatch.setenv('POLICY_RELOAD_SECONDS', '-1')
+
+        with pytest.raises(ValueError, match='policy_reload_seconds must be >= 0'):
+            OrchestratorConfig.from_env().validate()

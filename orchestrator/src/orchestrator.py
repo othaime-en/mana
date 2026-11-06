@@ -23,7 +23,7 @@ from src.diagnosis import Diagnosis, diagnose
 from src.guards import Guards
 from src.jobs import Job, JobDeferred, JobQueue, PermanentJobError
 from src.locks import AppLocks
-from src.policy import Action, Decision, Reason, decide, load_policy
+from src.policy import Action, Decision, Policy, PolicySource, Reason, decide
 
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,9 @@ class SelfHealingOrchestrator:
             self.health_check_path = cfg.health_check_path
             self.max_app_health_failures = 3  # Allow 3 consecutive app health failures
             self.health_poll_seconds = cfg.health_poll_seconds
-            self.policy = load_policy(cfg.policy_file)
+            self._policy_source = PolicySource(
+                cfg.policy_file, cfg.policy_reload_seconds, self._count_policy_reload
+            )
             self.lock_ttl = cfg.job_lease_seconds
             slack_webhook_url = cfg.slack_webhook_url
             alert_github_status = cfg.alert_github_status
@@ -222,7 +224,7 @@ class SelfHealingOrchestrator:
             self.health_check_path = '/health'
             self.max_app_health_failures = 3
             self.health_poll_seconds = 5.0
-            self.policy = load_policy()
+            self._policy_source = PolicySource(on_reload=self._count_policy_reload)
             self.lock_ttl = 60.0
             slack_webhook_url = None
             alert_github_status = False
@@ -279,6 +281,28 @@ class SelfHealingOrchestrator:
                 "github_integration": bool(self.github_token and self.github_repo)
             }
         )
+    
+    @staticmethod
+    def _count_policy_reload(outcome: str) -> None:
+        metrics.policy_reloads_total.labels(outcome=outcome).inc()
+    
+    @property
+    def policy(self) -> Policy:
+        """The recovery policy in force; picks up a changed policy file"""
+        return self._policy_source.policy
+    
+    @policy.setter
+    def policy(self, value: Policy) -> None:
+        self._policy_source = PolicySource(policy=value)
+    
+    def policy_info(self) -> Dict:
+        """Where the policy comes from and when it was last loaded"""
+        source = self._policy_source
+        return {
+            'file': source.path or None,
+            'reload_seconds': source.reload_seconds,
+            'loaded_at': source.loaded_at
+        }
     
     @property
     def guards(self) -> Guards:

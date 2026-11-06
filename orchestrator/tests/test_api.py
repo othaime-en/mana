@@ -610,3 +610,13 @@ async def test_an_enabled_watcher_runs_for_the_life_of_the_app_and_stops_with_it
         assert runs == ["started"]
 
     assert runs == ["started", "stopped"]
+
+
+@pytest.mark.asyncio
+async def test_the_config_endpoint_reports_the_policy_source(api):
+    transport = httpx.ASGITransport(app=api.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch.object(api.orchestrator, "policy_info", return_value={"file": "/etc/mana/policy.yaml", "reload_seconds": 5.0, "loaded_at": 1.0}):
+            response = await client.get("/config")
+
+    assert response.json()["policy"] == {"file": "/etc/mana/policy.yaml", "reload_seconds": 5.0, "loaded_at": 1.0}

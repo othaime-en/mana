@@ -401,3 +401,61 @@ class TestAttemptsPerFailureType:
         orch.record_deployment_started("d1", NS_NAME, "sample-app", "v2")
 
         assert orch.get_deployment_state("d1").attempts == {"deployment_failure": 1}
+
+
+class TestPolicyInTheOrchestrator:
+    def test_assigning_a_policy_replaces_the_source(self, orch):
+        orch.policy = retry_policy(attempts=4)
+
+        assert orch.policy.rule_for("production", "app", "deployment_failure").max_attempts == 4
+        assert orch.policy_info()["file"] is None
+
+    def test_a_policy_file_is_followed_while_the_orchestrator_runs(self, orch, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text(json.dumps(DEFAULT_POLICY))
+        now = [0.0]
+        orch._policy_source = PolicySource(str(path), 5.0, orch._count_policy_reload, clock=lambda: now[0])
+        before = counter("mana_policy_reloads_total", outcome="loaded")
+        rejected = counter("mana_policy_reloads_total", outcome="rejected")
+
+        edited = {**DEFAULT_POLICY, "default": {**DEFAULT_POLICY["default"], "health_check_failure": {"action": "alert"}}}
+        path.write_text(json.dumps(edited) + " ")
+        now[0] = 10
+        assert orch.policy.rule_for("production", "app", "health_check_failure").action.value == "alert"
+
+        path.write_text("default: [")
+        now[0] = 20
+        assert orch.policy.rule_for("production", "app", "health_check_failure").action.value == "alert"
+
+        assert counter("mana_policy_reloads_total", outcome="loaded") == before + 1
+        assert counter("mana_policy_reloads_total", outcome="rejected") == rejected + 1
+
+    @pytest.mark.asyncio
+    async def test_a_reloaded_policy_governs_the_next_failure(self, orch, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text(json.dumps(DEFAULT_POLICY))
+        now = [0.0]
+        orch._policy_source = PolicySource(str(path), 5.0, clock=lambda: now[0])
+        assert (await fail(orch, FailureType.HEALTH_CHECK_FAILURE, "d1"))["action"] == "rollback"
+
+        edited = {**DEFAULT_POLICY, "default": {**DEFAULT_POLICY["default"], "health_check_failure": {"action": "alert"}}}
+        path.write_text(json.dumps(edited) + " ")
+        now[0] = 10
+
+        assert (await fail(orch, FailureType.HEALTH_CHECK_FAILURE, "d2"))["action"] == "alert"
+
+    def test_the_policy_info_names_the_file_and_the_reload_interval(self, orch, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text(json.dumps(DEFAULT_POLICY))
+        orch._policy_source = PolicySource(str(path), 7.5)
+
+        info = orch.policy_info()
+
+        assert info["file"] == str(path) and info["reload_seconds"] == 7.5
+        assert info["loaded_at"] == pytest.approx(time.time(), abs=5)

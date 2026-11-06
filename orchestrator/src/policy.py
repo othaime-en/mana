@@ -7,14 +7,20 @@ into a decision without touching Redis, Kubernetes or GitHub, so every cell of
 the policy can be tested exhaustively.
 """
 
+import logging
+import os
+import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from src.diagnosis import Diagnosis
+
+logger = logging.getLogger(__name__)
 
 FAILURE_TYPES = (
     "build_failure",
@@ -239,3 +245,89 @@ def decide(
 
     return Decision(action, reason, detail)
 
+
+class PolicySource:
+    """
+    The policy in force, reloaded when its file changes
+
+    A reload that fails validation keeps the policy that was running and is
+    reported through on_reload("rejected"), so a bad edit can neither crash a
+    running orchestrator nor silently change its behaviour. The file is checked
+    at most every reload_seconds (0 turns reloading off). A mounted ConfigMap
+    changes by swapping a symlink, which stat() follows, so the file's inode,
+    size and modification time identify a change.
+    """
+
+    def __init__(
+        self,
+        path: str = "",
+        reload_seconds: float = 5.0,
+        on_reload: Optional[Callable[[str], None]] = None,
+        *,
+        policy: Optional[Policy] = None,
+        clock: Callable[[], float] = time.monotonic
+    ):
+        self._path = "" if policy is not None else path
+        self._interval = reload_seconds
+        self._on_reload = on_reload
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._policy = policy if policy is not None else load_policy(path)
+        self._signature = self._stat()
+        self._checked = clock()
+        self.loaded_at = time.time()
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @property
+    def reload_seconds(self) -> float:
+        return self._interval
+
+    @property
+    def policy(self) -> Policy:
+        self._refresh()
+        return self._policy
+
+    def _stat(self) -> Optional[Tuple[int, int, int]]:
+        if not self._path:
+            return None
+        try:
+            status = os.stat(self._path)
+        except OSError:
+            return None
+        return status.st_mtime_ns, status.st_size, status.st_ino
+
+    def _refresh(self) -> None:
+        if not self._path or self._interval <= 0:
+            return
+        if self._clock() - self._checked < self._interval:
+            return
+        with self._lock:
+            if self._clock() - self._checked < self._interval:
+                return
+            try:
+                self._reload_if_changed()
+            finally:
+                self._checked = self._clock()
+
+    def _reload_if_changed(self) -> None:
+        signature = self._stat()
+        if signature is None or signature == self._signature:
+            return
+        self._signature = signature
+        try:
+            reloaded = load_policy(self._path)
+        except PolicyError as error:
+            logger.error("Policy reload rejected, keeping the policy in force: %s", error)
+            self._report("rejected")
+            return
+        self._policy = reloaded
+        self.loaded_at = time.time()
+        logger.info("Policy reloaded from %s", self._path)
+        self._report("loaded")
+
+    def _report(self, outcome: str) -> None:
+        if self._on_reload:
+            self._on_reload(outcome)

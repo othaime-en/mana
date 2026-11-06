@@ -58,6 +58,7 @@ class OrchestratorConfig:
     alert_github_status: bool = True
     
     policy_file: str = ''
+    policy_reload_seconds: float = 5.0
     health_poll_seconds: float = 5.0
     
     watcher_enabled: bool = False
@@ -123,6 +124,7 @@ class OrchestratorConfig:
             
             # Recovery policy
             policy_file=os.getenv('POLICY_FILE', ''),
+            policy_reload_seconds=float(os.getenv('POLICY_RELOAD_SECONDS', '5')),
             health_poll_seconds=float(os.getenv('HEALTH_POLL_SECONDS', '5')),
             
             # Cluster-side detection of stuck rollouts
@@ -204,6 +206,9 @@ class OrchestratorConfig:
             for name in names:
                 if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name):
                     raise ValueError(f"WATCHER_NAMESPACES has an invalid namespace: {name!r}")
+        
+        if self.policy_reload_seconds < 0:
+            raise ValueError("policy_reload_seconds must be >= 0")
         
         if self.policy_file and not os.path.isfile(self.policy_file):
             raise ValueError(f"POLICY_FILE not found: {self.policy_file}")

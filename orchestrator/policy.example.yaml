@@ -36,3 +36,30 @@ rollback:
 circuit_breaker:
   max_rollbacks: 3
   window_seconds: 3600
+
+# Post-deploy verification against Prometheus (needs PROMETHEUS_URL). After the pipeline
+# reports success a deployment is held in `verifying`: nothing is evaluated during
+# warmup_seconds (so the old pods' samples leave the rate windows), then every interval_seconds
+# each check is evaluated. A check that breaches consecutive_breaches times in a row fails the
+# deployment (a verification_failure, rolled back by default). If bake_seconds pass without
+# that, the version is recorded as the rollback target. Queries must return one series (aggregate
+# them) and use {{namespace}} and/or {{app}}; pods of the sample app are named <app>-<hash>-<id>.
+# on_missing says whether a query with no data (an idle app) or an error counts as a breach.
+verification:
+  enabled: false
+  namespaces: [production]
+  warmup_seconds: 60
+  bake_seconds: 180
+  interval_seconds: 15
+  consecutive_breaches: 3
+  on_missing: ignore
+  checks:
+    - name: error-rate
+      query: >-
+        sum(rate(flask_http_request_total{namespace="{{namespace}}",pod=~"{{app}}-.+",status=~"5.."}[1m]))
+        / sum(rate(flask_http_request_total{namespace="{{namespace}}",pod=~"{{app}}-.+"}[1m]))
+      max: 0.05
+    - name: p95-latency
+      query: >-
+        histogram_quantile(0.95, sum by (le) (rate(flask_http_request_duration_seconds_bucket{namespace="{{namespace}}",pod=~"{{app}}-.+"}[1m])))
+      max: 0.5

@@ -9,11 +9,12 @@ the policy can be tested exhaustively.
 
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -30,6 +31,7 @@ FAILURE_TYPES = (
     "smoke_test_failure",
     "timeout",
     "rollout_stuck",
+    "verification_failure",
 )
 NON_ROLLBACK_FAILURES = frozenset({"build_failure", "test_failure"})
 
@@ -122,6 +124,74 @@ class CircuitBreaker(_Strict):
     window_seconds: int = Field(default=3600, ge=60)
 
 
+PLACEHOLDERS = ("{{namespace}}", "{{app}}")
+
+
+class Check(_Strict):
+    """One PromQL expression that must stay on the right side of a threshold"""
+    name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,39}$")
+    query: str = Field(min_length=1, max_length=2000)
+    max: Optional[float] = None
+    min: Optional[float] = None
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> "Check":
+        if (self.max is None) == (self.min is None):
+            raise ValueError("a check needs exactly one of max and min")
+        if not any(placeholder in self.query for placeholder in PLACEHOLDERS):
+            raise ValueError(
+                f"the query must use {{{{namespace}}}} or {{{{app}}}}, or it measures every application"
+            )
+        return self
+
+    def breached_by(self, value: float) -> bool:
+        return value > self.max if self.max is not None else value < self.min
+
+
+class Verification(_Strict):
+    """
+    Check a deployment against Prometheus before it counts as a rollback target
+
+    After the pipeline reports success the deployment is held in `verifying`.
+    Nothing is evaluated during warmup_seconds, so the old pods' samples leave
+    the rate windows. Then every interval_seconds each check is evaluated; a
+    check that breaches consecutive_breaches times in a row fails the
+    deployment (a verification_failure). If bake_seconds pass without that, the
+    deployment succeeds and its version becomes the rollback target.
+    """
+    enabled: bool = False
+    namespaces: List[str] = Field(default_factory=lambda: ["production"], min_length=1)
+    warmup_seconds: int = Field(default=60, ge=0, le=3600)
+    bake_seconds: int = Field(default=180, ge=10, le=7200)
+    interval_seconds: int = Field(default=15, ge=1, le=600)
+    consecutive_breaches: int = Field(default=3, ge=1, le=50)
+    on_missing: Literal["ignore", "breach"] = "ignore"
+    checks: List[Check] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_timing_and_checks(self) -> "Verification":
+        if self.warmup_seconds >= self.bake_seconds:
+            raise ValueError("warmup_seconds must be less than bake_seconds")
+        window = self.bake_seconds - self.warmup_seconds
+        if (self.consecutive_breaches - 1) * self.interval_seconds > window:
+            raise ValueError(
+                "consecutive_breaches evaluations do not fit between warmup and bake, "
+                "so a failure could never be reached"
+            )
+        names = [check.name for check in self.checks]
+        if len(set(names)) != len(names):
+            raise ValueError("check names must be unique")
+        if self.enabled and not self.checks:
+            raise ValueError("verification is enabled but lists no checks")
+        for namespace in self.namespaces:
+            if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", namespace):
+                raise ValueError(f"invalid namespace: {namespace!r}")
+        return self
+
+    def applies_to(self, namespace: str) -> bool:
+        return self.enabled and namespace in self.namespaces
+
+
 def _check_failure_types(rules: Dict[str, Rule]) -> None:
     unknown = sorted(set(rules) - set(FAILURE_TYPES))
     if unknown:
@@ -140,6 +210,7 @@ class Policy(_Strict):
     overrides: List[Override] = Field(default_factory=list)
     rollback: RollbackSettings = Field(default_factory=RollbackSettings)
     circuit_breaker: CircuitBreaker = Field(default_factory=CircuitBreaker)
+    verification: Verification = Field(default_factory=Verification)
 
     @model_validator(mode="before")
     @classmethod
@@ -176,6 +247,7 @@ DEFAULT_POLICY: Dict = {
         "smoke_test_failure": {"action": "rollback"},
         "timeout": {"action": "retry", "max_attempts": 1, "then": "rollback"},
         "rollout_stuck": {"action": "rollback"},
+        "verification_failure": {"action": "rollback"},
     },
 }
 

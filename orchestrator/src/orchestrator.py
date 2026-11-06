@@ -51,6 +51,7 @@ class FailureType(Enum):
     SMOKE_TEST_FAILURE = "smoke_test_failure"
     TIMEOUT = "timeout"
     ROLLOUT_STUCK = "rollout_stuck"
+    VERIFICATION_FAILURE = "verification_failure"
 
 
 NON_ROLLBACK_FAILURES = frozenset({

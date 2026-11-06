@@ -608,3 +608,129 @@ class TestPolicySource:
         clock.advance()
 
         assert self.health_action(source) is Action.ALERT
+
+
+ERROR_CHECK = {
+    "name": "error-rate",
+    "query": 'sum(rate(flask_http_request_total{namespace="{{namespace}}",status=~"5.."}[1m]))',
+    "max": 0.05,
+}
+
+
+def verification(**changes) -> dict:
+    return {"enabled": True, "checks": [ERROR_CHECK], **changes}
+
+
+class TestVerificationSettings:
+    def test_it_is_off_by_default_and_needs_no_checks_then(self):
+        policy = load_policy()
+
+        assert policy.verification.enabled is False
+        assert policy.verification.checks == []
+        assert policy.verification.applies_to("production") is False
+
+    def test_a_valid_section_is_accepted_with_its_defaults(self):
+        settings = Policy.model_validate(policy_with(verification=verification())).verification
+
+        assert (settings.warmup_seconds, settings.bake_seconds, settings.interval_seconds) == (60, 180, 15)
+        assert (settings.consecutive_breaches, settings.on_missing) == (3, "ignore")
+        assert settings.namespaces == ["production"]
+
+    def test_it_applies_only_to_its_namespaces(self):
+        settings = Policy.model_validate(policy_with(verification=verification(namespaces=["production", "staging"]))).verification
+
+        assert settings.applies_to("staging") and not settings.applies_to("canary")
+
+    def test_enabling_it_without_checks_is_rejected(self):
+        with pytest.raises(ValueError, match="lists no checks"):
+            Policy.model_validate(policy_with(verification={"enabled": True}))
+
+    def test_a_disabled_section_may_keep_its_checks_for_later(self):
+        policy = Policy.model_validate(policy_with(verification={"enabled": False, "checks": [ERROR_CHECK]}))
+
+        assert policy.verification.applies_to("production") is False
+
+    @pytest.mark.parametrize("changes,message", [
+        ({"warmup_seconds": 180}, "warmup_seconds must be less than bake_seconds"),
+        ({"warmup_seconds": 200, "bake_seconds": 180}, "warmup_seconds must be less than bake_seconds"),
+        ({"consecutive_breaches": 10, "interval_seconds": 30}, "could never be reached"),
+        ({"namespaces": []}, ""),
+        ({"namespaces": ["Prod"]}, "invalid namespace"),
+        ({"namespaces": ["a_b"]}, "invalid namespace"),
+        ({"on_missing": "fail"}, ""),
+        ({"interval_seconds": 0}, ""),
+        ({"bake_seconds": 5}, ""),
+        ({"consecutive_breaches": 0}, ""),
+        ({"surprise": 1}, ""),
+    ])
+    def test_inconsistent_settings_are_rejected(self, changes, message):
+        with pytest.raises(ValueError, match=message):
+            Policy.model_validate(policy_with(verification=verification(**changes)))
+
+    def test_the_last_evaluation_may_just_fit_in_the_window(self):
+        Policy.model_validate(policy_with(verification=verification(
+            warmup_seconds=60, bake_seconds=120, interval_seconds=30, consecutive_breaches=3
+        )))
+
+    def test_check_names_must_be_unique(self):
+        with pytest.raises(ValueError, match="unique"):
+            Policy.model_validate(policy_with(verification=verification(checks=[ERROR_CHECK, ERROR_CHECK])))
+
+
+class TestCheck:
+    def test_exactly_one_threshold_is_required(self):
+        from src.policy import Check
+
+        for fields in ({}, {"max": 1, "min": 0}):
+            with pytest.raises(ValueError, match="exactly one of max and min"):
+                Check(name="a", query="x{namespace=\"{{namespace}}\"}", **fields)
+
+    @pytest.mark.parametrize("query", ["up", "sum(rate(x[1m]))"])
+    def test_a_query_must_be_scoped_with_a_placeholder(self, query):
+        from src.policy import Check
+
+        with pytest.raises(ValueError, match="measures every application"):
+            Check(name="a", query=query, max=1)
+
+    @pytest.mark.parametrize("name", ["", "Error", "1st", "a b", "x" * 41, "a.b"])
+    def test_names_are_label_safe(self, name):
+        from src.policy import Check
+
+        with pytest.raises(ValueError):
+            Check(name=name, query='x{namespace="{{namespace}}"}', max=1)
+
+    @pytest.mark.parametrize("kind,limit,value,expected", [
+        ("max", 0.05, 0.06, True), ("max", 0.05, 0.05, False), ("max", 0.05, 0.0, False),
+        ("min", 1, 0.9, True), ("min", 1, 1, False), ("min", 1, 5, False),
+    ])
+    def test_breaching_is_strictly_beyond_the_limit(self, kind, limit, value, expected):
+        from src.policy import Check
+
+        check = Check(name="a", query='x{app="{{app}}"}', **{kind: limit})
+
+        assert check.breached_by(value) is expected
+
+    def test_a_threshold_of_zero_is_a_threshold(self):
+        from src.policy import Check
+
+        assert Check(name="a", query='x{app="{{app}}"}', max=0).breached_by(0.1) is True
+        assert Check(name="a", query='x{app="{{app}}"}', min=0).breached_by(-0.1) is True
+
+
+def test_the_example_verification_section_is_valid_and_switched_off():
+    verification = load_policy(str(EXAMPLE)).verification
+
+    assert verification.enabled is False
+    assert [check.name for check in verification.checks] == ["error-rate", "p95-latency"]
+    assert all("{{namespace}}" in check.query and "{{app}}" in check.query for check in verification.checks)
+    assert verification.applies_to("production") is False
+
+
+def test_the_example_checks_render_into_queries_with_balanced_braces():
+    from src.verification import render_query
+
+    for check in load_policy(str(EXAMPLE)).verification.checks:
+        rendered = render_query(check.query, "production", "sample-app")
+
+        assert "{{" not in rendered
+        assert rendered.count("(") == rendered.count(")") and rendered.count("{") == rendered.count("}")

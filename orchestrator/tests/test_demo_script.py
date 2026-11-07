@@ -19,13 +19,14 @@ echo "kubectl $*" >> "$STUB_DIR/calls"
 case "$*" in
   *"config current-context"*) echo "${STUB_CONTEXT:-kind-mana}" ;;
   *"jsonpath"*) echo "sample-app:1.0.0" ;;
-  *"rollout status"*) exit 1 ;;
+  *"rollout status"*) exit "${STUB_ROLLOUT_EXIT:-1}" ;;
 esac
 """
 
 CURL = """#!/usr/bin/env bash
 url="${@: -1}"
 case "$url" in
+  http://app.test/*) echo "$url" >> "$STUB_DIR/load" ;;
   */metrics) printf 'mana_recovery_duration_seconds_sum{namespace="production"} 2.5\\nmana_recovery_duration_seconds_count{namespace="production"} 1\\n' ;;
   */deployment/*)
     index=$(cat "$STUB_DIR/polls" 2>/dev/null || echo 0)
@@ -33,7 +34,7 @@ case "$url" in
     IFS=, read -ra states <<< "$STUB_STATES"
     last=$((${#states[@]} - 1))
     status="${states[$((index > last ? last : index))]}"
-    printf '{"status":"%s","diagnosis":"CrashLoopBackOff","first_failure_at":100.0,"finished_at":102.5}' "$status"
+    printf '{"status":"%s","diagnosis":"CrashLoopBackOff","first_failure_at":100.0,"finished_at":102.5,"verification":{"started_at":90.0,"last":{"error-rate":"0.5 > 0.05"}}}' "$status"
     ;;
 esac
 """
@@ -51,7 +52,7 @@ echo "$(basename "$0") $*" >> "$STUB_DIR/calls"
 def run(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name, body in {"kubectl": KUBECTL, "curl": CURL, "docker": LOGGER, "kind": LOGGER, "sleep": "#!/bin/sh\n"}.items():
+    for name, body in {"kubectl": KUBECTL, "curl": CURL, "docker": LOGGER, "kind": LOGGER, "sleep": "#!/bin/sh\nexec /bin/sleep 0.01\n"}.items():
         (bin_dir / name).write_text(body)
         (bin_dir / name).chmod(0o755)
     notify = tmp_path / "notify.sh"
@@ -212,3 +213,117 @@ def test_make_demo_runs_the_script_and_requires_a_mode():
     assert "./scripts/demo/simulate-failure.sh $(MODE) --yes --namespace $(NAMESPACE) $(DEMO_ARGS)" in makefile
     assert 'test -n "$(MODE)"' in makefile
     assert SCRIPT.stat().st_mode & 0o111
+
+
+LOAD = "http://app.test/api/data"
+
+
+def test_help_documents_the_verification_modes(run):
+    result, _ = run("--help")
+
+    for text in ("errors", "slow", "--load-url", "Prometheus", "300 for errors and slow"):
+        assert text in result.stdout
+
+
+@pytest.mark.parametrize("mode", ["errors", "slow"])
+@pytest.mark.parametrize("args,message", [
+    ((), "needs --load-url"),
+    (("--load-url", "localhost:8080"), "must be an http or https URL"),
+])
+def test_the_verification_modes_need_somewhere_to_send_traffic(run, mode, args, message):
+    result, tmp = run(mode, "--yes", *args)
+
+    assert result.returncode == 2
+    assert message in result.stderr
+    assert lines(tmp, "calls") == [] and lines(tmp, "notified") == []
+
+
+def test_the_failure_modes_do_not_need_a_load_url(run):
+    result, _ = run("crash", "--yes")
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("mode,variable", [
+    ("errors", {"name": "FAILURE_RATE", "value": "0.5"}),
+    ("slow", {"name": "LATENCY_MS", "value": "1500"}),
+])
+def test_the_verification_modes_make_the_app_bad_but_keep_it_healthy(run, mode, variable):
+    result, tmp = run(mode, "--yes", "--load-url", LOAD, STUB_ROLLOUT_EXIT="0")
+
+    assert result.returncode == 0, result.stderr
+    (patch_call,) = [c for c in lines(tmp, "calls") if " patch deployment " in c]
+    container = json.loads(patch_call.split("--patch ", 1)[1])["spec"]["template"]["spec"]["containers"][0]
+    assert container["image"].startswith(f"sample-app:1.0.0-{mode}-")
+    assert container["env"] == [{"name": "ENABLE_FAULT_INJECTION", "value": "true"}, variable]
+
+
+@pytest.mark.parametrize("mode", ["errors", "slow"])
+def test_the_pipeline_reports_success_for_a_version_only_prometheus_can_fault(run, mode):
+    result, tmp = run(mode, "--yes", "--load-url", LOAD, "--failure-type", "timeout", STUB_ROLLOUT_EXIT="0")
+
+    assert result.returncode == 0, result.stderr
+    good, started, reported = lines(tmp, "notified")
+    assert "version=1.0.0 status=success" in good
+    assert "status=in_progress" in started
+    assert f"version=1.0.0-{mode}-" in reported and "status=success failure=" in reported
+    assert not any("status=failed" in line for line in lines(tmp, "notified"))
+    assert started.split()[0] == reported.split()[0]
+
+
+def test_requests_are_sent_while_waiting_and_stop_when_the_script_ends(run):
+    import time
+
+    result, tmp = run("errors", "--yes", "--load-url", LOAD, STUB_ROLLOUT_EXIT="0", STUB_STATES="rolling_back,rolling_back,rolled_back")
+
+    assert result.returncode == 0, result.stderr
+    sent = len(lines(tmp, "load"))
+    time.sleep(0.4)
+    assert sent >= 1 and set(lines(tmp, "load")) == {LOAD}
+    assert len(lines(tmp, "load")) == sent
+
+
+def test_no_requests_are_sent_for_a_failure_mode(run):
+    _, tmp = run("crash", "--yes", "--load-url", LOAD)
+
+    assert lines(tmp, "load") == []
+
+
+def test_the_report_says_how_long_detection_took_and_what_the_checks_saw(run):
+    result, _ = run("slow", "--yes", "--load-url", LOAD, STUB_ROLLOUT_EXIT="0")
+
+    assert "Outcome:        rolled_back" in result.stdout
+    assert "Detected after: 10 s in verification" in result.stdout
+    assert '"error-rate":"0.5 > 0.05"' in result.stdout
+    assert "Recovery time:  2.5 s" in result.stdout
+    assert "since the success was reported" in result.stdout
+
+
+def test_a_failure_mode_does_not_report_detection_in_verification(run):
+    result, _ = run("crash", "--yes")
+
+    assert "Detected after" not in result.stdout
+    assert "since the failure was reported" in result.stdout
+
+
+def test_a_rollout_that_does_not_complete_stops_a_verification_mode_before_reporting(run):
+    result, tmp = run("errors", "--yes", "--load-url", LOAD, STUB_ROLLOUT_EXIT="1")
+
+    assert result.returncode == 1
+    assert "did not complete" in result.stderr
+    assert len(lines(tmp, "notified")) == 2
+    assert lines(tmp, "load") == []
+
+
+def test_a_verification_mode_that_is_not_caught_is_an_error(run):
+    result, _ = run("slow", "--yes", "--load-url", LOAD, STUB_ROLLOUT_EXIT="0", STUB_STATES="verifying,success")
+
+    assert result.returncode == 1
+    assert "was not rolled back (status: success)" in result.stderr
+
+
+def test_the_timeout_can_still_be_chosen_for_a_verification_mode(run):
+    result, _ = run("errors", "--yes", "--load-url", LOAD, "--timeout", "0", STUB_ROLLOUT_EXIT="0", STUB_STATES="verifying")
+
+    assert result.returncode == 1
+    assert "no outcome after 0s (last status: verifying)" in result.stderr

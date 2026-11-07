@@ -11,6 +11,7 @@ import uvicorn
 import os
 import redis
 from src.orchestrator import (
+    DeploymentStatus,
     SelfHealingOrchestrator,
     FailureType
 )
@@ -347,14 +348,29 @@ async def process_deployment_event(payload: WebhookPayload) -> JSONResponse:
             )
         
         elif payload.status is WebhookStatus.SUCCESS:
-            await asyncio.to_thread(
-                orchestrator.record_deployment_succeeded,
+            transition = await asyncio.to_thread(
+                orchestrator.handle_deployment_success,
                 deployment_id=payload.deployment_id,
                 namespace=payload.namespace,
                 deployment_name=payload.app_name,
                 version=payload.version,
                 metadata=metadata
             )
+            
+            if transition.state.status is DeploymentStatus.VERIFYING:
+                settings = orchestrator.policy.verification
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "status": "verifying",
+                        "deployment_id": payload.deployment_id,
+                        "message": (
+                            f"Deployment healthy - verifying against Prometheus for up to "
+                            f"{settings.bake_seconds}s before it is saved as a rollback target"
+                        ),
+                        "bake_seconds": settings.bake_seconds
+                    }
+                )
             
             return JSONResponse(
                 status_code=200,

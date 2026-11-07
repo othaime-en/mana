@@ -459,3 +459,29 @@ class TestPolicyInTheOrchestrator:
 
         assert info["file"] == str(path) and info["reload_seconds"] == 7.5
         assert info["loaded_at"] == pytest.approx(time.time(), abs=5)
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("http://prometheus.test:9090", "http://prometheus.test:9090/api/v1/query"),
+    ("", None),
+])
+def test_the_prometheus_url_decides_whether_the_orchestrator_has_a_client(monkeypatch, url, expected):
+    from src.config import OrchestratorConfig
+
+    monkeypatch.setenv("PROMETHEUS_URL", url)
+    monkeypatch.setenv("PROMETHEUS_TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("WEBHOOK_SECRET", "w" * 40)
+    monkeypatch.setenv("API_KEY", "k" * 40)
+    config = OrchestratorConfig.from_env()
+
+    with patch("src.orchestrator.redis.Redis"), \
+         patch("src.orchestrator.k8s_config.load_kube_config"), \
+         patch("src.orchestrator.client.AppsV1Api"), \
+         patch("src.orchestrator.client.CoreV1Api"), \
+         patch("src.orchestrator.get_config", return_value=config):
+        instance = SelfHealingOrchestrator(use_config=True)
+
+    if expected is None:
+        assert instance.prometheus is None
+    else:
+        assert instance.prometheus._url == expected and instance.prometheus._timeout == 2.5

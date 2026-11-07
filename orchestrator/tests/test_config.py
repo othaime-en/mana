@@ -359,3 +359,50 @@ class TestPolicyReloadSetting:
 
         with pytest.raises(ValueError, match='policy_reload_seconds must be >= 0'):
             OrchestratorConfig.from_env().validate()
+
+
+class TestPrometheusSettings:
+    def test_verification_has_no_prometheus_by_default(self, monkeypatch):
+        monkeypatch.delenv('PROMETHEUS_URL', raising=False)
+        monkeypatch.delenv('PROMETHEUS_TIMEOUT_SECONDS', raising=False)
+
+        config = OrchestratorConfig.from_env()
+        config.validate()
+
+        assert config.prometheus_url == '' and config.prometheus_timeout_seconds == 5.0
+
+    def test_the_url_and_timeout_are_read_and_trimmed(self, monkeypatch):
+        monkeypatch.setenv('PROMETHEUS_URL', '  http://prometheus.monitoring.svc:9090  ')
+        monkeypatch.setenv('PROMETHEUS_TIMEOUT_SECONDS', '2.5')
+
+        config = OrchestratorConfig.from_env()
+        config.validate()
+
+        assert config.prometheus_url == 'http://prometheus.monitoring.svc:9090'
+        assert config.prometheus_timeout_seconds == 2.5
+
+    @pytest.mark.parametrize('url', ['https://prom.example.com', 'http://localhost:9090/prefix'])
+    def test_http_and_https_urls_are_accepted(self, monkeypatch, url):
+        monkeypatch.setenv('PROMETHEUS_URL', url)
+
+        OrchestratorConfig.from_env().validate()
+
+    @pytest.mark.parametrize('url,message', [
+        ('prometheus:9090', 'http or https URL'),
+        ('ftp://prom:9090', 'http or https URL'),
+        ('http://', 'http or https URL'),
+        ('http://user:secret@prom:9090', 'must not contain credentials'),
+        ('http://user@prom:9090', 'must not contain credentials'),
+    ])
+    def test_other_urls_are_rejected(self, monkeypatch, url, message):
+        monkeypatch.setenv('PROMETHEUS_URL', url)
+
+        with pytest.raises(ValueError, match=message):
+            OrchestratorConfig.from_env().validate()
+
+    @pytest.mark.parametrize('value', ['0', '-1'])
+    def test_the_timeout_must_be_positive(self, monkeypatch, value):
+        monkeypatch.setenv('PROMETHEUS_TIMEOUT_SECONDS', value)
+
+        with pytest.raises(ValueError, match='prometheus_timeout_seconds must be > 0'):
+            OrchestratorConfig.from_env().validate()

@@ -259,6 +259,22 @@ resource "kubernetes_network_policy" "orchestrator" {
       }
     }
 
+    # Prometheus, for post-deploy verification
+    egress {
+      to {
+        namespace_selector {
+          match_labels = { "kubernetes.io/metadata.name" = "monitoring" }
+        }
+        pod_selector {
+          match_labels = { "app.kubernetes.io/name" = "prometheus" }
+        }
+      }
+      ports {
+        protocol = "TCP"
+        port     = "9090"
+      }
+    }
+
     # Kubernetes API server and api.github.com; narrow the CIDR to the API server address when known
     dynamic "egress" {
       for_each = local.apiserver_egress_ports

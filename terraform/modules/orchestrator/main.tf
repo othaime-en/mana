@@ -408,6 +408,11 @@ resource "kubernetes_deployment" "orchestrator" {
           }
 
           env {
+            name  = "PROMETHEUS_URL"
+            value = var.prometheus_url
+          }
+
+          env {
             name  = "WATCHER_ENABLED"
             value = tostring(var.watcher_enabled)
           }

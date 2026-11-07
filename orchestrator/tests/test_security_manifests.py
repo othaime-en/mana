@@ -466,3 +466,50 @@ def test_terraform_ships_the_same_policy_from_the_same_manifest():
     assert 'name  = "POLICY_FILE"' in text and 'value = "/etc/mana/policy.yaml"' in text
     assert 'mount_path = "/etc/mana"' in text and "read_only  = true" in text
     assert "kubernetes_config_map.policy" in text
+
+
+def prometheus_egress() -> dict:
+    spec = policies()[("orchestrator", "orchestrator-netpol")]
+    (rule,) = [r for r in spec["egress"] if any(p["port"] == 9090 for p in r["ports"])]
+    return rule
+
+
+def test_the_orchestrator_may_reach_only_prometheus_pods_in_the_monitoring_namespace_on_9090():
+    rule = prometheus_egress()
+    (peer,) = rule["to"]
+
+    assert peer["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "monitoring"}
+    assert peer["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "prometheus"}
+    assert [(p["protocol"], p["port"]) for p in rule["ports"]] == [("TCP", 9090)]
+
+
+def test_the_prometheus_url_points_at_the_namespace_and_port_the_policy_allows():
+    from urllib.parse import urlparse
+
+    url = urlparse(container_env("orchestrator")["PROMETHEUS_URL"])
+    (peer,) = prometheus_egress()["to"]
+
+    assert url.scheme == "http" and url.port == 9090
+    assert url.hostname.split(".")[1] == peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+
+
+def test_terraform_allows_the_same_prometheus_egress_and_url():
+    security = (ROOT / "terraform" / "modules" / "security" / "main.tf").read_text()
+    variables = (ROOT / "terraform" / "modules" / "orchestrator" / "variables.tf").read_text()
+    module = (ROOT / "terraform" / "modules" / "orchestrator" / "main.tf").read_text()
+    url = container_env("orchestrator")["PROMETHEUS_URL"]
+
+    egress = security.split("# Prometheus, for post-deploy verification")[1].split("# Kubernetes API server")[0]
+    assert '"kubernetes.io/metadata.name" = "monitoring"' in egress
+    assert '"app.kubernetes.io/name" = "prometheus"' in egress
+    assert 'port     = "9090"' in egress
+    assert f'default     = "{url}"' in variables
+    assert 'name  = "PROMETHEUS_URL"' in module and "value = var.prometheus_url" in module
+
+
+def test_the_enforcement_script_checks_the_prometheus_path_both_ways():
+    text = SCRIPT.read_text()
+
+    assert "check allow orchestrator orchestrator monitoring prometheus 9090" in text
+    assert "check deny orchestrator intruder monitoring prometheus 9090" in text
+    assert "app.kubernetes.io/name=prometheus" in text

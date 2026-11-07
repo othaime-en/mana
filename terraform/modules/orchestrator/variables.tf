@@ -34,6 +34,12 @@ variable "max_retries" {
   default     = 3
 }
 
+variable "prometheus_url" {
+  description = "Prometheus the orchestrator queries for post-deploy verification (used only when the policy enables verification)"
+  type        = string
+  default     = "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
+}
+
 variable "watcher_enabled" {
   description = "Detect stuck rollouts of Deployments labelled mana.io/managed=true from the cluster"
   type        = bool

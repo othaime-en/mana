@@ -39,6 +39,10 @@ Configuration files are in `monitoring/` (see [Components](../architecture/compo
 | `mana_circuit_breaker_trips_total`   | counter   | `namespace`                  | Rollbacks not scheduled because the application already rolled back too often |
 | `mana_watcher_scans_total`           | counter   | `outcome`                    | Watcher passes over one namespace (`ok` or `error` when Deployments cannot be listed) |
 | `mana_watcher_detections_total`      | counter   | `namespace`, `reason`        | Stuck rollouts found by the watcher (`progress_deadline_exceeded`, `no_progress`) |
+| `mana_policy_reloads_total`          | counter   | `outcome`                    | Reloads of the policy file after it changed (`loaded`) or was rejected as invalid (`rejected`) |
+| `mana_verifications_total`           | counter   | `namespace`, `outcome`       | [Post-deploy verifications](../configuration/recovery-policy.md#post-deploy-verification) by how they ended: `passed`, `failed`, `superseded`, `skipped`, `error` |
+| `mana_verification_checks_total`     | counter   | `check`, `result`            | Evaluations of one check: `ok`, `breach`, `missing` (no data), `error` (Prometheus unreachable or the query rejected) |
+| `mana_verification_duration_seconds` | histogram | `outcome`                    | Seconds a deployment was held in verification |
 
 A failure for a deployment that is already `failed` (for example a fifth failure webhook) is not counted again, and a re-run that reopens a finished deployment and settles again is counted again. Build and test failures reported with `namespace: ci` are counted as `failed` in that namespace (CORE-14).
 
@@ -100,7 +104,7 @@ sum(rate(kube_pod_container_status_restarts_total{namespace="production"}[15m]))
 
 ### Audit events
 
-Every significant orchestrator action produces an audit event (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `rollback_skipped`, `policy_decision`, `version_denied`, `circuit_breaker_open`, `health_check_*`, `state_saved`, `manual_intervention_required`). Each carries a UTC timestamp, deployment ID, namespace, version and a `success` flag, plus action-specific details.
+Every significant orchestrator action produces an audit event (`deployment_received`, `failure_detected`, `retry_initiated`, `rollback_initiated`, `rollback_completed`, `rollback_failed`, `rollback_skipped`, `policy_decision`, `version_denied`, `circuit_breaker_open`, `verification_result`, `health_check_*`, `state_saved`, `manual_intervention_required`). Each carries a UTC timestamp, deployment ID, namespace, version and a `success` flag, plus action-specific details.
 
 ```bash
 kubectl -n orchestrator logs -l app=orchestrator | grep "AUDIT:"
@@ -144,7 +148,7 @@ Four Grafana dashboards live in `monitoring/grafana/dashboards/`:
 
 | Dashboard                 | Shows                                                                                                                                |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **Self-Healing Overview** | Success rate, rollback and retry activity, failed deployments, MTTR and error budget, orchestrator health, pod restarts, recent logs, and a **Reliability** row: job queue depth and the wait of the oldest due job, job outcomes, GitHub API requests, duplicate webhook deliveries, alerts sent, and a **Recovery Policy** row: policy decisions, failure diagnoses, detection time, rollback recovery p95 against the 60 s target, deny-list activity, circuit breaker trips, watcher detections and scans |
+| **Self-Healing Overview** | Success rate, rollback and retry activity, failed deployments, MTTR and error budget, orchestrator health, pod restarts, recent logs, and a **Reliability** row: job queue depth and the wait of the oldest due job, job outcomes, GitHub API requests, duplicate webhook deliveries, alerts sent, and a **Recovery Policy** row: policy decisions, failure diagnoses, detection time, rollback recovery p95 against the 60 s target, deny-list activity, circuit breaker trips, watcher detections and scans, policy reloads, verification outcomes and check results, and the time spent in verification |
 | **Deployment Metrics**    | Per-namespace deployment and rollback statistics, durations, SLO and error budget, recovery time, health check results and webhook traffic |
 | **Application Metrics**   | Request rate, error rate, latency percentiles, resource usage of the sample app                                                      |
 | **Infrastructure**        | Node CPU and memory, cluster capacity, quotas                                                                                        |
@@ -176,7 +180,7 @@ Alert rules are in `monitoring/prometheus/alerts.yml` and are routed by Alertman
 Highlights (full table with thresholds in the [Configuration Reference](../reference/configuration.md#alert-thresholds)):
 
 - **Deployments:** `HighRollbackRate`, `DeploymentFailureRate`, `DeploymentSuccessRateBelowSLO`, `DeploymentReplicasMismatch`, `PodCrashLooping`
-- **Orchestrator:** `OrchestratorDown`, `SlowRollbackDecision`, `HighWebhookFailureRate`, `RedisConnectionFailures`, `SchedulerStalled`, `JobsDeadLettered`, `GitHubRerunFailing`, `AlertDeliveryFailing`, `SlowRollbackRecovery`, `CircuitBreakerOpen`, `WatcherScanFailing`
+- **Orchestrator:** `OrchestratorDown`, `SlowRollbackDecision`, `HighWebhookFailureRate`, `RedisConnectionFailures`, `SchedulerStalled`, `JobsDeadLettered`, `GitHubRerunFailing`, `AlertDeliveryFailing`, `SlowRollbackRecovery`, `CircuitBreakerOpen`, `WatcherScanFailing`, `PolicyReloadRejected`, `VerificationQueryFailing`
 - **Application:** `HighErrorRate`, `SlowResponseTime`, `ApplicationDown`, memory and CPU
 - **Infrastructure and monitoring:** node readiness, disk, scrape failures, Grafana/Loki down
 

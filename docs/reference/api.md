@@ -198,6 +198,19 @@ curl -s -X POST $MANA/webhook/deployment \
 }
 ```
 
+Where [post-deploy verification](../configuration/recovery-policy.md#post-deploy-verification) applies to the namespace, a `success` event does not settle the deployment. The answer is instead (HTTP 200):
+
+```json
+{
+  "status": "verifying",
+  "deployment_id": "deploy-123",
+  "message": "Deployment healthy - verifying against Prometheus for up to 180s before it is saved as a rollback target",
+  "bake_seconds": 180
+}
+```
+
+The deployment stays `verifying` until its checks pass (then it becomes `success` and the version is saved), or fail (then the policy handles a `verification_failure`, a rollback by default). A repeated `success` event for a deployment that is verifying changes nothing.
+
 **`status=in_progress`** (HTTP 200): `{"status": "acknowledged", "deployment_id": "deploy-123"}`.
 
 When the version was rolled back earlier and is on the deny-list, the answer is `{"status": "denied", "deployment_id": ..., "message": ..., "reason": "rolled back after health_check_failure", "denied_since": <unix time>}` (HTTP 200). Nothing is stored for the refused deployment. `scripts/notify-orchestrator.sh` exits 3 on it and the deploy workflow stops before deploying. See [Recovery Policy](../configuration/recovery-policy.md#circuit-breaker-and-deny-list).
@@ -290,6 +303,7 @@ curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/deploy-123
   "version": "v1a2b3c4-1760000000",
   "status": "rolled_back",
   "retry_count": 4,
+  "attempts": { "health_check_failure": 4 },
   "failure_type": "health_check_failure",
   "previous_version": "v0f9e8d7-1759990000",
   "timestamp": 1760000123.45,
@@ -302,7 +316,7 @@ curl -s -H "X-API-Key: $MANA_API_KEY" $MANA/deployment/deploy-123
 
 `started_at`, `first_failure_at` and `finished_at` are Unix timestamps, or `null` when the event was never seen (for example `started_at` for a deployment whose first webhook was a failure).
 
-`status` is one of `pending`, `in_progress`, `success`, `failed`, `rolling_back`, `rolled_back`, `retry_scheduled`.
+`status` is one of `pending`, `in_progress`, `success`, `failed`, `rolling_back`, `rolled_back`, `retry_scheduled`, `verifying`.
 
 ## `GET /deployments/recent`
 
@@ -382,7 +396,7 @@ Prometheus text exposition format, served directly (no redirect). Rendering read
 | `deployment_duration_seconds`        | histogram | `namespace`, `status`        | First `in_progress` event to the final status, across all attempts                                           |
 | `mana_recovery_duration_seconds`     | histogram | `namespace`, `app`, `outcome` | First failure to a successful retry (`retry_succeeded`) or a verified rollback (`rolled_back`)               |
 | `rollback_decision_duration_seconds` | histogram |                              | Time to decide retry, rollback, skip or alert for a failure (excludes the rollback itself)                   |
-| `active_deployments`                 | gauge     | `namespace`                  | Deployments that are `in_progress`, `retry_scheduled` or `rolling_back`, read from Redis at scrape time. Every replica reports the same value: aggregate with `max by (namespace)`, not `sum` |
+| `active_deployments`                 | gauge     | `namespace`                  | Deployments that are `in_progress`, `retry_scheduled`, `rolling_back` or `verifying`, read from Redis at scrape time. Every replica reports the same value: aggregate with `max by (namespace)`, not `sum` |
 | `retries_total`                      | counter   | `namespace`, `retry_attempt` | Retries scheduled                                                                                            |
 | `rollbacks_total`                    | counter   | `namespace`, `reason`        | Successful rollbacks (`reason` is the failure type, or `manual`)                                             |
 | `health_checks_total`                | counter   | `namespace`, `result`        | Deployment health checks (`success` or `failed`), including those run during a rollback                     |
@@ -453,4 +467,4 @@ The replica status is followed by an `automation` object:
 }
 ```
 
-`GET /deployment/{id}` also returns `diagnosis` (for example `CrashLoopBackOff`, or `null`).
+`GET /deployment/{id}` also returns `diagnosis` (for example `CrashLoopBackOff`, or `null`), `attempts` (failures per failure type, which the policy counts; `retry_count` is the total) and, for a deployment that went through verification, `verification` (`started_at`, `evaluations`, the breach `streaks` per check and what each check `last` saw). `GET /config` includes a `policy` block: the file, the reload interval, when it was last loaded and whether verification is active.

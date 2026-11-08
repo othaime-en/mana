@@ -150,6 +150,6 @@ Run the tests with `cd sample-app && pytest tests/ -v --cov=src`.
 | `FAIL_HEALTH_AFTER` | `/health` answers 500 this many seconds after start               | `health_check_failure`                                  |
 | `READY_NEVER`       | `/ready` always answers 503                                       | The rollout never completes                             |
 | `LEAK_MB_PER_S`     | Holds more memory every second, up to `LEAK_MAX_MB` (default 2048) | `OOMKilled` once the container limit is reached         |
-| `LATENCY_MS`        | Delays `/` and `/api/data`; the probes are not delayed            | Nothing yet: it needs post-deploy verification (FEAT-06) |
+| `LATENCY_MS`        | Delays `/` and `/api/data`; the probes are not delayed            | Nothing from the pipeline; [post-deploy verification](recovery-policy.md#post-deploy-verification) catches it with a latency check |
 
-`GET /api/config` lists the active modes under `fault_injection`. `make demo MODE=crash|unhealthy|unready|oom` deploys a broken version with one of them and times the rollback.
+`GET /api/config` lists the active modes under `fault_injection`. `make demo MODE=crash|unhealthy|unready|oom` deploys a broken version with one of them and times the rollback. `MODE=errors` (`FAILURE_RATE=0.5`) and `MODE=slow` (`LATENCY_MS=1500`) deploy a version whose pods stay healthy, so the pipeline's checks pass and only verification can catch it; they need `DEMO_ARGS="--load-url http://localhost:8080/api/data"` because the checks need traffic.

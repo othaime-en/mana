@@ -38,7 +38,10 @@ Read in `orchestrator/src/config.py`, `orchestrator/src/orchestrator.py` and `or
 | `SHUTDOWN_GRACE_SECONDS` | float | `30`       | no             | Time a stopping replica waits for running jobs. Keep it below the pod's `terminationGracePeriodSeconds` (45) |
 | `SLACK_WEBHOOK_URL`    | secret | unset       | no             | Slack incoming webhook for alerts; must be `https://`. Alerts to Slack are off when unset |
 | `ALERT_GITHUB_STATUS`  | bool   | `true`      | no             | Mark the failing commit with a `mana/recovery` status. Needs `GITHUB_TOKEN` and `GITHUB_REPO`; the token needs commit-status write access |
-| `POLICY_FILE`          | path   | unset       | no             | [Recovery policy](recovery-policy.md) file; the built-in policy is used when unset. The file must exist and be valid |
+| `POLICY_FILE`          | path   | unset       | no             | [Recovery policy](recovery-policy.md) file; the built-in policy is used when unset. The file must exist and be valid at start-up; the manifests mount it from the `mana-policy` ConfigMap |
+| `POLICY_RELOAD_SECONDS` | float | `5`        | no             | How often the policy file is checked for changes; `0` turns reloading off. A changed file that is invalid is rejected and the policy in force is kept |
+| `PROMETHEUS_URL`       | URL    | unset       | no             | Prometheus for [post-deploy verification](recovery-policy.md#post-deploy-verification); `http` or `https`, no credentials. Verification is off while unset |
+| `PROMETHEUS_TIMEOUT_SECONDS` | float | `5`    | no             | Timeout of each Prometheus query. Must be `> 0`                             |
 | `WATCHER_ENABLED`      | bool   | `false`     | no             | Detect stuck rollouts of Deployments labelled `mana.io/managed=true` from the cluster |
 | `WATCHER_NAMESPACES`   | string | `production,staging` | no    | Comma-separated namespaces the watcher scans; each needs the orchestrator Role |
 | `WATCHER_INTERVAL_SECONDS` | float | `15`    | no             | Seconds between scans. Must be `> 0`                                        |

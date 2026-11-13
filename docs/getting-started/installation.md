@@ -11,6 +11,7 @@ For a guided local walkthrough see the [Quick Start](quick-start.md).
 | Namespace `orchestrator`                                                                                     |                | `orchestrator/k8s/deployment.yaml` |
 | Deployment `orchestrator` (2 replicas) and Service `orchestrator-service` (8000)                             | `orchestrator` | `orchestrator/k8s/deployment.yaml` |
 | ServiceAccount `orchestrator-sa` | `orchestrator` | `orchestrator/k8s/deployment.yaml` |
+| ConfigMap `mana-policy` (the [recovery policy](../configuration/recovery-policy.md), mounted at `/etc/mana/policy.yaml`) | `orchestrator` | `orchestrator/k8s/policy-configmap.yaml` |
 | Role and RoleBinding `mana-orchestrator` | `production`, `staging`, `canary` | `orchestrator/k8s/rbac.yaml` |
 | Deployment `redis` (1 replica) and Service `redis-service` (6379)                                            | `orchestrator` | `orchestrator/k8s/redis.yaml`      |
 | Secret `orchestrator-secrets` (`redis-password`, `webhook-secret`, `api-key`)                                | `orchestrator` | `scripts/create-secrets.sh`        |
@@ -83,11 +84,12 @@ Review the other values in the same `env:` block (see [Configuration](../configu
 ```bash
 kubectl apply -f orchestrator/k8s/rbac.yaml
 kubectl apply -f orchestrator/k8s/redis.yaml
+kubectl apply -f orchestrator/k8s/policy-configmap.yaml
 kubectl apply -f orchestrator/k8s/deployment.yaml
 kubectl rollout status deployment/orchestrator -n orchestrator --timeout=180s
 ```
 
-(`kubectl apply -f orchestrator/k8s/ -n orchestrator` applies both files in one go.) The readiness and liveness probes wait 60 seconds before the first check, so allow a minute or two.
+(`kubectl apply -f orchestrator/k8s/ -n orchestrator` applies all of them in one go. The Deployment mounts the `mana-policy` ConfigMap, so the pods stay in `ContainerCreating` until it exists.) The readiness and liveness probes wait 60 seconds before the first check, so allow a minute or two.
 
 ### 5. Deploy your target application
 
@@ -172,6 +174,7 @@ Restart the pods after any configuration change; settings are read only at start
 ```bash
 kubectl delete -f orchestrator/k8s/redis.yaml
 kubectl delete -f orchestrator/k8s/deployment.yaml
+kubectl delete -f orchestrator/k8s/policy-configmap.yaml --ignore-not-found
 kubectl delete -f orchestrator/k8s/rbac.yaml --ignore-not-found
 kubectl delete clusterrole orchestrator-role --ignore-not-found     # only from versions before namespaced RBAC
 kubectl delete clusterrolebinding orchestrator-binding --ignore-not-found

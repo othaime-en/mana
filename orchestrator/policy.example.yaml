@@ -3,7 +3,7 @@
 # below) is used. Retries stay capped by MAX_RETRIES.
 version: 1
 
-# What to do per failure type. Every type must be listed.
+# What to do per failure type. A type left out uses the built-in rule.
 #   action: retry     re-run the workflow; needs max_attempts, and `then` says what
 #                     follows when the attempts are used up (rollback or alert)
 #   action: rollback  roll back to the last successful version at once
@@ -18,6 +18,7 @@ default:
   health_check_failure: {action: rollback}
   smoke_test_failure:   {action: rollback}
   timeout:              {action: retry, max_attempts: 1, then: rollback}
+  rollout_stuck:        {action: rollback}   # what the cluster-side watcher reports
 
 # The first override whose match applies and that lists the failure type wins.
 overrides:
@@ -35,3 +36,30 @@ rollback:
 circuit_breaker:
   max_rollbacks: 3
   window_seconds: 3600
+
+# Post-deploy verification against Prometheus (needs PROMETHEUS_URL). After the pipeline
+# reports success a deployment is held in `verifying`: nothing is evaluated during
+# warmup_seconds (so the old pods' samples leave the rate windows), then every interval_seconds
+# each check is evaluated. A check that breaches consecutive_breaches times in a row fails the
+# deployment (a verification_failure, rolled back by default). If bake_seconds pass without
+# that, the version is recorded as the rollback target. Queries must return one series (aggregate
+# them) and use {{namespace}} and/or {{app}}; pods of the sample app are named <app>-<hash>-<id>.
+# on_missing says whether a query with no data (an idle app) or an error counts as a breach.
+verification:
+  enabled: false
+  namespaces: [production]
+  warmup_seconds: 60
+  bake_seconds: 180
+  interval_seconds: 15
+  consecutive_breaches: 3
+  on_missing: ignore
+  checks:
+    - name: error-rate
+      query: >-
+        sum(rate(flask_http_request_total{namespace="{{namespace}}",pod=~"{{app}}-.+",status=~"5.."}[1m]))
+        / sum(rate(flask_http_request_total{namespace="{{namespace}}",pod=~"{{app}}-.+"}[1m]))
+      max: 0.05
+    - name: p95-latency
+      query: >-
+        histogram_quantile(0.95, sum by (le) (rate(flask_http_request_duration_seconds_bucket{namespace="{{namespace}}",pod=~"{{app}}-.+"}[1m])))
+      max: 0.5

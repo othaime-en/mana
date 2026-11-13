@@ -210,6 +210,9 @@ HEALTH_CHECK_TIMEOUT=5
 | `max_backoff must be > initial_backoff`     | `MAX_BACKOFF` is less than or equal to `INITIAL_BACKOFF` |
 | `health_poll_seconds must be > 0`           | `HEALTH_POLL_SECONDS` is 0 or negative                   |
 | `POLICY_FILE not found: ...`                | `POLICY_FILE` names a file that does not exist           |
+| `policy_reload_seconds must be >= 0`        | `POLICY_RELOAD_SECONDS` is negative                      |
+| `PROMETHEUS_URL must be an http or https URL` / `must not contain credentials` | `PROMETHEUS_URL` is malformed or carries a user name or password |
+| `prometheus_timeout_seconds must be > 0`    | `PROMETHEUS_TIMEOUT_SECONDS` is 0 or negative            |
 | `WATCHER_NAMESPACES ...`                    | The watcher is on and a namespace name is empty or invalid |
 | `job_lease_seconds must be >= 3`            | `JOB_LEASE_SECONDS` is below 3                           |
 | `scheduler_poll_seconds must be > 0`        | `SCHEDULER_POLL_SECONDS` is 0 or negative                |

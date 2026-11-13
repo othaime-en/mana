@@ -6,7 +6,7 @@ fake cluster, like two pods sharing Redis and an API server.
 
 import asyncio
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -248,3 +248,80 @@ async def test_repeated_bad_versions_are_frozen_and_then_pause_automation(real_r
     assert "Circuit breaker open" in paused["message"]
     assert [target for _, target in cluster.patches] == ["v1", "v1"]
     assert orch.guards.denied("production", "sample-app", "v4") is None
+
+
+def verification_orchestrator(real_redis, cluster, prometheus_value):
+    orch = replica(real_redis, cluster)
+    orch.prometheus = Mock()
+    orch.prometheus.query.return_value = prometheus_value
+    orch.diagnose_failure = Mock(return_value=None)
+    orch.policy = Policy.model_validate({**DEFAULT_POLICY, "verification": {
+        "enabled": True, "warmup_seconds": 1, "bake_seconds": 10, "interval_seconds": 1,
+        "consecutive_breaches": 3,
+        "checks": [{"name": "error-rate", "query": 'e{namespace="{{namespace}}"}', "max": 0.05}],
+    }})
+    return orch
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_that_breaches_its_checks_is_rolled_back_by_the_durable_scheduler(real_redis):
+    cluster = Cluster(live="v2")
+    orch = verification_orchestrator(real_redis, cluster, prometheus_value=0.4)
+    worker = scheduler_for(orch)
+    task = asyncio.create_task(worker.run())
+
+    transition = orch.handle_deployment_success("d1", "production", "sample-app", "v2", {})
+    settled = await until(
+        lambda: orch.get_deployment_state("d1").status is DeploymentStatus.ROLLED_BACK, timeout=15
+    )
+    await worker.stop(5)
+    await task
+
+    state = orch.get_deployment_state("d1")
+    assert transition.state.status is DeploymentStatus.VERIFYING
+    assert settled
+    assert state.failure_type is FailureType.VERIFICATION_FAILURE
+    assert cluster.patches == [("d1", "v1")]
+    assert real_redis.get("last_successful:production:sample-app") != "v2"
+    assert orch.guards.denied("production", "sample-app", "v2") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_deployment_becomes_the_rollback_target_only_after_it_is_verified(real_redis):
+    cluster = Cluster(live="v2")
+    orch = verification_orchestrator(real_redis, cluster, prometheus_value=0.001)
+    worker = scheduler_for(orch)
+    task = asyncio.create_task(worker.run())
+
+    orch.handle_deployment_success("d1", "production", "sample-app", "v2", {})
+    held = (orch.get_deployment_state("d1").status, real_redis.get("last_successful:production:sample-app"))
+    state = orch.get_deployment_state("d1")
+    state.verification["started_at"] -= 1000
+    orch.save_deployment_state(state)
+    settled = await until(lambda: orch.get_deployment_state("d1").status is DeploymentStatus.SUCCESS, timeout=15)
+    await worker.stop(5)
+    await task
+
+    assert held == (DeploymentStatus.VERIFYING, None)
+    assert settled
+    assert real_redis.get("last_successful:production:sample-app") == "v2"
+    assert cluster.patches == []
+
+
+@pytest.mark.asyncio
+async def test_verification_continues_on_another_replica_when_the_first_one_dies(real_redis):
+    cluster = Cluster(live="v2")
+    first = verification_orchestrator(real_redis, cluster, prometheus_value=0.4)
+    first.handle_deployment_success("d1", "production", "sample-app", "v2", {})
+    second = verification_orchestrator(real_redis, cluster, prometheus_value=0.4)
+    worker = scheduler_for(second)
+    task = asyncio.create_task(worker.run())
+
+    settled = await until(
+        lambda: second.get_deployment_state("d1").status is DeploymentStatus.ROLLED_BACK, timeout=15
+    )
+    await worker.stop(5)
+    await task
+
+    assert settled
+    assert cluster.patches == [("d1", "v1")]

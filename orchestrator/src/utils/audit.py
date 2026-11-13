@@ -30,6 +30,7 @@ class AuditAction(Enum):
     POLICY_DECISION = "policy_decision"
     VERSION_DENIED = "version_denied"
     CIRCUIT_BREAKER_OPEN = "circuit_breaker_open"
+    VERIFICATION_RESULT = "verification_result"
     MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
 
 
@@ -415,6 +416,26 @@ class AuditLogger:
             version=version,
             success=True,
             details={"rollbacks": rollbacks, "window_seconds": window_seconds}
+        )
+    
+    def log_verification_result(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        outcome: str,
+        details: Optional[dict] = None
+    ):
+        """Log how a deployment's post-deploy verification ended"""
+        self.log_event(
+            action=AuditAction.VERIFICATION_RESULT,
+            deployment_id=deployment_id,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            version=version,
+            success=outcome != "failed",
+            details={"outcome": outcome, **(details or {})}
         )
     
     def log_manual_intervention_required(

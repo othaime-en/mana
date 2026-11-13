@@ -1,4 +1,7 @@
 import itertools
+import os
+import time
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -43,7 +46,7 @@ def test_the_default_policy_covers_every_failure_type():
 def test_the_default_policy_rolls_back_post_deploy_failures_at_once():
     policy = load_policy()
 
-    for failure_type in ("health_check_failure", "smoke_test_failure"):
+    for failure_type in ("health_check_failure", "smoke_test_failure", "rollout_stuck"):
         assert policy.rule_for("production", "sample-app", failure_type).action is Action.ROLLBACK
     assert policy.rule_for("production", "sample-app", "test_failure").action is Action.ALERT
 
@@ -101,11 +104,31 @@ class TestRuleShape:
 
 
 class TestPolicyValidation:
-    def test_every_failure_type_must_be_listed(self):
-        incomplete = {key: value for key, value in DEFAULT_POLICY["default"].items() if key != "timeout"}
+    def test_a_type_missing_from_default_uses_the_built_in_rule(self):
+        incomplete = {key: value for key, value in DEFAULT_POLICY["default"].items() if key != "rollout_stuck"}
 
-        with pytest.raises(ValueError, match="missing .*timeout"):
-            Policy.model_validate(policy_with(default=incomplete))
+        policy = Policy.model_validate(policy_with(default=incomplete))
+
+        assert policy.rule_for("production", "app", "rollout_stuck") == load_policy().default["rollout_stuck"]
+
+    def test_a_policy_with_only_overrides_still_has_every_rule(self):
+        policy = Policy.model_validate({"overrides": [
+            {"match": {"namespace": "staging"}, "rules": {"timeout": {"action": "alert"}}}
+        ]})
+
+        assert set(policy.default) == set(FAILURE_TYPES)
+        assert policy.rule_for("production", "app", "timeout").action is Action.RETRY
+        assert policy.rule_for("staging", "app", "timeout").action is Action.ALERT
+
+    def test_a_rule_in_default_replaces_the_built_in_one(self):
+        policy = Policy.model_validate({"default": {"timeout": {"action": "alert"}}})
+
+        assert policy.rule_for("production", "app", "timeout").action is Action.ALERT
+        assert policy.rule_for("production", "app", "health_check_failure").action is Action.ROLLBACK
+
+    def test_a_default_that_is_not_a_mapping_is_rejected(self):
+        with pytest.raises(ValueError):
+            Policy.model_validate({"default": ["timeout"]})
 
     def test_unknown_failure_types_are_rejected(self):
         extra = {**DEFAULT_POLICY["default"], "disk_full": {"action": "alert"}}
@@ -346,3 +369,368 @@ def test_invariants_hold_for_every_combination(rule, attempt, can_retry, has_tar
         assert decision.action is (Action.ROLLBACK if rule.action is Action.ROLLBACK and has_target else Action.ALERT)
     if rule.action is Action.RETRY and attempt > rule.max_attempts:
         assert decision.action is not Action.RETRY
+
+
+class TestPolicySource:
+    """The policy in force follows its file, and a bad edit never replaces a good policy"""
+
+    ALERT_ON_HEALTH = {**DEFAULT_POLICY["default"], "health_check_failure": {"action": "alert"}}
+
+    @pytest.fixture
+    def clock(self):
+        class Clock:
+            now = 1000.0
+
+            def __call__(self):
+                return self.now
+
+            def advance(self, seconds=6.0):
+                self.now += seconds
+
+        return Clock()
+
+    def write(self, path, default=None, version=1):
+        import json
+
+        path.write_text(json.dumps({"version": version, "default": default or DEFAULT_POLICY["default"]}))
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    def source(self, tmp_path, clock, events, interval=5.0):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        self.write(path)
+        return path, PolicySource(str(path), interval, events.append, clock=clock)
+
+    def health_action(self, source):
+        return source.policy.rule_for("production", "app", "health_check_failure").action
+
+    def test_without_a_file_it_serves_the_built_in_policy(self):
+        from src.policy import PolicySource
+
+        source = PolicySource()
+
+        assert source.policy.default == load_policy().default
+        assert source.path == ""
+
+    def test_a_given_policy_is_served_as_is_and_never_reloaded(self, tmp_path, clock):
+        from src.policy import PolicySource
+
+        fixed = Policy.model_validate(policy_with(default=self.ALERT_ON_HEALTH))
+        source = PolicySource(str(tmp_path / "ignored.yaml"), policy=fixed, clock=clock)
+        clock.advance()
+
+        assert source.policy is fixed and source.path == ""
+
+    def test_a_changed_file_is_picked_up_after_the_interval(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+        assert self.health_action(source) is Action.ROLLBACK
+        before = source.loaded_at
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        assert self.health_action(source) is Action.ROLLBACK
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+        assert events == ["loaded"]
+        assert source.loaded_at >= before
+
+    def test_the_file_is_not_looked_at_more_often_than_the_interval(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events, interval=5.0)
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance(4.9)
+
+        assert self.health_action(source) is Action.ROLLBACK
+
+        clock.advance(0.2)
+        assert self.health_action(source) is Action.ALERT
+
+    def test_an_unchanged_file_is_not_reloaded(self, tmp_path, clock):
+        events = []
+        _, source = self.source(tmp_path, clock, events)
+
+        for _ in range(3):
+            clock.advance()
+            source.policy
+
+        assert events == []
+
+    def test_an_invalid_file_keeps_the_policy_in_force_and_is_reported_once(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+
+        self.write(path, {"timeout": {"action": "retry"}})
+        for _ in range(3):
+            clock.advance()
+            assert self.health_action(source) is Action.ROLLBACK
+
+        assert events == ["rejected"]
+
+    def test_fixing_a_rejected_file_loads_it(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+        self.write(path, {"timeout": {"action": "retry"}})
+        clock.advance()
+        source.policy
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+        assert events == ["rejected", "loaded"]
+
+    def test_unparsable_yaml_is_rejected_too(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+
+        path.write_text("default: [unclosed")
+        clock.advance()
+
+        assert self.health_action(source) is Action.ROLLBACK
+        assert events == ["rejected"]
+
+    def test_a_file_that_disappears_keeps_the_policy_and_is_loaded_again_when_it_returns(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+
+        path.unlink()
+        clock.advance()
+        assert self.health_action(source) is Action.ROLLBACK
+        assert events == []
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+
+    def test_an_interval_of_zero_turns_reloading_off(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events, interval=0)
+
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance(10_000)
+
+        assert self.health_action(source) is Action.ROLLBACK
+
+    def test_a_symlink_swap_like_a_mounted_configmap_is_detected(self, tmp_path, clock):
+        from src.policy import PolicySource
+
+        first, second = tmp_path / "v1", tmp_path / "v2"
+        first.mkdir(), second.mkdir()
+        self.write(first / "policy.yaml")
+        self.write(second / "policy.yaml", self.ALERT_ON_HEALTH)
+        data = tmp_path / "..data"
+        data.symlink_to(first)
+        mounted = tmp_path / "policy.yaml"
+        mounted.symlink_to(data / "policy.yaml")
+        events = []
+        source = PolicySource(str(mounted), 5.0, events.append, clock=clock)
+
+        staging = tmp_path / "..data_tmp"
+        staging.symlink_to(second)
+        os.replace(staging, data)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+        assert events == ["loaded"]
+
+    def test_many_threads_reloading_at_once_reload_once(self, tmp_path, clock):
+        from concurrent.futures import ThreadPoolExecutor
+
+        events = []
+        path, source = self.source(tmp_path, clock, events)
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        real_load = load_policy
+
+        def slow_load(path):
+            time.sleep(0.1)
+            return real_load(path)
+
+        with patch("src.policy.load_policy", slow_load), ThreadPoolExecutor(8) as pool:
+            actions = list(pool.map(lambda _: self.health_action(source), range(32)))
+
+        assert set(actions) == {Action.ALERT}
+        assert events == ["loaded"]
+
+    def test_an_invalid_file_at_start_up_stops_the_service(self, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text("default: {timeout: {action: retry}}")
+
+        with pytest.raises(PolicyError):
+            PolicySource(str(path))
+
+    def test_a_swap_to_a_file_of_the_same_size_and_time_is_still_detected(self, tmp_path, clock):
+        import json
+        from src.policy import PolicySource
+
+        old = json.dumps({"default": DEFAULT_POLICY["default"]})
+        new = json.dumps({"default": self.ALERT_ON_HEALTH})
+        size = max(len(old), len(new))
+        first, second = tmp_path / "v1", tmp_path / "v2"
+        first.mkdir(), second.mkdir()
+        for directory, text in ((first, old), (second, new)):
+            (directory / "policy.yaml").write_text(text.ljust(size))
+            os.utime(directory / "policy.yaml", ns=(5_000_000_000, 5_000_000_000))
+        data = tmp_path / "..data"
+        data.symlink_to(first)
+        mounted = tmp_path / "policy.yaml"
+        mounted.symlink_to(data / "policy.yaml")
+        source = PolicySource(str(mounted), 5.0, clock=clock)
+        assert self.health_action(source) is Action.ROLLBACK
+
+        staging = tmp_path / "..data_tmp"
+        staging.symlink_to(second)
+        os.replace(staging, data)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+
+    def test_the_path_and_interval_are_exposed(self, tmp_path, clock):
+        events = []
+        path, source = self.source(tmp_path, clock, events, interval=7.0)
+
+        assert (source.path, source.reload_seconds) == (str(path), 7.0)
+
+    def test_reloading_without_a_listener_is_fine(self, tmp_path, clock):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        self.write(path)
+        source = PolicySource(str(path), 5.0, clock=clock)
+        self.write(path, self.ALERT_ON_HEALTH)
+        clock.advance()
+
+        assert self.health_action(source) is Action.ALERT
+
+
+ERROR_CHECK = {
+    "name": "error-rate",
+    "query": 'sum(rate(flask_http_request_total{namespace="{{namespace}}",status=~"5.."}[1m]))',
+    "max": 0.05,
+}
+
+
+def verification(**changes) -> dict:
+    return {"enabled": True, "checks": [ERROR_CHECK], **changes}
+
+
+class TestVerificationSettings:
+    def test_it_is_off_by_default_and_needs_no_checks_then(self):
+        policy = load_policy()
+
+        assert policy.verification.enabled is False
+        assert policy.verification.checks == []
+        assert policy.verification.applies_to("production") is False
+
+    def test_a_valid_section_is_accepted_with_its_defaults(self):
+        settings = Policy.model_validate(policy_with(verification=verification())).verification
+
+        assert (settings.warmup_seconds, settings.bake_seconds, settings.interval_seconds) == (60, 180, 15)
+        assert (settings.consecutive_breaches, settings.on_missing) == (3, "ignore")
+        assert settings.namespaces == ["production"]
+
+    def test_it_applies_only_to_its_namespaces(self):
+        settings = Policy.model_validate(policy_with(verification=verification(namespaces=["production", "staging"]))).verification
+
+        assert settings.applies_to("staging") and not settings.applies_to("canary")
+
+    def test_enabling_it_without_checks_is_rejected(self):
+        with pytest.raises(ValueError, match="lists no checks"):
+            Policy.model_validate(policy_with(verification={"enabled": True}))
+
+    def test_a_disabled_section_may_keep_its_checks_for_later(self):
+        policy = Policy.model_validate(policy_with(verification={"enabled": False, "checks": [ERROR_CHECK]}))
+
+        assert policy.verification.applies_to("production") is False
+
+    @pytest.mark.parametrize("changes,message", [
+        ({"warmup_seconds": 180}, "warmup_seconds must be less than bake_seconds"),
+        ({"warmup_seconds": 200, "bake_seconds": 180}, "warmup_seconds must be less than bake_seconds"),
+        ({"consecutive_breaches": 10, "interval_seconds": 30}, "could never be reached"),
+        ({"namespaces": []}, ""),
+        ({"namespaces": ["Prod"]}, "invalid namespace"),
+        ({"namespaces": ["a_b"]}, "invalid namespace"),
+        ({"on_missing": "fail"}, ""),
+        ({"interval_seconds": 0}, ""),
+        ({"bake_seconds": 5}, ""),
+        ({"consecutive_breaches": 0}, ""),
+        ({"surprise": 1}, ""),
+    ])
+    def test_inconsistent_settings_are_rejected(self, changes, message):
+        with pytest.raises(ValueError, match=message):
+            Policy.model_validate(policy_with(verification=verification(**changes)))
+
+    def test_the_last_evaluation_may_just_fit_in_the_window(self):
+        Policy.model_validate(policy_with(verification=verification(
+            warmup_seconds=60, bake_seconds=120, interval_seconds=30, consecutive_breaches=3
+        )))
+
+    def test_check_names_must_be_unique(self):
+        with pytest.raises(ValueError, match="unique"):
+            Policy.model_validate(policy_with(verification=verification(checks=[ERROR_CHECK, ERROR_CHECK])))
+
+
+class TestCheck:
+    def test_exactly_one_threshold_is_required(self):
+        from src.policy import Check
+
+        for fields in ({}, {"max": 1, "min": 0}):
+            with pytest.raises(ValueError, match="exactly one of max and min"):
+                Check(name="a", query="x{namespace=\"{{namespace}}\"}", **fields)
+
+    @pytest.mark.parametrize("query", ["up", "sum(rate(x[1m]))"])
+    def test_a_query_must_be_scoped_with_a_placeholder(self, query):
+        from src.policy import Check
+
+        with pytest.raises(ValueError, match="measures every application"):
+            Check(name="a", query=query, max=1)
+
+    @pytest.mark.parametrize("name", ["", "Error", "1st", "a b", "x" * 41, "a.b"])
+    def test_names_are_label_safe(self, name):
+        from src.policy import Check
+
+        with pytest.raises(ValueError):
+            Check(name=name, query='x{namespace="{{namespace}}"}', max=1)
+
+    @pytest.mark.parametrize("kind,limit,value,expected", [
+        ("max", 0.05, 0.06, True), ("max", 0.05, 0.05, False), ("max", 0.05, 0.0, False),
+        ("min", 1, 0.9, True), ("min", 1, 1, False), ("min", 1, 5, False),
+    ])
+    def test_breaching_is_strictly_beyond_the_limit(self, kind, limit, value, expected):
+        from src.policy import Check
+
+        check = Check(name="a", query='x{app="{{app}}"}', **{kind: limit})
+
+        assert check.breached_by(value) is expected
+
+    def test_a_threshold_of_zero_is_a_threshold(self):
+        from src.policy import Check
+
+        assert Check(name="a", query='x{app="{{app}}"}', max=0).breached_by(0.1) is True
+        assert Check(name="a", query='x{app="{{app}}"}', min=0).breached_by(-0.1) is True
+
+
+def test_the_example_verification_section_is_valid_and_switched_off():
+    verification = load_policy(str(EXAMPLE)).verification
+
+    assert verification.enabled is False
+    assert [check.name for check in verification.checks] == ["error-rate", "p95-latency"]
+    assert all("{{namespace}}" in check.query and "{{app}}" in check.query for check in verification.checks)
+    assert verification.applies_to("production") is False
+
+
+def test_the_example_checks_render_into_queries_with_balanced_braces():
+    from src.verification import render_query
+
+    for check in load_policy(str(EXAMPLE)).verification.checks:
+        rendered = render_query(check.query, "production", "sample-app")
+
+        assert "{{" not in rendered
+        assert rendered.count("(") == rendered.count(")") and rendered.count("{") == rendered.count("}")

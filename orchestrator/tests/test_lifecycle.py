@@ -191,10 +191,9 @@ class TestFailureLifecycle:
         )
         assert orchestrator.active_deployment_counts() == {"production": 1}
 
-        orchestrator.max_retries = 1
         await orchestrator.handle_deployment_failure(
             "deploy-1", "production", "sample-app", "v1",
-            FailureType.BUILD_FAILURE, {"workflow_run_id": "7"},
+            FailureType.TEST_FAILURE, {"workflow_run_id": "7"},
         )
 
         state = orchestrator.get_deployment_state("deploy-1")

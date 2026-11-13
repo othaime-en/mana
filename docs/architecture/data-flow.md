@@ -47,17 +47,19 @@ How the orchestrator reacts depends on `status`:
 
 The important side effect is `last_successful:<namespace>:<app_name>`. That value is what a later rollback restores.
 
+**With verification enabled** the `success` event does not write it. The deployment is held as `verifying`, a durable `verify` job evaluates the checks against Prometheus after the warmup and then every interval, and only when the bake time passes without a check breaching enough times in a row does the deployment become `success` and the key get written. A breach streak instead fails the deployment as a `verification_failure` and the decision flow below takes over, with the failed version never having been recorded as good. See [Recovery Policy](../configuration/recovery-policy.md#post-deploy-verification).
+
 ## Failed Deployment
 
 ![Failed deployment sequence: GitHub Actions posts status=failed, the Orchestrator audits, loads state from Redis, increments retry_count, then retries via a workflow re-run, rolls back by patching the Kubernetes Deployment, or alerts, saves state and replies 200 with the action taken](../assets/diagrams/sequence-failed-deployment.svg)
 
 ### The decision rule
 
-After incrementing `retry_count` (the number of failures for this deployment ID), `handle_deployment_failure()` gathers the facts and calls the pure function `decide()` from `src/policy.py`:
+After incrementing `retry_count` (the number of failures for this deployment ID) and the count of this failure type, `handle_deployment_failure()` gathers the facts and calls the pure function `decide()` from `src/policy.py`:
 
 1. **Rule.** The [recovery policy](../configuration/recovery-policy.md) gives the rule for the failure type, from the first matching override or the default. `MAX_RETRIES` caps its retries.
 2. **Diagnosis.** For failures after a deployment, the pods running the failed version and the Deployment are read (`src/diagnosis.py`). A transient cause (`ImagePullBackOff`, `Unschedulable`) leaves the rule alone; a deterministic one (`CrashLoopBackOff`, `OOMKilled`, ...) skips its retries. The diagnosis is stored in the state.
-3. **Decision.** `decide(rule, attempt, can_retry, has_rollback_target, diagnosis)` returns `retry`, `rollback` or `alert` with a reason:
+3. **Decision.** `decide(rule, attempt, can_retry, has_rollback_target, diagnosis)`, where `attempt` counts failures of this type (CORE-19), returns `retry`, `rollback` or `alert` with a reason:
    - A **retry** rule retries while `attempt <= max_attempts`, a `workflow_run_id` is known and the diagnosis is not deterministic. Otherwise it continues with its `then` action (`rollback` or `alert`).
    - A **rollback** needs a previous version that is not the failed version; otherwise the result is an alert (`no_rollback_target`).
    - The decision is audited (`policy_decision`) and counted (`mana_policy_decisions_total`).
@@ -172,7 +174,7 @@ TTL is 24 hours and is refreshed every time the state is saved.
 
 ![Deployment status lifecycle: from no state, a failed webhook leads to retry_scheduled, which repeats, reaches success on a success webhook, or moves to rolling_back when retries are exhausted; rolling_back ends in rolled_back or failed, and alert paths end in failed](../assets/diagrams/state-status-lifecycle.svg)
 
-`in_progress` is written when the `in_progress` webhook arrives and `pending` is never written. A state carries `started_at` (first `in_progress`), `first_failure_at` (first failed attempt) and `finished_at` (first save in a terminal status: `success`, `failed` or `rolled_back`; cleared when a re-run reopens the deployment). States saved before these fields existed still load, with the fields empty. Deployments that are `in_progress`, `retry_scheduled` or `rolling_back` are tracked in the Redis sorted set `mana:active`, scored by start time; entries older than the 24 h state TTL are dropped when it is read.
+`in_progress` is written when the `in_progress` webhook arrives, `verifying` when a success event is held for verification, and `pending` is never written. A state carries `started_at` (first `in_progress`), `first_failure_at` (first failed attempt) and `finished_at` (first save in a terminal status: `success`, `failed` or `rolled_back`; cleared when a re-run reopens the deployment). States saved before these fields existed still load, with the fields empty. Deployments that are `in_progress`, `retry_scheduled` or `rolling_back` are tracked in the Redis sorted set `mana:active`, scored by start time; entries older than the 24 h state TTL are dropped when it is read.
 
 ## Audit Trail
 

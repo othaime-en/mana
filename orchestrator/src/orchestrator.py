@@ -8,7 +8,7 @@ import time
 import requests
 import asyncio
 from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, asdict, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 import redis
 import json
@@ -23,7 +23,9 @@ from src.diagnosis import Diagnosis, diagnose
 from src.guards import Guards
 from src.jobs import Job, JobDeferred, JobQueue, PermanentJobError
 from src.locks import AppLocks
-from src.policy import Action, Decision, Reason, decide, load_policy
+from src.policy import Action, Decision, Policy, PolicySource, Reason, decide
+from src.prometheus import PrometheusClient
+from src.verification import evaluate_checks, failed_checks, update_streaks
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ class DeploymentStatus(Enum):
     ROLLING_BACK = "rolling_back"
     ROLLED_BACK = "rolled_back"
     RETRY_SCHEDULED = "retry_scheduled"
+    VERIFYING = "verifying"
 
 
 class FailureType(Enum):
@@ -50,6 +53,8 @@ class FailureType(Enum):
     HEALTH_CHECK_FAILURE = "health_check_failure"
     SMOKE_TEST_FAILURE = "smoke_test_failure"
     TIMEOUT = "timeout"
+    ROLLOUT_STUCK = "rollout_stuck"
+    VERIFICATION_FAILURE = "verification_failure"
 
 
 NON_ROLLBACK_FAILURES = frozenset({
@@ -61,6 +66,7 @@ ACTIVE_STATUSES = frozenset({
     DeploymentStatus.IN_PROGRESS,
     DeploymentStatus.RETRY_SCHEDULED,
     DeploymentStatus.ROLLING_BACK,
+    DeploymentStatus.VERIFYING,
 })
 
 TERMINAL_STATUSES = frozenset({
@@ -77,6 +83,7 @@ RECENT_PAGE_SIZE = 50
 
 JOB_RETRY_RERUN = "retry_rerun"
 JOB_ROLLBACK = "rollback"
+JOB_VERIFY = "verify"
 LOCK_RETRY_SECONDS = 5.0
 GITHUB_RETRYABLE_CODES = frozenset({403, 409, 429})
 
@@ -145,6 +152,8 @@ class DeploymentState:
     first_failure_at: Optional[float] = None
     finished_at: Optional[float] = None
     diagnosis: Optional[str] = None
+    attempts: Dict[str, int] = field(default_factory=dict)
+    verification: Optional[Dict] = None
 
 
 @dataclass
@@ -199,7 +208,13 @@ class SelfHealingOrchestrator:
             self.health_check_path = cfg.health_check_path
             self.max_app_health_failures = 3  # Allow 3 consecutive app health failures
             self.health_poll_seconds = cfg.health_poll_seconds
-            self.policy = load_policy(cfg.policy_file)
+            self._policy_source = PolicySource(
+                cfg.policy_file, cfg.policy_reload_seconds, self._count_policy_reload
+            )
+            self.prometheus = (
+                PrometheusClient(cfg.prometheus_url, cfg.prometheus_timeout_seconds)
+                if cfg.prometheus_url else None
+            )
             self.lock_ttl = cfg.job_lease_seconds
             slack_webhook_url = cfg.slack_webhook_url
             alert_github_status = cfg.alert_github_status
@@ -220,7 +235,8 @@ class SelfHealingOrchestrator:
             self.health_check_path = '/health'
             self.max_app_health_failures = 3
             self.health_poll_seconds = 5.0
-            self.policy = load_policy()
+            self._policy_source = PolicySource(on_reload=self._count_policy_reload)
+            self.prometheus = None
             self.lock_ttl = 60.0
             slack_webhook_url = None
             alert_github_status = False
@@ -277,6 +293,31 @@ class SelfHealingOrchestrator:
                 "github_integration": bool(self.github_token and self.github_repo)
             }
         )
+    
+    @staticmethod
+    def _count_policy_reload(outcome: str) -> None:
+        metrics.policy_reloads_total.labels(outcome=outcome).inc()
+    
+    @property
+    def policy(self) -> Policy:
+        """The recovery policy in force; picks up a changed policy file"""
+        return self._policy_source.policy
+    
+    @policy.setter
+    def policy(self, value: Policy) -> None:
+        self._policy_source = PolicySource(policy=value)
+    
+    def policy_info(self) -> Dict:
+        """Where the policy comes from and when it was last loaded"""
+        source = self._policy_source
+        return {
+            'file': source.path or None,
+            'reload_seconds': source.reload_seconds,
+            'loaded_at': source.loaded_at,
+            'verification_active': (
+                self.prometheus is not None and self.policy.verification.enabled
+            )
+        }
     
     @property
     def guards(self) -> Guards:
@@ -615,6 +656,184 @@ class SelfHealingOrchestrator:
             version=version
         )
         return StateTransition(state, previous_status)
+    
+    def handle_deployment_success(
+        self,
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        metadata: Optional[Dict] = None
+    ) -> StateTransition:
+        """
+        The pipeline reports success: record it, or hold it for verification first
+
+        Where verification applies the deployment becomes `verifying` and its
+        version is not remembered as a rollback target until the checks pass. A
+        repeated success event for a deployment already verifying, or already
+        successful, changes nothing about its verification.
+        """
+        state = self.get_deployment_state(deployment_id)
+        if state and state.status is DeploymentStatus.VERIFYING:
+            return StateTransition(state, DeploymentStatus.VERIFYING)
+        already_good = state is not None and state.status is DeploymentStatus.SUCCESS
+        if already_good or not self.verification_applies(namespace):
+            return self.record_deployment_succeeded(
+                deployment_id, namespace, deployment_name, version, metadata
+            )
+        return self._begin_verification(
+            state, deployment_id, namespace, deployment_name, version, metadata
+        )
+    
+    def verification_applies(self, namespace: str) -> bool:
+        """Whether a successful deployment in this namespace is verified before it counts"""
+        return self.prometheus is not None and self.policy.verification.applies_to(namespace)
+    
+    def _begin_verification(
+        self,
+        state: Optional[DeploymentState],
+        deployment_id: str,
+        namespace: str,
+        deployment_name: str,
+        version: str,
+        metadata: Optional[Dict]
+    ) -> StateTransition:
+        settings = self.policy.verification
+        previous_status = state.status if state else None
+        if state is None:
+            state = DeploymentState(
+                deployment_id=deployment_id,
+                namespace=namespace,
+                app_name=deployment_name,
+                version=version,
+                status=DeploymentStatus.VERIFYING,
+                previous_version=None,
+                retry_count=0,
+                failure_type=None,
+                timestamp=time.time(),
+                metadata={}
+            )
+        now = time.time()
+        state.status = DeploymentStatus.VERIFYING
+        state.finished_at = None
+        state.verification = {"started_at": now, "evaluations": 0, "streaks": {}, "last": {}}
+        if metadata:
+            state.metadata.update(metadata)
+        self.save_deployment_state(state)
+        self.jobs.enqueue(
+            JOB_VERIFY,
+            {'deployment_id': deployment_id},
+            settings.warmup_seconds,
+            f"{JOB_VERIFY}:{deployment_id}:{int(now)}"
+        )
+        logger.info(
+            f"Verifying {deployment_name} {version} in {namespace}: "
+            f"{settings.warmup_seconds}s warmup, {settings.bake_seconds}s bake"
+        )
+        return StateTransition(state, previous_status)
+    
+    def _run_verify_job(self, job: Job) -> None:
+        """
+        One evaluation round of a deployment's verification
+
+        Progress lives in the deployment state, so any replica can run the next
+        round and a restart loses nothing. The job defers itself until the
+        deployment fails verification or the bake time passes.
+        """
+        state = self._load_state_for_job(job)
+        if not self._job_is_current(job, state):
+            return
+        settings = self.policy.verification
+        info = state.verification or {"started_at": time.time(), "evaluations": 0, "streaks": {}, "last": {}}
+        
+        live = self.get_live_version(state.namespace, state.app_name)
+        if live is not None and live != state.version:
+            self._finish_verification(state, "superseded", {"live_version": live})
+            return
+        if self.prometheus is None or not settings.applies_to(state.namespace):
+            self._finish_verification(state, "skipped")
+            return
+        
+        results = evaluate_checks(
+            settings.checks, self.prometheus, state.namespace, state.app_name, settings.on_missing
+        )
+        for item in results:
+            metrics.verification_checks_total.labels(check=item.name, result=item.result).inc()
+        info["streaks"] = update_streaks(info.get("streaks", {}), results)
+        info["evaluations"] = info.get("evaluations", 0) + 1
+        info["last"] = {item.name: item.detail for item in results}
+        state.verification = info
+        
+        failed = failed_checks(info["streaks"], settings.consecutive_breaches)
+        if failed:
+            self._fail_verification(state, failed, info)
+            return
+        if time.time() - info["started_at"] >= settings.bake_seconds:
+            self._finish_verification(state, "passed", {"evaluations": info["evaluations"]})
+            return
+        self.save_deployment_state(state)
+        raise JobDeferred(settings.interval_seconds)
+    
+    def _finish_verification(
+        self,
+        state: DeploymentState,
+        outcome: str,
+        details: Optional[Dict] = None
+    ) -> None:
+        """
+        End verification without a failure and settle the deployment as successful
+
+        A version that passed (or whose verification was skipped or abandoned)
+        becomes the rollback target. One that was superseded by a newer
+        deployment was never checked in isolation, so it does not.
+        """
+        started = (state.verification or {}).get("started_at")
+        state.status = DeploymentStatus.SUCCESS
+        self.save_deployment_state(state)
+        if outcome != "superseded":
+            self.save_successful_deployment_version(
+                namespace=state.namespace,
+                deployment_name=state.app_name,
+                version=state.version
+            )
+        self._record_verification(state, outcome, started, details)
+    
+    def _fail_verification(self, state: DeploymentState, failed: list, info: Dict) -> None:
+        """A check breached too often in a row: hand the deployment to the policy"""
+        summary = "; ".join(f"{name}: {info['last'].get(name, '')}" for name in failed)
+        self.save_deployment_state(state)
+        self._record_verification(
+            state, "failed", info.get("started_at"), {"checks": failed, "last": info.get("last", {})}
+        )
+        asyncio.run(self.handle_deployment_failure(
+            state.deployment_id,
+            state.namespace,
+            state.app_name,
+            state.version,
+            FailureType.VERIFICATION_FAILURE,
+            {"verification": summary}
+        ))
+    
+    @staticmethod
+    def _record_verification(
+        state: DeploymentState,
+        outcome: str,
+        started: Optional[float],
+        details: Optional[Dict]
+    ) -> None:
+        metrics.verifications_total.labels(namespace=state.namespace, outcome=outcome).inc()
+        if started is not None:
+            metrics.verification_duration_seconds.labels(outcome=outcome).observe(
+                max(time.time() - started, 0)
+            )
+        audit_logger.log_verification_result(
+            deployment_id=state.deployment_id,
+            namespace=state.namespace,
+            deployment_name=state.app_name,
+            version=state.version,
+            outcome=outcome,
+            details=details
+        )
     
     @staticmethod
     def _decode_state(raw: str) -> DeploymentState:
@@ -1123,6 +1342,7 @@ class SelfHealingOrchestrator:
             JOB_RETRY_RERUN: self._run_retry_job,
             JOB_ROLLBACK: self._run_rollback_job,
             JOB_NOTIFY: self._run_notify_job,
+            JOB_VERIFY: self._run_verify_job,
         }
     
     def _job_is_current(self, job: Job, state: Optional[DeploymentState]) -> bool:
@@ -1141,6 +1361,8 @@ class SelfHealingOrchestrator:
             )
         if job.kind == JOB_ROLLBACK:
             return state.status is DeploymentStatus.ROLLING_BACK
+        if job.kind == JOB_VERIFY:
+            return state.status is DeploymentStatus.VERIFYING
         return False
     
     def _load_state_for_job(self, job: Job) -> Optional[DeploymentState]:
@@ -1277,6 +1499,16 @@ class SelfHealingOrchestrator:
         state = self._load_state_for_job(job)
         if state is None:
             return
+        if job.kind == JOB_VERIFY:
+            if self._job_is_current(job, state):
+                self._finish_verification(state, "error")
+                self._notify(
+                    state, "verification_abandoned", "warning",
+                    f"Verification of {state.app_name} {state.version} in {state.namespace} gave up",
+                    f"The verification job failed {job.attempts} times: {error}. The version was "
+                    f"recorded as good without being verified."
+                )
+            return
         if self._job_is_current(job, state):
             state.status = DeploymentStatus.FAILED
             self.save_deployment_state(state)
@@ -1381,8 +1613,12 @@ class SelfHealingOrchestrator:
                 namespace, deployment_name, state.started_at, state.first_failure_at
             )
         
+        if not state.attempts and state.retry_count and state.failure_type:
+            state.attempts = {state.failure_type.value: state.retry_count}
         state.retry_count += 1
         state.failure_type = failure_type
+        attempt = state.attempts.get(failure_type.value, 0) + 1
+        state.attempts[failure_type.value] = attempt
         
         diagnosis = None
         if failure_type not in NON_ROLLBACK_FAILURES:
@@ -1401,7 +1637,7 @@ class SelfHealingOrchestrator:
         workflow_run_id = state.metadata.get('workflow_run_id')
         decision = decide(
             rule,
-            state.retry_count,
+            attempt,
             can_retry=bool(workflow_run_id),
             has_rollback_target=bool(state.previous_version) and state.previous_version != version,
             diagnosis=diagnosis
@@ -1417,7 +1653,7 @@ class SelfHealingOrchestrator:
             deployment_name=deployment_name,
             version=version,
             failure_type=failure_type.value,
-            attempt=state.retry_count,
+            attempt=attempt,
             decision=decision.action.value,
             reason=decision.reason.value,
             detail=decision.detail,
@@ -1426,7 +1662,7 @@ class SelfHealingOrchestrator:
         
         if decision.action is Action.RETRY:
             self._observe_decision(decision_started)
-            return await self._schedule_retry(state, rule.max_attempts, workflow_run_id)
+            return await self._schedule_retry(state, attempt, rule.max_attempts, workflow_run_id)
         
         if decision.action is Action.ROLLBACK:
             paused = await asyncio.to_thread(self._circuit_breaker_reason, state)
@@ -1447,13 +1683,14 @@ class SelfHealingOrchestrator:
     async def _schedule_retry(
         self,
         state: DeploymentState,
+        attempt: int,
         max_attempts: int,
         workflow_run_id: str
     ) -> Dict:
         """Save the retry decision and queue the workflow re-run after its backoff"""
-        backoff_delay = self.calculate_backoff(state.retry_count)
+        backoff_delay = self.calculate_backoff(attempt)
         logger.info(
-            f"Retrying deployment (attempt {state.retry_count}/{max_attempts}) "
+            f"Retrying deployment (attempt {attempt}/{max_attempts}) "
             f"with {backoff_delay}s backoff"
         )
         
@@ -1486,7 +1723,7 @@ class SelfHealingOrchestrator:
             'backoff_seconds': backoff_delay,
             'workflow_run_id': workflow_run_id,
             'message': (
-                f'Retry {state.retry_count}/{max_attempts} scheduled '
+                f'Retry {attempt}/{max_attempts} scheduled '
                 f'in {backoff_delay}s'
             )
         }

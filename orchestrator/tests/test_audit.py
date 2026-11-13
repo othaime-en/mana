@@ -302,6 +302,33 @@ class TestGuardAudit:
         assert event['details'] == {'rollbacks': 3, 'window_seconds': 3600}
 
 
+class TestVerificationAudit:
+    def test_a_passed_verification_is_logged_as_a_success(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_verification_result(
+                'd1', 'production', 'sample-app', 'v2', outcome='passed', details={'evaluations': 9}
+            )
+
+        event = caplog.records[-1].audit_event
+        assert event['action'] == 'verification_result' and event['success'] is True
+        assert event['details'] == {'outcome': 'passed', 'evaluations': 9}
+
+    def test_a_failed_verification_is_logged_as_unsuccessful(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_verification_result(
+                'd1', 'production', 'sample-app', 'v2', outcome='failed', details={'checks': ['error-rate']}
+            )
+
+        event = caplog.records[-1].audit_event
+        assert event['success'] is False and event['details']['checks'] == ['error-rate']
+
+    def test_details_are_optional(self, audit_logger, caplog):
+        with caplog.at_level(logging.INFO):
+            audit_logger.log_verification_result('d1', 'production', 'sample-app', 'v2', outcome='skipped')
+
+        assert caplog.records[-1].audit_event['details'] == {'outcome': 'skipped'}
+
+
 class TestAuditAction:
     """Test audit action enum"""
     

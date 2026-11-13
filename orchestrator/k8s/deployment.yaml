@@ -98,6 +98,10 @@ spec:
           value: "60"
         - name: SHUTDOWN_GRACE_SECONDS
           value: "30"
+        - name: POLICY_FILE
+          value: "/etc/mana/policy.yaml"
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
         - name: WATCHER_ENABLED
           value: "true"
         - name: WATCHER_NAMESPACES
@@ -144,10 +148,16 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        - name: policy
+          mountPath: /etc/mana
+          readOnly: true
       volumes:
       - name: tmp
         emptyDir:
           sizeLimit: 64Mi
+      - name: policy
+        configMap:
+          name: mana-policy
 ---
 apiVersion: v1
 kind: Service

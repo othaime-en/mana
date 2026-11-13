@@ -172,6 +172,32 @@ groups:
           description: "The watcher has failed to list Deployments for 10 minutes, so stuck rollouts without a webhook go unnoticed. Check that the orchestrator Role in each WATCHER_NAMESPACES namespace allows `list` on deployments and that the namespaces exist."
           runbook_url: "https://docs.example.com/runbooks/watcher-scan-failing"
 
+      # Warning: An edited policy file was rejected and the old policy is still in force
+      - alert: PolicyReloadRejected
+        expr: |
+          sum(increase(mana_policy_reloads_total{outcome="rejected"}[10m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "The edited recovery policy was rejected"
+          description: "The orchestrator found a changed policy file that is not valid and kept the policy it was running. Recovery follows the old rules until the file is fixed. The reason is in the orchestrator log (`Policy reload rejected`); compare the file with orchestrator/policy.example.yaml."
+          runbook_url: "https://docs.example.com/runbooks/policy-reload-rejected"
+
+      # Warning: Post-deploy verification cannot query Prometheus
+      - alert: VerificationQueryFailing
+        expr: |
+          sum(increase(mana_verification_checks_total{result="error"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: orchestrator
+        annotations:
+          summary: "Post-deploy verification cannot get an answer from Prometheus"
+          description: "Verification checks have been failing to run for 10 minutes (Prometheus unreachable, a rejected query, or a query that returns more than one series). Deployments are verified without evidence unless the policy's on_missing is `breach`. Check PROMETHEUS_URL, the NetworkPolicy to the monitoring namespace and the check queries in the policy."
+          runbook_url: "https://docs.example.com/runbooks/verification-query-failing"
+
       # Warning: High webhook failure rate
       - alert: HighWebhookFailureRate
         expr: |

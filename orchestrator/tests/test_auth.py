@@ -298,13 +298,14 @@ def delivery_total(outcome):
 
 @pytest.fixture
 def recovery(api):
+    from src.policy import PolicySource
     from tests.fakes import FakeJobQueue, FakeLocks, FakeRedis, retry_policy
 
     jobs = FakeJobQueue()
     with patch.object(api.orchestrator, "redis_client", FakeRedis()), \
          patch.object(api.orchestrator, "jobs", jobs), \
          patch.object(api.orchestrator, "locks", FakeLocks()), \
-         patch.object(api.orchestrator, "policy", retry_policy()), \
+         patch.object(api.orchestrator, "_policy_source", PolicySource(policy=retry_policy())), \
          patch.object(api.orchestrator, "get_previous_version", return_value="v0"):
         yield jobs
 

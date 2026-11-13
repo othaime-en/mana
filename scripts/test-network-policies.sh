@@ -75,7 +75,13 @@ idle() {
     sleep 3600 >/dev/null
 }
 
+prometheus() {
+  kubectl -n "$1" run "$2" --image="$IMAGE" --labels="app.kubernetes.io/name=prometheus" --restart=Never --command -- \
+    sh -c "mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p $3 -h /www" >/dev/null
+}
+
 server production sample-app sample-app 5000
+prometheus monitoring prometheus 9090
 server orchestrator orchestrator orchestrator 8000
 server orchestrator redis redis 6379
 idle orchestrator intruder intruder
@@ -113,6 +119,7 @@ check allow ci-runners client orchestrator orchestrator 8000
 check allow orchestrator orchestrator orchestrator redis 6379
 check allow orchestrator orchestrator production sample-app 5000
 check allow monitoring client production sample-app 5000
+check allow orchestrator orchestrator monitoring prometheus 9090
 
 check deny other client orchestrator orchestrator 8000
 check deny other client production sample-app 5000
@@ -120,6 +127,7 @@ check deny ci-runners client production sample-app 5000
 check deny orchestrator intruder orchestrator redis 6379
 check deny monitoring client orchestrator redis 6379
 check deny production sample-app orchestrator orchestrator 8000
+check deny orchestrator intruder monitoring prometheus 9090
 
 if (( failures > 0 )); then
   echo "${failures} check(s) failed. If every deny check failed, the CNI is not enforcing NetworkPolicy." >&2

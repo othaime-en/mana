@@ -7,14 +7,21 @@ into a decision without touching Redis, Kubernetes or GitHub, so every cell of
 the policy can be tested exhaustively.
 """
 
+import logging
+import os
+import re
+import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Literal, Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from src.diagnosis import Diagnosis
+
+logger = logging.getLogger(__name__)
 
 FAILURE_TYPES = (
     "build_failure",
@@ -23,6 +30,8 @@ FAILURE_TYPES = (
     "health_check_failure",
     "smoke_test_failure",
     "timeout",
+    "rollout_stuck",
+    "verification_failure",
 )
 NON_ROLLBACK_FAILURES = frozenset({"build_failure", "test_failure"})
 
@@ -98,7 +107,7 @@ class Override(_Strict):
     def _check_rules(self) -> "Override":
         if not self.rules:
             raise ValueError("an override needs at least one rule under 'rules'")
-        _check_failure_types(self.rules, require_all=False)
+        _check_failure_types(self.rules)
         return self
 
 
@@ -115,14 +124,78 @@ class CircuitBreaker(_Strict):
     window_seconds: int = Field(default=3600, ge=60)
 
 
-def _check_failure_types(rules: Dict[str, Rule], require_all: bool) -> None:
+PLACEHOLDERS = ("{{namespace}}", "{{app}}")
+
+
+class Check(_Strict):
+    """One PromQL expression that must stay on the right side of a threshold"""
+    name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,39}$")
+    query: str = Field(min_length=1, max_length=2000)
+    max: Optional[float] = None
+    min: Optional[float] = None
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> "Check":
+        if (self.max is None) == (self.min is None):
+            raise ValueError("a check needs exactly one of max and min")
+        if not any(placeholder in self.query for placeholder in PLACEHOLDERS):
+            raise ValueError(
+                f"the query must use {{{{namespace}}}} or {{{{app}}}}, or it measures every application"
+            )
+        return self
+
+    def breached_by(self, value: float) -> bool:
+        return value > self.max if self.max is not None else value < self.min
+
+
+class Verification(_Strict):
+    """
+    Check a deployment against Prometheus before it counts as a rollback target
+
+    After the pipeline reports success the deployment is held in `verifying`.
+    Nothing is evaluated during warmup_seconds, so the old pods' samples leave
+    the rate windows. Then every interval_seconds each check is evaluated; a
+    check that breaches consecutive_breaches times in a row fails the
+    deployment (a verification_failure). If bake_seconds pass without that, the
+    deployment succeeds and its version becomes the rollback target.
+    """
+    enabled: bool = False
+    namespaces: List[str] = Field(default_factory=lambda: ["production"], min_length=1)
+    warmup_seconds: int = Field(default=60, ge=0, le=3600)
+    bake_seconds: int = Field(default=180, ge=10, le=7200)
+    interval_seconds: int = Field(default=15, ge=1, le=600)
+    consecutive_breaches: int = Field(default=3, ge=1, le=50)
+    on_missing: Literal["ignore", "breach"] = "ignore"
+    checks: List[Check] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_timing_and_checks(self) -> "Verification":
+        if self.warmup_seconds >= self.bake_seconds:
+            raise ValueError("warmup_seconds must be less than bake_seconds")
+        window = self.bake_seconds - self.warmup_seconds
+        if (self.consecutive_breaches - 1) * self.interval_seconds > window:
+            raise ValueError(
+                "consecutive_breaches evaluations do not fit between warmup and bake, "
+                "so a failure could never be reached"
+            )
+        names = [check.name for check in self.checks]
+        if len(set(names)) != len(names):
+            raise ValueError("check names must be unique")
+        if self.enabled and not self.checks:
+            raise ValueError("verification is enabled but lists no checks")
+        for namespace in self.namespaces:
+            if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", namespace):
+                raise ValueError(f"invalid namespace: {namespace!r}")
+        return self
+
+    def applies_to(self, namespace: str) -> bool:
+        return self.enabled and namespace in self.namespaces
+
+
+def _check_failure_types(rules: Dict[str, Rule]) -> None:
     unknown = sorted(set(rules) - set(FAILURE_TYPES))
     if unknown:
         raise ValueError(f"unknown failure type(s) {unknown}; valid: {list(FAILURE_TYPES)}")
-    if require_all:
-        missing = [name for name in FAILURE_TYPES if name not in rules]
-        if missing:
-            raise ValueError(f"the default policy must cover every failure type; missing {missing}")
     for name, rule in rules.items():
         if name in NON_ROLLBACK_FAILURES and rule.rolls_back():
             raise ValueError(
@@ -131,17 +204,29 @@ def _check_failure_types(rules: Dict[str, Rule], require_all: bool) -> None:
 
 
 class Policy(_Strict):
+    """The recovery policy; failure types missing from `default` use the built-in rule"""
     version: int = Field(default=1)
     default: Dict[str, Rule]
     overrides: List[Override] = Field(default_factory=list)
     rollback: RollbackSettings = Field(default_factory=RollbackSettings)
     circuit_breaker: CircuitBreaker = Field(default_factory=CircuitBreaker)
+    verification: Verification = Field(default_factory=Verification)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_default_rules(cls, data):
+        """A file written before a failure type existed keeps working: the built-in rule fills the gap"""
+        if isinstance(data, dict):
+            given = data.get("default")
+            if given is None or isinstance(given, dict):
+                return {**data, "default": {**DEFAULT_POLICY["default"], **(given or {})}}
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> "Policy":
         if self.version != 1:
             raise ValueError(f"unsupported policy version {self.version}; expected 1")
-        _check_failure_types(self.default, require_all=True)
+        _check_failure_types(self.default)
         return self
 
     def rule_for(self, namespace: str, app: str, failure_type: str) -> Rule:
@@ -161,6 +246,8 @@ DEFAULT_POLICY: Dict = {
         "health_check_failure": {"action": "rollback"},
         "smoke_test_failure": {"action": "rollback"},
         "timeout": {"action": "retry", "max_attempts": 1, "then": "rollback"},
+        "rollout_stuck": {"action": "rollback"},
+        "verification_failure": {"action": "rollback"},
     },
 }
 
@@ -230,3 +317,89 @@ def decide(
 
     return Decision(action, reason, detail)
 
+
+class PolicySource:
+    """
+    The policy in force, reloaded when its file changes
+
+    A reload that fails validation keeps the policy that was running and is
+    reported through on_reload("rejected"), so a bad edit can neither crash a
+    running orchestrator nor silently change its behaviour. The file is checked
+    at most every reload_seconds (0 turns reloading off). A mounted ConfigMap
+    changes by swapping a symlink, which stat() follows, so the file's inode,
+    size and modification time identify a change.
+    """
+
+    def __init__(
+        self,
+        path: str = "",
+        reload_seconds: float = 5.0,
+        on_reload: Optional[Callable[[str], None]] = None,
+        *,
+        policy: Optional[Policy] = None,
+        clock: Callable[[], float] = time.monotonic
+    ):
+        self._path = "" if policy is not None else path
+        self._interval = reload_seconds
+        self._on_reload = on_reload
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._policy = policy if policy is not None else load_policy(path)
+        self._signature = self._stat()
+        self._checked = clock()
+        self.loaded_at = time.time()
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @property
+    def reload_seconds(self) -> float:
+        return self._interval
+
+    @property
+    def policy(self) -> Policy:
+        self._refresh()
+        return self._policy
+
+    def _stat(self) -> Optional[Tuple[int, int, int]]:
+        if not self._path:
+            return None
+        try:
+            status = os.stat(self._path)
+        except OSError:
+            return None
+        return status.st_mtime_ns, status.st_size, status.st_ino
+
+    def _refresh(self) -> None:
+        if not self._path or self._interval <= 0:
+            return
+        if self._clock() - self._checked < self._interval:
+            return
+        with self._lock:
+            if self._clock() - self._checked < self._interval:
+                return
+            try:
+                self._reload_if_changed()
+            finally:
+                self._checked = self._clock()
+
+    def _reload_if_changed(self) -> None:
+        signature = self._stat()
+        if signature is None or signature == self._signature:
+            return
+        self._signature = signature
+        try:
+            reloaded = load_policy(self._path)
+        except PolicyError as error:
+            logger.error("Policy reload rejected, keeping the policy in force: %s", error)
+            self._report("rejected")
+            return
+        self._policy = reloaded
+        self.loaded_at = time.time()
+        logger.info("Policy reloaded from %s", self._path)
+        self._report("loaded")
+
+    def _report(self, outcome: str) -> None:
+        if self._on_reload:
+            self._on_reload(outcome)

@@ -5,6 +5,7 @@ Configuration management for orchestrator
 import logging
 import os
 import re
+from urllib.parse import urlparse
 from typing import Any, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -58,6 +59,10 @@ class OrchestratorConfig:
     alert_github_status: bool = True
     
     policy_file: str = ''
+    policy_reload_seconds: float = 5.0
+    
+    prometheus_url: str = ''
+    prometheus_timeout_seconds: float = 5.0
     health_poll_seconds: float = 5.0
     
     watcher_enabled: bool = False
@@ -123,6 +128,11 @@ class OrchestratorConfig:
             
             # Recovery policy
             policy_file=os.getenv('POLICY_FILE', ''),
+            policy_reload_seconds=float(os.getenv('POLICY_RELOAD_SECONDS', '5')),
+            
+            # Prometheus, for post-deploy verification
+            prometheus_url=os.getenv('PROMETHEUS_URL', '').strip(),
+            prometheus_timeout_seconds=float(os.getenv('PROMETHEUS_TIMEOUT_SECONDS', '5')),
             health_poll_seconds=float(os.getenv('HEALTH_POLL_SECONDS', '5')),
             
             # Cluster-side detection of stuck rollouts
@@ -204,6 +214,19 @@ class OrchestratorConfig:
             for name in names:
                 if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name):
                     raise ValueError(f"WATCHER_NAMESPACES has an invalid namespace: {name!r}")
+        
+        if self.prometheus_timeout_seconds <= 0:
+            raise ValueError("prometheus_timeout_seconds must be > 0")
+        
+        if self.prometheus_url:
+            parsed = urlparse(self.prometheus_url)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+                raise ValueError("PROMETHEUS_URL must be an http or https URL")
+            if parsed.username or parsed.password:
+                raise ValueError("PROMETHEUS_URL must not contain credentials")
+        
+        if self.policy_reload_seconds < 0:
+            raise ValueError("policy_reload_seconds must be >= 0")
         
         if self.policy_file and not os.path.isfile(self.policy_file):
             raise ValueError(f"POLICY_FILE not found: {self.policy_file}")

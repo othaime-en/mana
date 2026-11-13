@@ -142,13 +142,22 @@ class TestStuckRollout:
     def test_a_healthy_deployment_gives_nothing(self):
         assert stuck_rollout(deployment(), "production", NOW, 120) is None
 
-    def test_a_digest_pinned_image_cannot_be_tracked(self):
-        pinned = deployment(image="registry/app@sha256:abc", **self.stalled)
+    DIGEST = "sha256:" + "ab12cd34ef56" + "0" * 52
 
-        assert stuck_rollout(pinned, "production", NOW, 120) is None
+    def test_a_digest_pinned_image_is_named_by_a_short_digest(self):
+        pinned = deployment(image=f"registry/app@{self.DIGEST}", **self.stalled)
 
-    def test_an_untagged_image_cannot_be_tracked(self):
-        assert stuck_rollout(deployment(image="registry/app", **self.stalled), "production", NOW, 120) is None
+        assert stuck_rollout(pinned, "production", NOW, 120).version == "sha256:ab12cd34ef56"
+
+    def test_an_untagged_image_is_named_latest(self):
+        untagged = deployment(image="registry/app", **self.stalled)
+
+        assert stuck_rollout(untagged, "production", NOW, 120).version == "latest"
+
+    def test_a_tag_wins_over_a_digest(self):
+        both = deployment(image=f"registry/app:v2@{self.DIGEST}", **self.stalled)
+
+        assert stuck_rollout(both, "production", NOW, 120).version == "v2"
 
     def test_an_ambiguous_container_cannot_be_tracked(self):
         containers = [NS(name="a", image="r/a:v1"), NS(name="b", image="r/b:v1")]
@@ -230,7 +239,7 @@ class TestHandle:
         assert handled is True
         state = orch.get_deployment_state("watch-production-sample-app-g2")
         assert state.status is DeploymentStatus.ROLLING_BACK
-        assert state.failure_type is FailureType.TIMEOUT
+        assert state.failure_type is FailureType.ROLLOUT_STUCK
         assert state.metadata["detected_by"] == "watcher"
         assert state.metadata["generation"] == "2"
         (job,) = orch.jobs.of_kind("rollback")
@@ -291,11 +300,31 @@ class TestHandle:
         assert await watcher_for(orch).handle(rollout()) is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", ["sha256:ab12cd34ef56", "latest"])
+    async def test_a_rollout_that_cannot_be_matched_to_a_tag_alerts_instead_of_being_ignored(self, orch, version):
+        orch.get_live_version = Mock(return_value=None)
+
+        handled = await watcher_for(orch).handle(rollout(version=version))
+
+        assert handled is True
+        state = orch.get_deployment_state("watch-production-sample-app-g2")
+        assert state.status is DeploymentStatus.FAILED
+        assert orch.jobs.of_kind("rollback") == []
+
+    @pytest.mark.asyncio
+    async def test_a_pipeline_timeout_keeps_its_own_rule(self, orch):
+        await orch.handle_deployment_failure(
+            "d1", "production", "sample-app", "v2", FailureType.TIMEOUT, {"workflow_run_id": "9"}
+        )
+
+        assert orch.get_deployment_state("d1").status is DeploymentStatus.RETRY_SCHEDULED
+
+    @pytest.mark.asyncio
     async def test_the_policy_can_decide_to_alert_instead(self, orch):
         from src.policy import DEFAULT_POLICY, Policy
 
         orch.policy = Policy.model_validate({**DEFAULT_POLICY, "default": {
-            **DEFAULT_POLICY["default"], "timeout": {"action": "alert"}}})
+            **DEFAULT_POLICY["default"], "rollout_stuck": {"action": "alert"}}})
 
         await watcher_for(orch).handle(rollout())
 

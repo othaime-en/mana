@@ -1,5 +1,6 @@
 """The recovery path driven by the policy: fast rollback, diagnosis, fallbacks"""
 
+import json
 import logging
 import time
 from types import SimpleNamespace as NS
@@ -310,3 +311,177 @@ class TestRollbackVerification:
                 orch.check_deployment_health(NS_NAME, "sample-app", timeout=30)
 
         sleep.assert_called_once_with(2.5)
+
+
+class TestAttemptsPerFailureType:
+    """A rule's max_attempts counts failures of its own type (CORE-19)"""
+
+    @pytest.mark.asyncio
+    async def test_another_type_does_not_use_up_the_attempts(self, orch):
+        results = [
+            await fail(orch, FailureType.BUILD_FAILURE),
+            await fail(orch, FailureType.DEPLOYMENT_FAILURE),
+            await fail(orch, FailureType.DEPLOYMENT_FAILURE),
+        ]
+
+        assert [r["action"] for r in results] == ["retry", "retry", "rollback"]
+
+    @pytest.mark.asyncio
+    async def test_the_state_keeps_both_the_total_and_the_per_type_counts(self, orch):
+        await fail(orch, FailureType.BUILD_FAILURE)
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        state = orch.get_deployment_state("d1")
+
+        assert state.retry_count == 3
+        assert state.attempts == {"build_failure": 1, "deployment_failure": 2}
+
+    @pytest.mark.asyncio
+    async def test_the_backoff_and_message_follow_the_type_not_the_total(self, orch):
+        orch.policy = retry_policy(attempts=3)
+        await fail(orch, FailureType.BUILD_FAILURE)
+
+        result = await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        assert result["backoff_seconds"] == orch.initial_backoff
+        assert result["message"].startswith("Retry 1/3")
+        assert result["retry_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_policy_decision_audits_the_attempt_of_its_type(self, orch, caplog):
+        await fail(orch, FailureType.BUILD_FAILURE)
+
+        with caplog.at_level(logging.INFO):
+            await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        decision = [r for r in caplog.records if "AUDIT: policy_decision" in r.getMessage()][-1]
+        assert decision.audit_event["details"]["attempt"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_state_saved_before_attempts_existed_is_backfilled(self, orch):
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+        state = orch.get_deployment_state("d1")
+        state.attempts = {}
+        state.retry_count = 1
+        orch.save_deployment_state(state)
+
+        second = await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        assert second["action"] == "rollback"
+        assert orch.get_deployment_state("d1").attempts == {"deployment_failure": 2}
+
+    @pytest.mark.asyncio
+    async def test_a_backfilled_state_does_not_charge_a_new_type_for_old_failures(self, orch):
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+        state = orch.get_deployment_state("d1")
+        state.attempts = {}
+        orch.save_deployment_state(state)
+
+        result = await fail(orch, FailureType.BUILD_FAILURE)
+
+        assert result["action"] == "retry"
+        assert orch.get_deployment_state("d1").attempts == {"deployment_failure": 1, "build_failure": 1}
+
+    def test_an_old_state_document_without_attempts_loads(self, orch):
+        raw = json.dumps({
+            "deployment_id": "d1", "namespace": "production", "app_name": "sample-app", "version": "v2",
+            "status": "failed", "previous_version": "v1", "retry_count": 2,
+            "failure_type": "deployment_failure", "timestamp": 1.0, "metadata": {},
+        })
+
+        state = orch._decode_state(raw)
+
+        assert state.attempts == {} and state.retry_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_rerun_keeps_the_per_type_counts(self, orch):
+        await fail(orch, FailureType.DEPLOYMENT_FAILURE)
+
+        orch.record_deployment_started("d1", NS_NAME, "sample-app", "v2")
+
+        assert orch.get_deployment_state("d1").attempts == {"deployment_failure": 1}
+
+
+class TestPolicyInTheOrchestrator:
+    def test_assigning_a_policy_replaces_the_source(self, orch):
+        orch.policy = retry_policy(attempts=4)
+
+        assert orch.policy.rule_for("production", "app", "deployment_failure").max_attempts == 4
+        assert orch.policy_info()["file"] is None
+
+    def test_a_policy_file_is_followed_while_the_orchestrator_runs(self, orch, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text(json.dumps(DEFAULT_POLICY))
+        now = [0.0]
+        orch._policy_source = PolicySource(str(path), 5.0, orch._count_policy_reload, clock=lambda: now[0])
+        before = counter("mana_policy_reloads_total", outcome="loaded")
+        rejected = counter("mana_policy_reloads_total", outcome="rejected")
+
+        edited = {**DEFAULT_POLICY, "default": {**DEFAULT_POLICY["default"], "health_check_failure": {"action": "alert"}}}
+        path.write_text(json.dumps(edited) + " ")
+        now[0] = 10
+        assert orch.policy.rule_for("production", "app", "health_check_failure").action.value == "alert"
+
+        path.write_text("default: [")
+        now[0] = 20
+        assert orch.policy.rule_for("production", "app", "health_check_failure").action.value == "alert"
+
+        assert counter("mana_policy_reloads_total", outcome="loaded") == before + 1
+        assert counter("mana_policy_reloads_total", outcome="rejected") == rejected + 1
+
+    @pytest.mark.asyncio
+    async def test_a_reloaded_policy_governs_the_next_failure(self, orch, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text(json.dumps(DEFAULT_POLICY))
+        now = [0.0]
+        orch._policy_source = PolicySource(str(path), 5.0, clock=lambda: now[0])
+        assert (await fail(orch, FailureType.HEALTH_CHECK_FAILURE, "d1"))["action"] == "rollback"
+
+        edited = {**DEFAULT_POLICY, "default": {**DEFAULT_POLICY["default"], "health_check_failure": {"action": "alert"}}}
+        path.write_text(json.dumps(edited) + " ")
+        now[0] = 10
+
+        assert (await fail(orch, FailureType.HEALTH_CHECK_FAILURE, "d2"))["action"] == "alert"
+
+    def test_the_policy_info_names_the_file_and_the_reload_interval(self, orch, tmp_path):
+        from src.policy import PolicySource
+
+        path = tmp_path / "policy.yaml"
+        path.write_text(json.dumps(DEFAULT_POLICY))
+        orch._policy_source = PolicySource(str(path), 7.5)
+
+        info = orch.policy_info()
+
+        assert info["file"] == str(path) and info["reload_seconds"] == 7.5
+        assert info["loaded_at"] == pytest.approx(time.time(), abs=5)
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("http://prometheus.test:9090", "http://prometheus.test:9090/api/v1/query"),
+    ("", None),
+])
+def test_the_prometheus_url_decides_whether_the_orchestrator_has_a_client(monkeypatch, url, expected):
+    from src.config import OrchestratorConfig
+
+    monkeypatch.setenv("PROMETHEUS_URL", url)
+    monkeypatch.setenv("PROMETHEUS_TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("WEBHOOK_SECRET", "w" * 40)
+    monkeypatch.setenv("API_KEY", "k" * 40)
+    config = OrchestratorConfig.from_env()
+
+    with patch("src.orchestrator.redis.Redis"), \
+         patch("src.orchestrator.k8s_config.load_kube_config"), \
+         patch("src.orchestrator.client.AppsV1Api"), \
+         patch("src.orchestrator.client.CoreV1Api"), \
+         patch("src.orchestrator.get_config", return_value=config):
+        instance = SelfHealingOrchestrator(use_config=True)
+
+    if expected is None:
+        assert instance.prometheus is None
+    else:
+        assert instance.prometheus._url == expected and instance.prometheus._timeout == 2.5

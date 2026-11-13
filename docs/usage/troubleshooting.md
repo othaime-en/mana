@@ -314,6 +314,21 @@ No. It reacts to webhooks from your pipeline. A Deployment that breaks on its ow
 **What does MANA roll back to?**
 The version in `last_successful:<namespace>:<app>` (the last `success` webhook). If that is missing, it uses the second-newest ReplicaSet that has a `version` label.
 
+**A deployment stays `verifying`.**
+That is the [verification](../configuration/recovery-policy.md#post-deploy-verification) bake time: the deployment becomes `success` only after `bake_seconds` without a check breaching `consecutive_breaches` times in a row. `GET /deployment/<id>` shows `verification` with the evaluations so far, the breach streaks and what each check last saw. If `evaluations` stays 0 after the warmup, the verify job is not running: look at `mana_scheduler_pending_jobs` and `SchedulerStalled`.
+
+**A deployment was rolled back by verification, but the app looked fine.**
+The `verification_result` audit event and `verification.last` in the state name the check and the value (`0.2 > 0.05`). Check that the query measures what you mean (`{{namespace}}` and `{{app}}` scope it; remember a rate window still holds the old pods' samples for a minute, which is what `warmup_seconds` is for), and that the threshold suits the traffic: an idle app can produce a noisy ratio from a few requests. Raise `consecutive_breaches` or the threshold in the policy; the change applies within `POLICY_RELOAD_SECONDS`.
+
+**Deployments are verified but nothing is ever checked.**
+`mana_verification_checks_total{result="error"}` or `{result="missing"}` is growing. `error`: Prometheus cannot be reached (`PROMETHEUS_URL`, the orchestrator's NetworkPolicy to the `monitoring` namespace on 9090), rejects the query, or the query returns more than one series (aggregate it). `missing`: the query returns no data, usually an idle app or a label that does not match; run the query in Prometheus with the namespace and app substituted. With `on_missing: ignore` neither counts as a breach, so the deployment passes on no evidence; `VerificationQueryFailing` alerts on persistent errors.
+
+**I edited the policy and nothing changed.**
+The orchestrator keeps the policy in force when the new file is invalid: look for `Policy reload rejected` in its log (and the `PolicyReloadRejected` alert) for the reason. Otherwise the mounted ConfigMap can take about a minute to reach the pod, and then up to `POLICY_RELOAD_SECONDS` to be noticed. `GET /config` shows when the policy was last loaded.
+
+**The orchestrator pods stay in `ContainerCreating`.**
+The Deployment mounts the `mana-policy` ConfigMap: apply `orchestrator/k8s/policy-configmap.yaml`.
+
 **Do I need GitHub for rollbacks?**
 No. GitHub (`GITHUB_TOKEN`, `GITHUB_REPO`) is only used to re-run workflows for retries.
 

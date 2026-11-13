@@ -15,6 +15,7 @@ RECOVERY_BUCKETS = (5, 10, 20, 30, 45, 60, 90, 120, 300, 600, 1800)
 DECISION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
 HEALTH_CHECK_BUCKETS = (1, 5, 10, 30, 60, 120, 300, 600)
 DETECTION_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 1200, 1800)
+VERIFICATION_BUCKETS = (15, 30, 60, 120, 180, 300, 600, 1800, 3600)
 
 deployments_total = Counter(
     'deployments_total',
@@ -83,6 +84,27 @@ watcher_detections_total = Counter(
     'mana_watcher_detections_total',
     'Stuck rollouts the watcher found and sent through the recovery policy',
     ['namespace', 'reason']
+)
+policy_reloads_total = Counter(
+    'mana_policy_reloads_total',
+    'Reloads of the policy file after it changed (loaded) or was rejected as invalid (rejected)',
+    ['outcome']
+)
+verifications_total = Counter(
+    'mana_verifications_total',
+    'Post-deploy verifications by how they ended (passed, failed, superseded, skipped, error)',
+    ['namespace', 'outcome']
+)
+verification_checks_total = Counter(
+    'mana_verification_checks_total',
+    'Evaluations of one verification check by result (ok, breach, missing, error)',
+    ['check', 'result']
+)
+verification_duration_seconds = Histogram(
+    'mana_verification_duration_seconds',
+    'Seconds a deployment was held in verification',
+    ['outcome'],
+    buckets=VERIFICATION_BUCKETS
 )
 health_check_duration_seconds = Histogram(
     'health_check_duration_seconds',

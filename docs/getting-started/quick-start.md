@@ -51,6 +51,7 @@ kubectl create secret generic github-token \
 
 kubectl apply -f orchestrator/k8s/rbac.yaml
 kubectl apply -f orchestrator/k8s/redis.yaml
+kubectl apply -f orchestrator/k8s/policy-configmap.yaml
 kubectl apply -f orchestrator/k8s/deployment.yaml
 kubectl apply -f sample-app/k8s/ -n production
 
